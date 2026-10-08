@@ -1,0 +1,46 @@
+08  SERVER HARDENING
+
+WHAT
+  The server runs with as little power as it can. The reference setup is in deploy/ and docs/INSTALL.md.
+    - No open ports. The server binds 127.0.0.1 only. A tunnel makes the outbound connection to
+      the edge, so the host needs no inbound rule at all; a default-drop inbound firewall is
+      advised. The internet can reach only /mcp and the OAuth pages, through the tunnel.
+    - Root-owned, read-only code. The application directory belongs to root; the service user
+      can read it and cannot change it. Only the OAuth state directory and the watcher's .state
+      directory are writable (ReadWritePaths with ProtectSystem=strict). A bug or a hijacked
+      process cannot rewrite the code that will run at the next start.
+    - The venv's Python is run directly (ExecStart is .venv/bin/python main.py), not through uv.
+      Nothing re-syncs or writes under the code tree at start.
+    - UMask=0077, so files the service creates (the OAuth state) are private to its user.
+    - A sandbox drop-in (deploy/gorelo-mcp.service.d/10-sandbox.conf): no devices, no kernel log,
+      no clock or hostname changes, hidden /proc of other users, only IPv4/IPv6/Unix sockets, no
+      new namespaces, no realtime, native syscalls only, a system-call filter, an empty
+      capability set, no writable-and-executable memory. One setting per line, so any single
+      one that breaks in your container can be removed alone.
+    - NoNewPrivileges, PrivateTmp, ProtectHome, ProtectKernel*, RestrictSUIDSGID in the unit.
+    - The watcher gets only the API key. Its environment file (/etc/gorelo-mcp/watcher.env,
+      root-owned, mode 0600) holds GORELO_API_KEY and nothing else. The OAuth password and the
+      public URL are deliberately not given to it.
+    - Pinned dependencies. pyproject.toml pins exact versions and uv.lock pins the tree; a test
+      pins the lock file's hashes. The login gate refuses to start on a fastmcp or mcp version it
+      was not checked against.
+    - Unattended upgrades with Debian's default configuration (security fixes and stable
+      point-release updates, no automatic reboot) are part of INSTALL step 1.2. They are a host
+      setting, not something this repository can enforce.
+    - The log never holds client data: parameter names only, and a filter trims framework logs.
+
+WHY
+  The process holds a Gorelo key and talks to the internet through a tunnel. Each measure
+  removes one way for a single mistake to become a large one: a dependency that changes
+  under you, a writable code tree, a leaked file mode, a watcher that could expose the password.
+
+WHAT IT COSTS
+  Deploys are deliberate: root updates the tree and the venv, then restarts. A sandbox option
+  can break an unusual host and has to be tuned. Pinning means you must test and bump
+  dependencies yourself.
+
+WHERE IN THE CODE
+  deploy/gorelo-mcp.service and .service.d/10-sandbox.conf, deploy/gorelo-changelog-watch.*,
+  deploy/watcher.env.example; docs/INSTALL.md; main.py (HOST, PORT);
+  server.py (LogValueFilter); oauth_guard.py (check_framework_versions);
+  tests/test_deploy_units.py, tests/test_hygiene.py.

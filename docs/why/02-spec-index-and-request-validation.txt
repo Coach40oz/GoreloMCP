@@ -1,0 +1,45 @@
+02  A SPEC INDEX AND CHECKING EVERY REQUEST BEFORE IT IS SENT
+
+WHAT
+  Gorelo publishes its API as an OpenAPI spec at a public URL. A script (scripts/spec_snapshot.py)
+  turns it into a compact index, spec/spec_index.json: every operation, its path parameters, query
+  parameters, request body fields, types, required lists and enums. Before the client sends any
+  request, it checks the request against that index:
+    - the operation (method and path) must exist;
+    - path ids must be the right type (uuid or integer) and are sent in canonical form;
+    - every query parameter name must exist for that operation, even ones the caller left unset;
+    - every body field must exist, with the exact casing, and each value must have the right shape;
+    - a tool may only call operations it declared.
+  A failed check raises an error that names the tool parameter to fix, and no HTTP call is made.
+  The same rule holds for answers: if what comes back is not a Gorelo envelope with a boolean
+  IsSuccess, the client raises a "shape" error instead of returning an empty list.
+
+WHY
+  Gorelo's API rejects unknown query parameters and unknown body fields with a generic 400, and
+  its unknown-body-field error cannot say which field was wrong. Guessing is expensive on a
+  live tenant. Checking locally gives a precise message to the AI model, which can then correct
+  itself in the same turn.
+  The more important reason is silence. Early versions of this kind of tool failed quietly: a
+  response shape changed and a list tool returned zero rows, or a default was invented and wrote
+  the wrong value. "Fail loudly, no invented defaults" is a standing rule: omitted means
+  unchanged, clearing needs an explicit option, and a datetime without a UTC offset is refused
+  rather than assumed. A tool reports only what Gorelo's answer says, never what the caller
+  expected (delete_invoice reads StatusId from the answer).
+
+WHAT IT COSTS
+  The index must be refreshed whenever Gorelo publishes a new spec, and the code must follow it.
+  When the published spec is wrong, the server is wrong in the same way until production
+  behavior is probed and recorded (see ../API-OBSERVED-BEHAVIOR.md). A mismatch between the
+  index and production is exactly the kind of thing only a live call can show.
+  The checks add a little code to every tool and many tests.
+
+WHERE IN THE CODE
+  scripts/spec_snapshot.py   Builds spec/spec_index.json and the contract hash.
+  scripts/spec_diff.py       Compares two indexes.
+  spec.py                    SpecIndex, load_spec_index, normalize_query, validate_body,
+                             validate_path_param, SpecViolation.
+  gorelo_client.py           GoreloClient.request runs the checks in order; _check_declared,
+                             _check_path_unchanged, _interpret (envelope check).
+  server.py                  build_server calls _verify_ops: a tool that declares an operation
+                             not in the index stops the server from starting.
+  tools/_common.py           build_body, positive_id, guid, utc_iso, region_code.

@@ -1,0 +1,52 @@
+07  A LIVE TEST HARNESS WITH A GUARD
+
+WHAT
+  Offline tests use mocked HTTP. They cannot show how production really behaves, so there is
+  also a live harness in scripts/live/ that runs real calls (smoke checks, a write matrix) against
+  a real Gorelo tenant. Its safety is a request guard, LiveGuard, which is an httpx event hook
+  on every request the harness sends. Each request is parsed and matched to a spec operation,
+  then checked against an allowlist BEFORE it leaves the process:
+    - reads are allowed, except the invoice PDF export (it records an event);
+    - writes are allowed only against the one configured test client (and a second one for
+      email-area tests), and deletes only for records created by this very run;
+    - never agent assets, never contracts, never the test client itself, never the forbidden
+      operations; e-mail goes only to one configured operator contact and address;
+    - bodies must be single JSON objects with only spec fields; anything unparseable is blocked.
+  Every record the run creates is written to a manifest (an intent before the call, the id right
+  after, then the cleanup outcome), so a crashed run can be cleaned up. Test records are named
+  with a MCPTEST- prefix and use example.invalid addresses.
+  Your own ids stay out of git: they live in site.local.toml, which is git-ignored. Copy
+  site.example.toml and fill in your test client, operator contact and user. Without it the
+  harness refuses to run; there are no defaults to fall back on. The example file itself, and
+  any value left at the placeholder, are refused too.
+  The keys are per consumer. The changelog watcher needs only [watcher] alert_client_id. The
+  harness needs the [clients] ids AND the exact client names (test_client_name,
+  second_client_name). Before any write, and in the smoke run, it reads each configured client
+  from Gorelo and stops (exit 2, "cannot start: client N is named X, site config says Y")
+  unless the Name matches exactly. Ids copied from another tenant therefore cannot write anywhere.
+  The email area moves its ticket to a named status. That name is tenant data, so it is not
+  fixed in the code: the optional key [harness] updated_status of site.local.toml sets it
+  (default "In Progress"), and the run stops before sending any email when the tenant has no
+  status of exactly that name.
+
+WHY
+  Live checks are the only way to find where production differs from the spec, and that has
+  happened repeatedly. But a live API holds real client data, and a test bug must not be able
+  to send an email to a customer or delete a record. A guard that sits below the tools, and
+  that does not trust them, is the backstop for any mistake above it. Per-tenant ids are
+  personal data of a kind, so they are configuration, not source.
+
+WHAT IT COSTS
+  You need a spare Gorelo client to use as a test client. The write matrix is slow (requests
+  are paced one second apart) and the approved-invoice area is run only on purpose, because the
+  invoice it creates reaches the accounting system and cannot be taken back there. The guard
+  has to be updated for every new write operation, which is friction by design.
+
+WHERE IN THE CODE
+  scripts/live/guard.py          LiveGuard, the allowlist rules, _NEVER (by shape).
+  scripts/live/manifest.py       Manifest, Record, Intent.
+  scripts/live/cleanup.py        Cleanup from a manifest.
+  scripts/live/write_matrix.py   The write matrix; scripts/live/smoke.py the read-only smoke run.
+  scripts/site_config.py         Reads site.local.toml (keys per consumer). site.example.toml is the template.
+  scripts/live/guard.py          also holds verify_site_clients, the name check described above.
+  tests/test_live_guard.py       Offline tests for the guard.

@@ -1,0 +1,38 @@
+[Unit]
+Description=Gorelo MCP Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gorelo-mcp
+Group=gorelo-mcp
+WorkingDirectory=/opt/gorelo-mcp/app
+# Root:gorelo-mcp 0640. systemd reads it as root; main.py reads it again as the service user through the group.
+EnvironmentFile=/opt/gorelo-mcp/app/.env
+# The code tree is root-owned and read-only to the service, so Python must not try to write bytecode into it.
+Environment=PYTHONDONTWRITEBYTECODE=1
+# The venv's Python directly: no uv at start, so nothing re-syncs the venv and nothing writes under the code tree.
+ExecStart=/opt/gorelo-mcp/app/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+# Files the service creates (the OAuth state) are private to its user.
+UMask=0077
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# The only places the service may write. Both directories must exist before the start (status 226/NAMESPACE otherwise).
+ReadWritePaths=/opt/gorelo-mcp/app/.oauth-state /opt/gorelo-mcp/app/.state
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,46 @@
+06  A DAILY WATCHER FOR API CHANGES
+
+WHAT
+  A small script, scripts/watch_gorelo_changelog.py, runs once a day from a systemd timer. It does
+  two checks:
+    1. It reads Gorelo's public changelog (feedback.gorelo.io) and flags new entries that look
+       API related.
+    2. It downloads the live OpenAPI spec, computes a "contract hash" and compares it with the
+       hash stored in spec/spec_index.json. The hash ignores descriptions, summaries and
+       examples, so wording changes do not trigger it, but a new field or operation does.
+  For each new change it saves a report (a readable diff of the spec) and posts ONE alert to
+  Gorelo itself (POST /v1/alerts), against a client you choose, so your team sees it where it
+  already works. The same change never alerts twice. The first run only records a baseline.
+
+WHY
+  The API has changed with no notice outside the changelog, and a quiet change here means a
+  quiet failure. In July
+  2026 most list endpoints moved to a cursor envelope, announced only as a changelog post. A
+  list tool returned only the first page of results, with nothing to say so. Later in 2026 the
+  response envelope changed its key casing (camelCase to PascalCase); the exact day was not
+  recorded, and the server built for the older shape read zero rows from paged lists and
+  failed on unpaged ones until it was rewritten for the new one (see ../API-OBSERVED-BEHAVIOR.md).
+  Gorelo's status page does not track the public API, so nothing else would have said so.
+  Two subtleties shaped the design:
+    - The spec renders slightly differently from one fetch to the next. For example, on
+      2026-10-08 every path and query parameter suddenly stated its serialization style
+      (simple for path, form for query), which are the defaults. A byte-level comparison would
+      raise a false alarm, so the comparison is on a normalized contract, and a parameter style
+      or explode value that equals the OpenAPI default for its location is dropped before the
+      spec is indexed and hashed (normalize_spec in scripts/spec_snapshot.py). Both renderings
+      therefore give the same contract hash.
+    - An unchanged spec hash does not mean unchanged behavior. Production sometimes differs from
+      the spec (see the observed-behavior record), so a hash match is not proof of safety; the
+      live test harness (07) exists for that.
+
+WHAT IT COSTS
+  The watcher needs a Gorelo API key that can create alerts, and it makes outbound requests
+  daily. It can only tell you the spec changed, not whether your tools still work. It is a
+  tripwire, not a test. A person still has to read the report and update the code.
+
+WHERE IN THE CODE
+  scripts/watch_gorelo_changelog.py   The watcher, exit codes, state under .state/.
+  scripts/spec_snapshot.py            contract_sha256 and the index builder.
+  scripts/spec_diff.py                The report.
+  deploy/gorelo-changelog-watch.service, .timer, watcher.env.example
+  tests/test_watch_changelog.py

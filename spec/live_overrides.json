@@ -1,0 +1,100 @@
+{
+  "description": [
+    "Live overrides of spec/spec_index.json, applied by spec.load_spec_index() when it loads the index.",
+    "spec/spec_index.json mirrors Gorelo's published OpenAPI spec exactly and is never edited by hand. When a live write matrix showed that the published spec was wrong about two operations, the loader swapped them. Gorelo then published the live operations (contract e15cb5a18ec2, 2026-10-02), so replace_ops is empty today and the two entries sit in the retired section below with their evidence, kept as history.",
+    "replace_ops maps the published operation key to the live one. The live operation takes the request body and the response of the published one, and the path parameter types the published spec gives the same path on its other operations. The published operation key is removed from the loaded index. An empty replace_ops is valid: the loader then applies nothing.",
+    "retired is history only: the loader ignores it and nothing reads it. An entry moves there when the published spec catches up, keyed by its live operation key, as an object with exactly these keys: retired_on (YYYY-MM-DD), reason (text), published_as (the operation key the published index has for it now), replaced (the published key the override stood in for) and evidence (the old evidence, unchanged), so the dated probes stay on record.",
+    "When the published spec catches up with an active override (spec/spec_index.json itself contains a live operation key) spec.load_spec_index() and tests/test_live_overrides.py fail on purpose: re-verify the live API, then drop the entry (and its evidence), move it to retired with the five keys listed above, and point the tools and tests at the published operations.",
+    "A hash check of the published spec cannot detect this kind of drift: only live calls can. Live facts that are not operations (response shapes and business rules) are listed in docs/API-OBSERVED-BEHAVIOR.md."
+  ],
+  "replace_ops": {},
+  "evidence": {},
+  "retired": {
+    "PATCH /v1/clients/{id}": {
+      "retired_on": "2026-10-02",
+      "reason": "Published in contract e15cb5a18ec2 as PATCH /v1/clients/{clientId} (id typed int64, body UpdateClientCommand without Id, answer ClientResponse). The collection form PATCH /v1/clients is gone from the published spec.",
+      "published_as": "PATCH /v1/clients/{clientId}",
+      "replaced": "PATCH /v1/clients",
+      "evidence": {
+        "verified_on": "2026-10-02",
+        "replaces": "PATCH /v1/clients",
+        "published_spec_sha256": "7e5bd5415de2952728c31bfd35f8f4d3f5835a156861aa3c5c34f906b297cfe7",
+        "probes": [
+          {
+            "date": "2026-10-01",
+            "request": "PATCH /v1/clients",
+            "status": 200,
+            "note": "Worked: a partial update with the client Id in the body (docs/API-OBSERVED-BEHAVIOR.md, entry 6)."
+          },
+          {
+            "date": "2026-10-02",
+            "request": "PATCH /v1/clients",
+            "status": 405,
+            "note": "Allow: GET, POST."
+          },
+          {
+            "date": "2026-10-02",
+            "request": "PATCH /v1/clients/{id} with an AlternateName-only body",
+            "status": 200,
+            "note": "Still a partial update: BillingName was kept."
+          },
+          {
+            "date": "2026-10-02",
+            "request": "PATCH /v1/clients/{id} with and without Id in the body",
+            "status": 200,
+            "note": "Both bodies are accepted."
+          },
+          {
+            "date": "2026-10-02",
+            "request": "PATCH /v1/clients/{id} for a client that does not exist",
+            "status": 404,
+            "note": "A missing client is a 404."
+          }
+        ],
+        "notes": [
+          "The override loaded the published UpdateClientCommand, which listed Id as required; the live API accepted the body without Id. The published UpdateClientCommand of contract e15cb5a18ec2 has no Id, and update_client sends none."
+        ]
+      }
+    },
+    "PATCH /v1/contacts/{id}": {
+      "retired_on": "2026-10-02",
+      "reason": "Published in contract e15cb5a18ec2 as PATCH /v1/contacts/{contactId} (id typed int64, body UpdateContactCommand without ContactId, answer ContactResponse). The collection form PATCH /v1/contacts is gone from the published spec.",
+      "published_as": "PATCH /v1/contacts/{contactId}",
+      "replaced": "PATCH /v1/contacts",
+      "evidence": {
+        "verified_on": "2026-10-02",
+        "replaces": "PATCH /v1/contacts",
+        "published_spec_sha256": "7e5bd5415de2952728c31bfd35f8f4d3f5835a156861aa3c5c34f906b297cfe7",
+        "probes": [
+          {
+            "date": "2026-10-01",
+            "request": "PATCH /v1/contacts",
+            "status": 200,
+            "note": "Worked: a full-body command that replaced the contact (docs/API-OBSERVED-BEHAVIOR.md, entry 6)."
+          },
+          {
+            "date": "2026-10-02",
+            "request": "PATCH /v1/contacts",
+            "status": 405,
+            "note": "Allow: GET, POST."
+          },
+          {
+            "date": "2026-10-02",
+            "request": "PATCH /v1/contacts/{id} without PrimaryEmail or ClientId",
+            "status": 400,
+            "note": "Still a full-body command: the required fields must be sent."
+          },
+          {
+            "date": "2026-10-02",
+            "request": "PATCH /v1/contacts/{id} with and without ContactId in the body",
+            "status": 200,
+            "note": "Both bodies are accepted."
+          }
+        ],
+        "notes": [
+          "The override loaded the published UpdateContactCommand, which listed ContactId as required; the live API accepted the body without ContactId. The published UpdateContactCommand of contract e15cb5a18ec2 has no ContactId, and update_contact sends none."
+        ]
+      }
+    }
+  }
+}

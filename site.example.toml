@@ -1,0 +1,43 @@
+# Copy to site.local.toml (git-ignored) and fill in the values of YOUR Gorelo tenant.
+# GORELO_SITE_CONFIG=<path> points at another file. This file itself is refused, and so is any value left equal to the
+# placeholder below. No required key has a default: a missing file or required key makes the tools refuse to run (the keys marked optional below may be left out).
+#
+# Which tool needs which keys:
+#   live harness (scripts/live/*: smoke, write_matrix, cleanup, probes)  every section except [watcher]
+#   changelog watcher (scripts/watch_gorelo_changelog.py)               [watcher] alert_client_id only
+# A watcher-only install can hold just the [watcher] section.
+#
+# Before the harness writes anything it reads each configured client from Gorelo and stops (exit 2) unless the client's
+# Name is exactly the name given here. That catches ids that belong to another tenant.
+
+[clients]
+test_client = 999999001                          # a client you own for throwaway test data; the harness writes only here and to second_client
+test_client_name = "Example Test Client"    # the exact Name Gorelo shows for test_client
+second_client = 999999002                        # a second client you own; the email-area ticket is filed here
+second_client_name = "Example Second Client"   # the exact Name Gorelo shows for second_client
+
+[operator]
+contact_id = 999999100            # the one contact of second_client that may receive test emails
+user_id = 999999200               # your own Gorelo user id (the only assignee, watcher or time-entry user the harness uses)
+email = "you@example.com"    # the one real address the harness may send to (side conversation recipient)
+
+[leftovers]
+client_ids = []    # old probe clients the cleanup script may delete (names are still checked); [] for none
+contact_ids = []   # old probe contacts the cleanup script may delete; [] for none
+# Optional name rules, checked against the record before it is deleted. A key you leave out means no rule of that kind:
+# then only the listed ids count. Replace these neutral samples with your own, or delete the lines.
+client_name_contains = ["REMOVE-ME"]     # a listed client is deleted only if its Name contains one of these (case sensitive)
+contact_first_name = "Example"           # a listed contact is deleted only if its FirstName equals this exactly
+contact_last_name_prefix = "Old-"       # ... and its LastName starts with this
+
+[harness]
+# Optional. The ticket status the write matrix moves its email-area ticket to. A status of exactly this name must exist in
+# your tenant (list_ticket_statuses). Without this key the harness uses "In Progress".
+# updated_status = "In Progress"
+
+[hosts]
+public_host = "mcp.example.com"   # host of your MCP server; its OAuth metadata URL is the uptime check target
+probe_domain = "example.com"      # uptime checks may only target this domain or a subdomain of it
+
+[watcher]
+alert_client_id = 999999002   # client the changelog watcher files its Gorelo alert against (the only key the watcher reads)
