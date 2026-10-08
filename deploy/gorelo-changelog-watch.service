@@ -1,0 +1,34 @@
+[Unit]
+Description=Check Gorelo's changelog and API spec for API changes
+Documentation=https://feedback.gorelo.io/changelog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=gorelo-mcp
+Group=gorelo-mcp
+WorkingDirectory=/opt/gorelo-mcp/app
+# Only what the watcher needs: GORELO_API_KEY (see watcher.env.example). Root-owned, mode 0600, outside the app tree;
+# systemd reads it as root. The app .env (MCP_AUTH_PASSWORD, PUBLIC_BASE_URL) is deliberately not given to the watcher.
+EnvironmentFile=/etc/gorelo-mcp/watcher.env
+# The code tree is root-owned and read-only to the unit, so Python must not try to write bytecode into it.
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/gorelo-mcp/app/.venv/bin/python scripts/watch_gorelo_changelog.py --quiet
+# Exit codes of the script: 0 nothing new, 1 API change (a Gorelo alert was posted; the unit is left failed so
+# systemctl --failed shows it too), 2 news that is not about the API (not a failure), 3 the check itself failed.
+SuccessExitStatus=2
+StandardOutput=journal
+StandardError=journal
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/gorelo-mcp/app/.state
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true

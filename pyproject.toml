@@ -1,0 +1,11 @@
+[project]
+name = "gorelo-mcp"
+version = "1.0.0"
+description = "Self-hosted MCP server that gives Claude tools for the Gorelo PSA Public API"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp[auth]==3.2.4",
+    "httpx==0.28.1",
+    "python-dotenv==1.2.2",
+]

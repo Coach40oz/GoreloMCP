@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily check of Gorelo's changelog for API changes
+
+[Timer]
+OnCalendar=daily
+# A random delay of up to 30 minutes spreads the daily request.
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

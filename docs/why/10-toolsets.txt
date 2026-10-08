@@ -1,0 +1,34 @@
+10  TOOLSETS, AND WHY PROJECTS AND FORMS ARE OFF BY DEFAULT
+
+WHAT
+  Tools are grouped into toolsets: core, tickets, time, billing, uptime, projects and forms.
+  GORELO_TOOLSETS chooses which are registered (a comma list, or all). The default is
+  core, tickets, time, billing, uptime. projects and forms are off. An unknown name stops the
+  start with an error that lists the valid ones. With the defaults the server registers 58
+  tools; with all toolsets 81 (more with the gated tools, see 03).
+
+WHY
+  Three reasons.
+    1. Gorelo API keys carry per-area scopes. A key without the Project or Forms scope gets an
+       HTTP 403 (notification code 080203) on those tools. Registering tools that cannot work
+       gives a model more to choose from and more ways to fail.
+    2. Context size. Every registered tool is described to the model in every conversation. A
+       smaller list is cheaper and less confusing (see 09).
+    3. Least privilege. Project and form tools can change work the typical help desk does not
+       touch. You opt in when you have decided to let an assistant do it, and you scope the key
+       to match.
+  Projects had a further reason: when the code was written the API key used for live testing had no Project
+  scope, so those tools could only be tested offline. They follow the published spec text and
+  are less proven against live behavior than the others.
+
+WHAT IT COSTS
+  A user who wants a project tool has to ask the operator to enable it and widen the API key.
+  The model will say a tool does not exist rather than offer it, until the toolset is on.
+
+WHERE IN THE CODE
+  settings.py             TOOLSETS, DEFAULT_TOOLSETS, GORELO_TOOLSETS.
+  tools/_common.py        Registry.select.
+  server.py               build_server; build_instructions adds a rule for each enabled
+                          projects or forms toolset.
+  tools/projects.py, tools/project_tasks.py, tools/forms.py
+  docs/tool-catalog.md    Which tool is in which toolset.

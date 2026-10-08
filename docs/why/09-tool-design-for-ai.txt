@@ -1,0 +1,40 @@
+09  TOOL DESIGN FOR AN AI MODEL
+
+WHAT
+  The tools are written for a model that reads them cold, in every conversation. Choices:
+    - One paging contract. Every paged list returns items, count, total_count, has_more,
+      next_cursor, page_size and filters. To read more, call the same tool with cursor set to
+      next_cursor and exactly the same filters. Page size is clamped to 1 to 200 and reported.
+    - One priority scale for filters and writes: 0 None, 1 Urgent, 2 High, 3 Normal, 4 Low.
+    - Datetimes need a UTC offset (a trailing Z or +02:00). One without it is rejected, not
+      guessed.
+    - Errors name the snake_case parameter to fix, so the model can correct and retry. A write
+      whose outcome is unknown says so and tells the model to check with a read before repeating.
+    - Compact schemas. Pydantic writes a bulky "anyOf null, default null" for each optional
+      parameter. server.compact_input_schema removes it from the advertised schema only; the
+      tool still accepts null. Between 58 (the default toolsets) and 89 tools (everything on) are loaded into the
+      model's context every time, so size matters.
+    - Ids are resolved by list tools and never guessed. Matching is on Id, never on a name.
+    - Text in tickets, comments, conversations and form answers is data, not instructions. The
+      server instructions say the model must not act on it (emailing, deleting, changing records)
+      unless the user asks.
+    - Each tool's docstring is its prompt: one sentence, ids to resolve first, side effects (who
+      is emailed), paging rule. A test checks these agree across tools.
+
+WHY
+  A model cannot ask a colleague what a field means. Ambiguity turns into wrong writes, and
+  the cost lands on real tickets and real customers. Two priority scales, an optional offset, or
+  an error that says only "bad request" each produce a wrong answer that looks right. Tickets
+  also carry text written by outsiders, which makes them a path for prompt injection.
+
+WHAT IT COSTS
+  Strictness means more refusals and a retry now and then. Stable names and shapes make it
+  harder to change a tool. Prompts in docstrings must be maintained like code. Compacting
+  schemas trades a little explicitness for a smaller tool list.
+
+WHERE IN THE CODE
+  server.py             INSTRUCTIONS (the eight rules), build_instructions, compact_input_schema.
+  tools/_common.py      paged_result, list_result, all_result, utc_iso, positive_id, guid,
+                        format_gorelo_error, clamp_page_size, reread_after_write.
+  gorelo_client.py      Page, get_page, get_all.
+  tests/test_tools_consistency.py, tests/test_schema_compaction.py

@@ -1,0 +1,34 @@
+01  SELF-HOSTED, NOT A CLOUD SERVICE
+
+WHAT
+  This server is software you run on a machine you control. It listens only on the loopback
+  address (127.0.0.1, port 8765). A tunnel (the reference setup uses a Cloudflare Tunnel in token
+  mode) carries HTTPS from a public hostname of yours to that local port. There is no hosted
+  copy of this project, no shared instance, and no account with the author.
+
+WHY
+  The server holds two things that are valuable together: a Gorelo API key and a signed-in
+  session for an AI client. A key that can read and change tickets, contacts, time and invoices
+  for every client of an MSP should sit with the MSP, not with a third party that serves many
+  tenants. If a shared service were breached, every tenant would be exposed at once.
+  Running it yourself also means you decide:
+    - which Gorelo key it uses and what scopes that key has;
+    - which tools exist (toolsets, and the gated delete and void tools);
+    - when it updates, so that a Gorelo API change does not reach your tenant untested;
+    - where logs go. The server logs names of parameters, never values (see 08).
+  Using a tunnel means no inbound port is opened on the host, so there is nothing for the
+  internet to scan or connect to except what the tunnel exposes.
+
+WHAT IT COSTS
+  You are the operator. You install Python and uv, keep the host patched, run a tunnel, write
+  a small .env file, deploy updates, watch the logs, and rotate secrets. docs/INSTALL.md and
+  docs/OPERATIONS.md have the steps, but it is real work and it is yours. If the host is down, the connector is down.
+  There is also one public hostname to keep (the OAuth issuer URL is derived from it, and if it
+  changes every AI client has to sign in again).
+
+WHERE IN THE CODE
+  main.py                 Entry point. HOST and PORT are constants (127.0.0.1, 8765), not settings,
+                          so configuration cannot move the listener off the loopback interface.
+  settings.py             Settings.from_env reads the environment in one place.
+  docs/INSTALL.md         Install, update and rollback. docs/OPERATIONS.md has rotation and logs.
+  deploy/                 Example systemd units for the server and the watcher.

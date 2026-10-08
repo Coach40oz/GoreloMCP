@@ -1,0 +1,47 @@
+03  FORBIDDEN OPERATIONS AND GATED OPERATIONS
+
+WHAT
+  Three levels, from strictest to loosest.
+  1. Forbidden: never callable. DELETE on clients, contacts, tickets, agent assets, custom assets
+     and contracts, and POST /v1/api-keys. No tool may declare them and the client refuses them
+     with no HTTP call.
+  2. Gated: the delete and void tools (comments, time entries, uptime checks, items, invoices,
+     project tasks and comments) and create_approved_invoice. They are not registered at all
+     unless the operator sets GORELO_ENABLE_DESTRUCTIVE. Even then, each call needs confirm=true
+     (a real boolean; the text "true" or the number 1 do not count) and the refusal says what
+     would happen. The AI model is told to ask the user before setting confirm.
+  3. Everything else: ordinary reads and writes.
+  Not exposed: POST and DELETE /v1/payments (no tool; the live guard refuses them). They are
+  accounting data that reaches the connected system.
+  Invoices get extra care. create_invoice can only make a Draft (it has no status or recipient
+  parameter). An Approved invoice is pushed to the connected accounting system at once, and
+  voiding it later through the Gorelo API does not reach that system. On 2026-10-04 the copy in
+  Xero was still open minutes after a void. So creating an approved invoice is its own gated
+  tool, and the delete_invoice text says the user must void the accounting copy by hand.
+
+WHY
+  A deleted client or ticket may be recoverable in the Gorelo app, but an AI model acting on a
+  misread instruction should not be one call away from it. Deleting an agent asset uninstalls
+  the RMM agent from the host. POST /v1/api-keys mints a new credential, which would let a
+  confused or manipulated model grow its own access. These operations are not worth the risk for
+  what an MSP assistant needs, so they cannot be reached even by accident or by editing a tool.
+  The gate is "off by default, then confirm" because two independent switches are harder to
+  trip: the operator opts in once, and every call still needs a deliberate yes.
+
+WHAT IT COSTS
+  You cannot delete a client or ticket through this server, even when you want to. Do it in
+  the Gorelo app. With the gate off, cleanup of mistakes (a wrong time entry, a stray comment)
+  also needs the app. With it on, each delete takes an extra confirmation round trip.
+
+WHERE IN THE CODE
+  gorelo_client.py   FORBIDDEN_OPS, is_forbidden_op, normalize_op_key, _check_not_forbidden.
+                     Matching is by SHAPE (every {placeholder} reads the same), because Gorelo
+                     renamed placeholders (id became clientId) on 2026-10-02 and an exact-text
+                     match would have silently stopped protecting.
+                     SIDE_EFFECT_GETS and is_side_effect_get: the invoice PDF export.
+  server.py          _verify_ops refuses to start if a tool declares a forbidden operation.
+  tools/_common.py   Registry.select (gated tools only when destructive is on),
+                     _require_confirm_parameter, require_confirm.
+  tools/invoices.py  create_invoice, create_approved_invoice, delete_invoice.
+  settings.py        GORELO_ENABLE_DESTRUCTIVE.
+  tests/test_integration.py  Every spec operation is declared, forbidden or deliberately excluded.

@@ -1,0 +1,27 @@
+# Virtual env + caches
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets / runtime state (should NEVER be committed)
+.env
+.oauth-state/
+
+# Logs
+*.log
+
+# Editor backups
+*.bak
+*.bak.*
+
+# Watcher state (runtime, not source)
+.state/
+
+# Live harness run manifests (ids and labels of what a live run created)
+.live-runs/
+
+# Site-specific values (client ids, contact, hosts); see site.example.toml
+site.local.toml
+
+# Local additions to the site config
+site.local.toml*

@@ -1,0 +1,35 @@
+04  TICKET COMMENTS ARE PRIVATE BY DEFAULT
+
+WHAT
+  A ticket comment has a conversation type: 1 Public, 2 Private, 3 Side Conversation,
+  4 Approval. When the caller does not say, this server uses 2, Private. Who gets emailed:
+    Public (1)             the ticket contact and the CCs.
+    Private (2)            nobody.
+    Side conversation (3)  the recipients of that side conversation.
+    Approval (4)           the approvers of that approval.
+  Creating a side conversation or an approval sends nothing by itself. Email goes out when a
+  comment is posted into it. Related: creating a ticket with SendTicketCreatedEmail true emails
+  the contact, so that option is explicit and described in the tool text.
+  The server instructions tell the model to say who will be emailed before posting anything
+  that is not Private. Approvers must be contacts carrying an approver tag, which can only be
+  set in the Gorelo app; the API has no way to set it.
+
+WHY
+  A comment sent to a customer cannot be recalled. A private note that should have been public
+  costs one extra step; a public note that should have been private can leak internal opinion,
+  a password hint or a wrong diagnosis to a client. The failure modes are not symmetric, so the
+  default is the safe side. The same reasoning applies to who gets mailed: the model must state
+  it, so the human can stop the call.
+
+WHAT IT COSTS
+  A model that forgets to set the type will write an internal note when a reply to the customer
+  was intended. The technician sees this quickly (nothing arrives) and can ask again with Public.
+  It is a deliberate bias toward "no email".
+
+WHERE IN THE CODE
+  tools/conversations.py     Module docstring and the comment tools. The conversation type
+                             mapping (ConversationTypeId) and the default of Private.
+  server.py                  INSTRUCTIONS, rule 5 (who a comment emails).
+  tools/project_tasks.py     The same rule for task and project comments (task comments other
+                             than Private put the task in a waiting-on-contact state).
+  docs/API-OBSERVED-BEHAVIOR.md        Where production differed from the published spec.
