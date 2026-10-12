@@ -1,6 +1,6 @@
 # Gorelo MCP server
 
-A self-hosted server that lets Claude (on claude.ai) work with your Gorelo PSA. You run it on a small Linux server of your own. Claude connects to it through a custom connector and gets tools for tickets, clients, contacts, assets, time entries, invoices and uptime checks, using the Gorelo Public API (`https://api.usw.gorelo.io/v1`). Projects and forms are available as optional extras. Your Gorelo API key stays on your server and is sent only to Gorelo's API.
+A self-hosted server that lets Claude (on claude.ai) work with your Gorelo PSA. You run it on a small Linux server of your own. Claude connects to it through a custom connector and gets tools for tickets, clients, contacts, assets (including custom assets), time entries, invoices and uptime checks, using the Gorelo Public API (`https://api.usw.gorelo.io/v1`). Projects and forms are available as optional extras. Your Gorelo API key stays on your server and is sent only to Gorelo's API.
 
 ## What you can ask Claude to do
 
@@ -8,15 +8,20 @@ A self-hosted server that lets Claude (on claude.ai) work with your Gorelo PSA. 
 - "Create a ticket for Acme: the office printer is offline. Assign it to Dana and set it to Normal priority."
 - "Add a private note to ticket 1234 saying I called the client and left a voicemail."
 - "Log 45 minutes on ticket 1234 as remote support."
+- "Add a custom asset for Acme: the reception printer, serial number ABC123, at the main office."
 - "List the contacts at Acme and tell me which ones have no phone number."
 - "Draft an invoice for Acme with two hours of remote support and one monthly backup item."
 - "Which of my uptime checks are failing right now?"
 - "Run health_check and tell me if the Gorelo connection is fine."
 
+## What's new
+
+Version 1.1.0 adds custom assets (list, create, update) and follows Gorelo's API description of 2026-10-12. See [CHANGELOG.md](CHANGELOG.md).
+
 ## What it does not do, and how it stays safe
 
 - Delete and void tools are switched off by default. If you switch them on, every call still needs an explicit `confirm=true`.
-- Some operations can never be called, even with everything switched on: deleting clients, contacts, tickets, agent assets, custom assets and contracts, and creating API keys.
+- Some operations can never be called, even with everything switched on: deleting clients, contacts, tickets, agent assets, custom assets and contracts, and creating or revoking API keys.
 - Ticket comments are private by default and email nobody. Claude is told to say who will be emailed before it posts anything public.
 - Invoices created by the normal tool are always Drafts. Creating an Approved invoice is one of the switched-off tools.
 - Every request is checked against Gorelo's published API description before it is sent, so a mistyped field is refused locally.
@@ -42,6 +47,7 @@ A self-hosted server that lets Claude (on claude.ai) work with your Gorelo PSA. 
 
 | File | What it is for |
 |---|---|
+| [CHANGELOG.md](CHANGELOG.md) | What changed in each release. |
 | [docs/INSTALL.md](docs/INSTALL.md) | Step-by-step install from a blank Debian 13 server. |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Day-to-day tasks: health, logs, rotating secrets, backups. |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom, cause and fix. |

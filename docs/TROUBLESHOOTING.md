@@ -24,6 +24,7 @@ journalctl -u gorelo-mcp.service --since "30 minutes ago" --no-pager
 | Tool error `HTTP 403 ... does not have the 'Project' scope` (or `Forms`) | The Gorelo key lacks that scope. | Grant the scope on the key in Gorelo, or remove that toolset. |
 | Tool error `Gorelo is rate limiting requests (HTTP 429)` | Too many requests to Gorelo. | Wait a minute and repeat. See "Gorelo errors". |
 | Tool error `unexpected response shape; refusing to guess` | Gorelo changed its API. | Run `health_check`; look for a new release (INSTALL step 9) and check the watcher. |
+| Tool error `Phone number is not valid for the specified country code` | Gorelo checks that a number is a real one for the region. A fictional number such as 5555550142 (area code 555) is refused for region `US`. | Use a real number with a real area code, for example 2025550142, and the two-letter region (`US`). |
 | Tool error saying Gorelo did not confirm a write | A timeout or error after sending a change. It may or may not have been applied. | Check with a read (ask Claude to look the record up) before repeating it. |
 | The journal shows `ip=127.0.0.1` on `authorize outcome=` lines | The server does not see the visitor's real address, so the password limits count everyone together. | See "The journal shows ip=127.0.0.1" below. |
 | A delete, void or `create_approved_invoice` tool does not exist | The destructive switch is off (the default). | See INSTALL step 8.2 if you really need it. |

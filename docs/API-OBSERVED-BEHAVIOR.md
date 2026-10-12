@@ -188,7 +188,43 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
   rendering noise does not raise a false alarm
   (`docs/why/06-api-watcher.txt`).
 
-## 19. Smaller items
+## 19. Phone validation became stricter (2026-10-12)
+
+- Spec said: nothing new; the spec did not change.
+- Production did: a fictional national number in area code 555 (5555550142) with region `US`, which
+  was accepted before, is now refused with "Phone number is not valid for the specified country
+  code", on a client location phone and on a contact mobile phone. A 555-01xx number in a real
+  area code (2025550142) is accepted.
+- This server: it does not validate numbers itself and passes Gorelo's refusal on; the live test
+  harness now uses a number in a real area code.
+
+## 20. Behavior changed only in description text (2026-10-12)
+
+- Spec said: besides the operations it added (custom assets, API keys), the 2026-10-12 spec changed
+  existing operations only in their descriptions. The create-ticket description now says `SendTicketCreatedEmail` and `IsUnread` are ignored when
+  `CreatedOn` or `ClosedOn` is set (a backdated import), and that backdated records send no emails
+  or notifications. Contact lists can include temporary contacts (no client; contact status 3,
+  Temporary).
+- Production did: not re-tested; the spec text is the source.
+- This server: `create_ticket` refuses `send_created_email=true` or `is_unread=true` together with
+  `created_on` or `closed_on`, so a request cannot promise an email that will not be sent. The tool
+  texts for backdated tickets, comments, projects and tasks say no emails or notifications are
+  sent. `scripts/spec_diff.py` now also lists description changes, because a change like this
+  would otherwise not show in a diff.
+
+## 21. Custom assets (2026-10-12)
+
+- Spec said: `POST /v1/assets/custom`, `PATCH /v1/assets/custom/{customAssetId}`, a list and a
+  hardware-types list; no read of one custom asset and no delete the server uses.
+- Production did: create, update, and clearing the description, IP address and warranty date work
+  as published (clearing the contact and the serial number was not tried live). A PATCH that names another client as `ClientId` is a 400 and
+  moves nothing, so the client of a custom asset cannot be changed. There is no read of a single
+  custom asset. A custom asset created through the API cannot be deleted through this server.
+- This server: `create_custom_asset` and `update_custom_asset` read the result back through the
+  list. `update_custom_asset` needs the asset's current `client_id` and clears fields only through
+  `clear_fields`. Delete stays forbidden.
+
+## 22. Smaller items
 
 - A null in a ticket PATCH counts as absent: a request with only `{"LeadAssigneeId": null}` is a 400
   ("must contain at least one field"), so nulls cannot clear ticket fields (2026-10-01).
