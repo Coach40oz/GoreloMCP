@@ -7,7 +7,18 @@ OLD and NEW may each be a raw swagger JSON file (for example
 backups/swagger-20260726-184500.json) or a spec index (spec/spec_index.json);
 a file is treated as an index when it has a top-level "ops" key. Raw specs are
 normalised through spec_snapshot.build_index, so only API shape is compared:
-descriptions, summaries and examples are ignored.
+descriptions, summaries and examples are ignored by the shape comparison.
+
+Description changes: when BOTH inputs are raw swagger files, the report ends with a
+"Description changes" section that lists every description and summary text that
+differs between OLD and NEW on an operation, parameter, response, request body or
+schema property present in both (OLD and NEW text, path like
+/components/schemas/CreateTicketCommand/properties/CreatedOn/description). The shape
+comparison cannot see these texts, yet they state behavior ("Ignored when CreatedOn
+or ClosedOn is supplied"), so read them. An index has no descriptions: when either
+input is an index the section says it was not compared. It never changes the exit
+status: a description-only difference still exits 0 (the contract hashes match), and
+the report lists the texts.
 
 Exit status: 0 if the two are identical, or differ only in descriptions,
 summaries, examples or formatting (proved by the contract hash, see below); 1 if
@@ -1041,13 +1052,122 @@ def _unrecorded_lines(result: DiffResult, old: dict[str, Any], new: dict[str, An
     return lines
 
 
+# --------------------------------------------------------------------------
+# Description changes (raw swagger inputs only)
+# --------------------------------------------------------------------------
+
+_TEXT_KEYS = ("description", "summary")
+
+
+def collect_texts(spec: dict[str, Any]) -> tuple[dict[str, str], set[str]]:
+    """(texts, nodes) of a raw swagger document: every description and summary text under `paths` and `components.schemas`,
+    keyed by its JSON path (for example /components/schemas/CreateTicketCommand/properties/CreatedOn/description,
+    /paths//v1/tickets/post/summary, /paths//v1/contacts/get/parameters[4]/description), and the path of every object and
+    list that holds them (the node a text belongs to, for example /paths//v1/tickets/post)."""
+    found: dict[str, str] = {}
+    nodes: set[str] = set()
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            nodes.add(path)
+            for key, value in node.items():
+                child = f"{path}/{key}"
+                if key in _TEXT_KEYS and isinstance(value, str):
+                    found[child] = value
+                else:
+                    walk(value, child)
+        elif isinstance(node, list):
+            nodes.add(path)
+            for position, value in enumerate(node):
+                walk(value, f"{path}[{position}]")
+
+    paths = spec.get("paths")
+    if isinstance(paths, dict):
+        walk(paths, "/paths")
+    components = spec.get("components")
+    schemas = components.get("schemas") if isinstance(components, dict) else None
+    if isinstance(schemas, dict):
+        walk(schemas, "/components/schemas")
+    return found, nodes
+
+
+@dataclass
+class DescriptionChanges:
+    """The description and summary texts that changed between two raw swagger files.
+
+    available  False when an input is a spec index (it holds no descriptions): nothing was compared.
+    changes    (path, OLD text, NEW text), sorted by path, only for operations and schemas that exist in both."""
+
+    available: bool
+    changes: list[tuple[str, str, str]] = field(default_factory=list)
+
+
+def diff_descriptions(old_spec: dict[str, Any] | None, new_spec: dict[str, Any] | None) -> DescriptionChanges:
+    """Compare the description and summary texts of two raw swagger documents (None stands for an index: not available).
+
+    Only an EXISTING operation, parameter, response, body or schema property is compared: a text whose node (the operation,
+    parameter, response or property that holds it) exists on one side only belongs to something added or removed, which the
+    shape sections report, and is skipped. On a node present in both, a changed text is listed, and so is a text that was added
+    or dropped (the missing side is shown as empty)."""
+    if old_spec is None or new_spec is None:
+        return DescriptionChanges(available=False)
+    (old_texts, old_nodes), (new_texts, new_nodes) = collect_texts(old_spec), collect_texts(new_spec)
+    changes = []
+    for path in sorted(set(old_texts) | set(new_texts)):
+        node = path.rsplit("/", 1)[0]
+        if node not in old_nodes or node not in new_nodes:
+            continue
+        before, after = old_texts.get(path), new_texts.get(path)
+        if before != after:
+            changes.append((path, before if before is not None else "", after if after is not None else ""))
+    return DescriptionChanges(available=True, changes=changes)
+
+
+def _fenced(text: str) -> list[str]:
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return [fence + "text", text.rstrip("\n"), fence]
+
+
+def description_lines(found: DescriptionChanges) -> list[str]:
+    out = ["", f"## Description changes ({len(found.changes)})" if found.available else "## Description changes", ""]
+    if not found.available:
+        out.append(
+            "Not compared: descriptions and summaries are only available when both inputs are raw swagger "
+            "files, and at least one input is a spec index (an index holds no descriptions). Diff the two raw "
+            "files to see them."
+        )
+        return out
+    out.append(
+        "Texts are paired by their literal path and parameter position: an operation whose path placeholder was renamed, "
+        "or a parameter inserted before others, is not paired, so check the raw files for those."
+    )
+    out.append("")
+    out += [
+        "Descriptions and summaries of operations, parameters, responses, request bodies and schema properties "
+        "that exist in both specs, and whose text changed. The shape comparison above cannot see these, yet they "
+        "state behavior: read them. A description-only change does not change the exit status.",
+        "",
+    ]
+    if not found.changes:
+        out.append("None.")
+        return out
+    for path, before, after in found.changes:
+        out += [f"### `{path}`", "", "OLD:", ""]
+        out += _fenced(before) + ["", "NEW:", ""] + _fenced(after) + [""]
+    return out[:-1]
+
+
+
 def render_markdown(
     result: DiffResult,
     old: dict[str, Any],
     new: dict[str, Any],
     old_label: str,
     new_label: str,
+    descriptions: DescriptionChanges | None = None,
 ) -> str:
+    """The markdown report. `descriptions` (diff_descriptions) adds the "Description changes" section; None leaves it out."""
     out: list[str] = ["# Gorelo API spec diff", ""]
     out.append(_meta_line("OLD", old_label, old))
     out.append(_meta_line("NEW", new_label, new))
@@ -1074,6 +1194,8 @@ def render_markdown(
 
     if not result.recorded_differences:
         out += _unrecorded_lines(result, old, new)
+        if descriptions is not None:
+            out += description_lines(descriptions)
         return _finish(out)
 
     out += [
@@ -1166,6 +1288,8 @@ def render_markdown(
             f"| `{key}` | {_quote(old_id)} | {_quote(new_id)} |"
             for key, old_id, new_id in changes
         ]
+    if descriptions is not None:
+        out += description_lines(descriptions)
     return _finish(out)
 
 
@@ -1198,6 +1322,12 @@ def load_index(path: str) -> dict[str, Any]:
     raise DiffError(f"{path} is neither a spec index (has 'ops') nor a raw swagger file (has 'paths')")
 
 
+def load_raw(path: str) -> dict[str, Any] | None:
+    """The raw swagger document of `path`, or None when the file is a spec index (it holds no descriptions)."""
+    data = json.loads(Path(path).read_bytes())  # load_index has already read it as valid JSON
+    return data if isinstance(data, dict) and "ops" not in data else None
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare two Gorelo OpenAPI snapshots (raw swagger JSON or spec_index.json).",
@@ -1223,7 +1353,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     result = diff_indexes(old, new)
-    report = render_markdown(result, old, new, args.old, args.new)
+    found = diff_descriptions(load_raw(args.old), load_raw(args.new))
+    report = render_markdown(result, old, new, args.old, args.new, found)
     if result.recorded_differences:
         code, status = 1, "differences found"
     elif result.unrecorded is not None:
@@ -1238,7 +1369,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{status}: wrote {args.out} "
             f"(ops +{len(result.ops_added)} -{len(result.ops_removed)} ~{len(result.ops_changed)}, "
             f"schemas +{len(result.schemas_added)} -{len(result.schemas_removed)} "
-            f"~{len(result.schemas_changed)})"
+            f"~{len(result.schemas_changed)})" + (f", {len(found.changes)} description changes listed" if found.changes else "")
         )
     else:
         sys.stdout.write(report)

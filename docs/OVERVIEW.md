@@ -74,20 +74,20 @@ Counts below come from the tool registry (`tools._common.REGISTRY`), and `tests/
 
 | What | Count |
 |---|---|
-| Tools in the registry | 89 |
-| Regular tools (kind `read` or `write`) | 81 |
+| Tools in the registry | 92 |
+| Regular tools (kind `read` or `write`) | 84 |
 | Gated tools (kind `destructive`) | 8 |
-| Tools of kind read | 51 |
-| Tools of kind write | 30 |
+| Tools of kind read | 52 |
+| Tools of kind write | 32 |
 | Tools of kind destructive | 8 |
-| Registered with the default toolsets, gated tools off | 58 |
-| Registered with the default toolsets, gated tools on | 64 |
-| Registered with every toolset, gated tools off | 81 |
-| Registered with every toolset, gated tools on | 89 |
+| Registered with the default toolsets, gated tools off | 61 |
+| Registered with the default toolsets, gated tools on | 67 |
+| Registered with every toolset, gated tools off | 84 |
+| Registered with every toolset, gated tools on | 92 |
 
 | Toolset | In the default set | Tools | Gated | Modules |
 |---|---|---|---|---|
-| `core` | yes | 17 | 0 | meta, org, assets, alerts, clients, contacts |
+| `core` | yes | 20 | 0 | meta, org, assets, alerts, clients, contacts |
 | `tickets` | yes | 19 | 1 | tickets, conversations, attachments |
 | `time` | yes | 7 | 1 | time_entries |
 | `billing` | yes | 15 | 3 | invoices, catalog, contracts |
@@ -116,7 +116,7 @@ Each module owns one domain and declares every operation its tools call, includi
 |---|---|---|---|
 | `tools/meta.py` | 1 | core | `health_check`: one `GET /v1/clients` page of size 1, plus what the server knows about itself (toolsets, gated flag, spec hash). The only tool that returns a Gorelo failure as data (`ok: false`) instead of raising. |
 | `tools/org.py` | 2 | core | Organization groups (an unpaged list) and users (every page is read). |
-| `tools/assets.py` | 3 | core | Agent assets and custom assets, read only. There is no delete: deleting an agent asset uninstalls the RMM agent, so it is forbidden. |
+| `tools/assets.py` | 6 | core | Agent assets (read only) and custom assets (list, hardware types, create, update). A custom asset has no single GET, so create and update read the row back by scanning the client's list and return a warning, never an error, when it is not found. There is no delete: deleting an agent asset uninstalls the RMM agent and custom asset deletes are not allowed, so both are forbidden. |
 | `tools/alerts.py` | 2 | core | `post_alert` (a severity is required, 1 to 4, and strict; alerts cannot be deleted through the API, so an unknown outcome has its own advice) and `list_alerts` (paged). |
 | `tools/clients.py` | 5 | core | Clients and their locations. Gorelo answers a client write with the whole record, so there is no read-back. A client field cannot be cleared through the API, so `update_client` has no clear option. |
 | `tools/contacts.py` | 4 | core | Contacts. Gorelo's update replaces the whole contact, so `update_contact` reads it first and sends the complete command. Secondary emails cannot be read, so the tool refuses until the caller gives the full list or `clear_secondary_email_ok` after asking the user. |
@@ -182,7 +182,7 @@ Run by the operator against the real API, never by the offline suite. See sectio
 | Strict settings | Starting with a missing key, an unknown toolset or an invalid flag. Every problem is reported at once and the process exits before it serves. | `settings.py` (`Settings.from_env`); `main.py`. |
 | Toolsets | Tools the operator did not switch on. `projects` and `forms` are off by default. | `Registry.select` in `tools/_common.py`, used by `server.build_server`; `DEFAULT_TOOLSETS` in `settings.py`. |
 | Destructive gating and `confirm` | The delete and void tools and `create_approved_invoice` existing unless the operator sets `GORELO_ENABLE_DESTRUCTIVE`. A call without a strict `confirm=true` sends nothing: the text "true" and the number 1 do not count, and the refusal says what would happen. | `Registry.select`; `_require_confirm_parameter` (checked when a tool is declared); `require_confirm` (called before any HTTP). |
-| Forbidden operations, by shape | The deletes of clients, contacts, tickets, agent assets, custom assets and contracts, and `POST /v1/api-keys`, which would mint credentials. A tool cannot declare one, and the client refuses one with no HTTP even under another placeholder spelling. | `gorelo_client.py` (`FORBIDDEN_OPS`, `is_forbidden_op`, `_check_not_forbidden`); `server._verify_ops`. |
+| Forbidden operations, by shape | The deletes of clients, contacts, tickets, agent assets, custom assets and contracts, `POST /v1/api-keys` (which would mint credentials) and `DELETE /v1/api-keys/{apiKeyId}` (which would revoke a key, possibly the server's own). A tool cannot declare one, and the client refuses one with no HTTP even under another placeholder spelling. | `gorelo_client.py` (`FORBIDDEN_OPS`, `is_forbidden_op`, `_check_not_forbidden`); `server._verify_ops`. |
 | Side-effect GETs, by shape | The invoice PDF export, a GET that Gorelo records as an event, passing as a harmless read. A `read` tool cannot declare it, and a failed export is reported as unconfirmed, because a retry records another export. | `gorelo_client.py` (`SIDE_EFFECT_GETS`, `is_side_effect_get`); `Registry.tool`; `server._verify_ops`. |
 | Declared ops | A tool calling anything it did not declare (refused with no HTTP, kind `spec`), and a declared op that is not in the spec index (the server does not start). | `gorelo_client.py` (`CURRENT_TOOL`, `_check_declared`); `tools/_common.py` (`_enter_tool`); `server._verify_ops`. |
 | Spec validation | Unknown operations, misspelled query names (even unset ones), unknown body fields, values of the wrong shape, path ids of the wrong type, and a path that changed on the wire. All before any HTTP. | `spec.py` (`normalize_query`, `validate_body`, `validate_path_param`); `gorelo_client.py` (`_fill_path`, `_check_path_unchanged`). |
@@ -198,7 +198,7 @@ Run by the operator against the real API, never by the offline suite. See sectio
 
 Gated tools (kind `destructive`, registered only with `GORELO_ENABLE_DESTRUCTIVE`): `create_approved_invoice`, `delete_invoice`, `delete_item`, `delete_project_comment`, `delete_project_task`, `delete_ticket_comment`, `delete_time_entry`, `delete_uptime_check`.
 
-Forbidden operations (`FORBIDDEN_OPS`): `DELETE /v1/clients/{clientId}`, `DELETE /v1/contacts/{contactId}`, `DELETE /v1/tickets/{ticketId}`, `DELETE /v1/assets/agents/{deviceId}`, `DELETE /v1/assets/custom/{customAssetId}`, `DELETE /v1/contracts/{contractId}`, `POST /v1/api-keys`.
+Forbidden operations (`FORBIDDEN_OPS`): `DELETE /v1/clients/{clientId}`, `DELETE /v1/contacts/{contactId}`, `DELETE /v1/tickets/{ticketId}`, `DELETE /v1/assets/agents/{deviceId}`, `DELETE /v1/assets/custom/{customAssetId}`, `DELETE /v1/contracts/{contractId}`, `POST /v1/api-keys`, `DELETE /v1/api-keys/{apiKeyId}`.
 
 Side-effect GETs (`SIDE_EFFECT_GETS`): `GET /v1/invoices/{invoiceId}/pdf`.
 
@@ -208,7 +208,7 @@ Principles that run through every layer: fail loudly (no silent empty result, no
 
 ## 4. The spec index and live overrides
 
-**The spec index.** `spec/spec_index.json` is a compact, deterministic digest of Gorelo's published OpenAPI spec: every operation (98 operations at this writing) with its method, path, query parameters, body fields, required fields, response kind and paging rule, plus every component schema. It keeps no descriptions. Its header records the source URL, `sha256` of the raw spec and `contract_sha256`, the hash of the spec without descriptions, summaries and examples. Code and tests validate against it (section 3, "Spec validation"). It is generated, never edited by hand.
+**The spec index.** `spec/spec_index.json` is a compact, deterministic digest of Gorelo's published OpenAPI spec: every operation (103 operations at this writing) with its method, path, query parameters, body fields, required fields, response kind and paging rule, plus every component schema. It keeps no descriptions. Its header records the source URL, `sha256` of the raw spec and `contract_sha256`, the hash of the spec without descriptions, summaries and examples. Code and tests validate against it (section 3, "Spec validation"). It is generated, never edited by hand.
 
 **Refreshing it.** Run `scripts/spec_snapshot.py`: it fetches the live spec, saves the raw copy as `backups/swagger-<UTC>.json`, repoints `backups/swagger-latest.json` and rewrites the index. Then run `scripts/spec_diff.py OLD NEW --out FILE` against the previous snapshot to see what changed. Then update the tools. The daily watcher (section 6) compares the live `contract_sha256` with the index and raises an alert when they differ, so a published change is noticed even if nobody looks.
 
@@ -258,6 +258,7 @@ The harness checks the things the offline suite cannot: that Gorelo still behave
 | `email` | The operator's own client and contact only: a ticket with the creation email, a public comment, a status change, and a side conversation and an approval that each get a comment. |
 | `time` | Creates a time entry, updates its comment, deletes it (again while the answer is `Reopened`). |
 | `items` | Creates, updates and deletes one catalog product. |
+| `custom_assets` | Creates one custom asset on the test client, updates it, clears three fields, and checks that Gorelo refuses an update that names the second client. The asset cannot be deleted through the API, so it stays as a known residue. |
 | `invoices` | Creates a Draft invoice, reads and lists it, exports its PDF, deletes it. |
 | `approved_invoice` | Approves one invoice of $1, waits for its push to the accounting system, voids it. |
 | `uptime` | Creates an HTTP check on a domain the operator owns, sets a maintenance window, updates the description, deletes the check. |
@@ -269,6 +270,7 @@ The harness checks the things the offline suite cannot: that Gorelo still behave
 | `--only AREA,...` | Run only those areas, always in the order above. |
 | `--leftovers` | Also delete the approved leftovers of earlier probes, after checking their names. |
 | `--with-items` | Run the `items` area: create, update and delete one catalog product on the test client. Off by default. |
+| `--with-custom-assets` | Run the `custom_assets` area: create one custom asset on the test client (name `<run id>-asset`, a serial number, ip 192.0.2.10 from the documentation range, a warranty date), update its name, ip and description, clear description, ip and warranty date, and check that an update naming the second client is refused with HTTP 400 (any other answer fails the area). Off by default. A custom asset cannot be deleted through the API, so this leaves one asset on the test client until somebody removes it in the Gorelo app; the cleanup and the run summary report it. It cannot be combined with `--with-approved-invoice`. |
 | `--with-invoices` | Run the `invoices` area: create a Draft, read it, list it, export its PDF, delete it. Off by default; it uses up one invoice number. |
 | `--with-approved-invoice` | Run the `approved_invoice` area, alone: approve one invoice of $1 on the test client, which Gorelo pushes to the connected accounting system, wait for the push, then void it at once. It needs `--only approved_invoice` and no other flag, and it creates a real Approved invoice, so run it only on purpose. |
 
@@ -286,7 +288,7 @@ The guard takes the test clients, the operator's contact, user and email address
 
 **Manifests** (`.live-runs/<run id>.json`, git-ignored, run id `MCPTEST-<UTC yyyymmddHHMMSS>`): every create is written as an intent before the call and as a record with its id right after; every cleanup outcome is written too. Writes are atomic. A create whose answer was lost is reported as an unresolved intent, to be searched for by the run id. Secrets are never recorded.
 
-**Cleanup** (`python -m scripts.live.cleanup <manifest> [--leftovers] [--void-approved]`): deletes in reverse creation order, with the gated delete tools where they exist and raw soft deletes (tickets, contacts, the temporary client, projects) behind the same kind of guard. It is safe to run again. Without `--void-approved` it never voids an Approved invoice; with it, it voids one that a run recorded as Approved, in Gorelo only. Two things cannot be removed and are reported apart as known residue: an uploaded attachment file and a voided invoice. Exit status 0 only when nothing is left over.
+**Cleanup** (`python -m scripts.live.cleanup <manifest> [--leftovers] [--void-approved]`): deletes in reverse creation order, with the gated delete tools where they exist and raw soft deletes (tickets, contacts, the temporary client, projects) behind the same kind of guard. It is safe to run again. Without `--void-approved` it never voids an Approved invoice; with it, it voids one that a run recorded as Approved, in Gorelo only. Three things cannot be removed and are reported apart as known residue: an uploaded attachment file, a custom asset (from `--with-custom-assets`; the operator removes it in the Gorelo app) and a voided invoice. Exit status 0 only when nothing is left over.
 
 The reasoning behind the harness is in `docs/why/07-live-test-harness.txt`.
 

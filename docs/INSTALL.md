@@ -259,7 +259,7 @@ You should see `Active: active (running)`.
 journalctl -u gorelo-mcp.service --since "5 minutes ago" --no-pager
 ```
 
-You should see a line like `gorelo-mcp ready: toolsets=billing,core,tickets,time,uptime destructive=False tools=58` and a line containing `oauth state loaded`. If you see `refusing to start`, the line names every setting that is wrong: fix `.env` and run `systemctl restart gorelo-mcp.service`.
+You should see a line like `gorelo-mcp ready: toolsets=billing,core,tickets,time,uptime destructive=False tools=61` and a line containing `oauth state loaded`. If you see `refusing to start`, the line names every setting that is wrong: fix `.env` and run `systemctl restart gorelo-mcp.service`.
 
 ### 4.4 Check the local endpoint
 

@@ -122,6 +122,7 @@ EMAIL_WHO = {
     ),
     "create_ticket_approval": ("Nothing is emailed until you post into it", "emails the approvers"),
     "create_project": ("project-created notification the app sends (Gorelo does not say who receives it)",),
+    "create_project_task": ("a task created with created_on (a backdated import) sends no emails or notifications",),
     "create_project_comment": (
         "emails nobody",
         "a side_conversation comment emails that conversation's recipients",
@@ -359,7 +360,7 @@ async def test_every_paged_list_refuses_a_blank_cursor_before_any_http_call(serv
 async def test_every_clear_fields_parameter_lists_its_accepted_names_in_the_schema(server_factory):
     tools = await all_tools(server_factory)
     with_clear = {name for name, tool in tools.items() if "clear_fields" in tool.inputSchema["properties"]}
-    assert with_clear == {"update_contact", "update_item", "update_project", "update_project_task", "update_ticket"}
+    assert with_clear == {"update_contact", "update_custom_asset", "update_item", "update_project", "update_project_task", "update_ticket"}
     for name in sorted(with_clear):
         clear = tools[name].inputSchema["properties"]["clear_fields"]
         assert clear["type"] == "array", name

@@ -389,7 +389,7 @@ async def create_project_task(
     ] = None,
 ) -> dict:
     """Create a task on a project's board and return its record. Required: title and section_id (a project with no section needs create_project_section first); everything else is optional.
-    Side effects: creates a real task. Creating a task moves a not-started project into progress, exactly as in the app, and fires the same automation triggers. If the result is {Id, warning} the task exists: do not create it again.
+    Side effects: creates a real task. Creating a task moves a not-started project into progress, exactly as in the app, and fires the same automation triggers, except that a task created with created_on (a backdated import) sends no emails or notifications. If the result is {Id, warning} the task exists: do not create it again.
     """
     pid = guid("project_id", project_id)
     non_empty("title", title)

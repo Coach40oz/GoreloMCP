@@ -623,6 +623,121 @@
             }
           }
         }
+      },
+      "post": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Creates a custom asset.",
+        "description": "The asset is created at a location of the client it belongs to, with one of the service\r\nprovider's custom asset types as its hardware type. Its creation is recorded on the asset's\r\ntimeline, as it is when the asset is created in the app.",
+        "operationId": "post_v1_assets_custom",
+        "requestBody": {
+          "description": "Custom asset details.",
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCustomAssetCommand"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCustomAssetCommand"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCustomAssetCommand"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCustomAssetCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateCustomAssetResultBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateCustomAssetResultBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateCustomAssetResultBaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/v1/assets/agents/{deviceId}": {
@@ -850,7 +965,226 @@
         }
       }
     },
+    "/v1/assets/custom/hardware-types": {
+      "get": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Lists the hardware types a custom asset can be given.",
+        "description": "The active custom asset types of the service provider: the set of `HardwareTypeId` values\r\n`POST` and `PATCH /v1/assets/custom` accept. Not paginated.",
+        "operationId": "get_v1_assets_custom_hardware-types",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/HardwareTypeListItemModelListBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HardwareTypeListItemModelListBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HardwareTypeListItemModelListBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/assets/custom/{customAssetId}": {
+      "patch": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Updates a custom asset. Send only the fields you want to change.",
+        "description": "An omitted field is left alone, and re-sending a value the asset already holds is a no-op\r\nrather than an error. Sending nothing at all is a 400.\r\n            \r\n`Description`, `ContactId`, `WarrantyEndDate`, `IpAddress` and\r\n`SerialNumber` are cleared by sending them as null. `Name`, `LocationId` and\r\n`HardwareTypeId` cannot be cleared; null leaves them unchanged.\r\n            \r\nThe asset's client cannot be changed. `ClientId` is accepted only when it is the\r\nasset's current client.",
+        "operationId": "patch_v1_assets_custom_customAssetId",
+        "parameters": [
+          {
+            "name": "customAssetId",
+            "in": "path",
+            "description": "Custom asset to update.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Fields to change.",
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCustomAssetCommand"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCustomAssetCommand"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCustomAssetCommand"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCustomAssetCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateCustomAssetResultBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateCustomAssetResultBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateCustomAssetResultBaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "tags": [
           "Assets"
@@ -6091,7 +6425,7 @@
           {
             "name": "StatusIds",
             "in": "query",
-            "description": "Comma-separated contact status ids to include.",
+            "description": "Comma-separated contact status ids to include: 1 Active, 2 Inactive, 3 Temporary, 4 Archive.",
             "schema": {
               "type": "string"
             }
@@ -6932,12 +7266,122 @@
       }
     },
     "/v1/api-keys": {
+      "get": {
+        "tags": [
+          "Organization"
+        ],
+        "summary": "Lists the service provider's API keys using cursor pagination, newest first.",
+        "description": "Requires the `Organization:read` scope; keys issued with the older\r\n`ServiceProvider:read` keep working.\r\n            \r\nEvery key is listed, revoked ones included, so the list is the record of what has been\r\nissued: a revoked key carries the time it was revoked in `RevokedAt`. A key created by\r\nanother key through `POST /v1/api-keys` names that key in `ParentApiKeyId`. The key\r\nvalue itself is never returned - it is shown once, when the key is created.",
+        "operationId": "get_v1_api-keys",
+        "parameters": [
+          {
+            "name": "Cursor",
+            "in": "query",
+            "description": "Opaque pagination cursor from a previous page; omit for the first page.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "PageSize",
+            "in": "query",
+            "description": "Number of items per page, from 1 to 200 (default 50). A value outside that range is rejected.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyModelListBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyModelListBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyModelListBaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "Organization"
         ],
         "summary": "Creates an API key for the authenticated service provider.",
-        "description": "Callable by any valid API key, whatever scopes it holds. The new key's scopes must be a\r\nsubset of the calling key's own, so a key can never create one more powerful than itself -\r\na key holding only `Tickets:read` can mint more `Tickets:read` keys and nothing\r\nelse. Asking for a scope the caller does not hold is rejected and names the scope.\r\n            \r\nEach requested scope is an explicit `\"Module:verb\"`; a bare module name is rejected.\r\nThe key value comes back on this response and on no other - only its hash is stored.",
+        "description": "Requires the `Organization:write` scope; keys issued with the older\r\n`ServiceProvider:write` keep working. The new key's scopes must also be a subset of the\r\ncalling key's own, so a key can never create one more powerful than itself. Asking for a\r\nscope the caller does not hold is rejected and names the scope.\r\n            \r\nEach requested scope is an explicit `\"Module:verb\"`; a bare module name is rejected.\r\nThe key value comes back on this response and on no other - only its hash is stored. The new\r\nkey records the key that created it, returned as `ParentApiKeyId` by\r\n`GET /v1/api-keys`.",
         "operationId": "post_v1_api-keys",
         "requestBody": {
           "content": {
@@ -7006,6 +7450,110 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/api-keys/{apiKeyId}": {
+      "delete": {
+        "tags": [
+          "Organization"
+        ],
+        "summary": "Revokes an API key.",
+        "description": "Requires the `Organization:delete` scope; keys issued with the older\r\n`ServiceProvider:delete` keep working.\r\n            \r\nThe key stops working at once and stays on `GET /v1/api-keys` with `RevokedAt`\r\nset; it is not removed and cannot be restored. Only this key is revoked: keys it created\r\nstay active. A key may revoke itself. Revoking a key that is already revoked succeeds and\r\nchanges nothing.",
+        "operationId": "delete_v1_api-keys_apiKeyId",
+        "parameters": [
+          {
+            "name": "apiKeyId",
+            "in": "path",
+            "description": "API key to revoke.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteApiKeyResultBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteApiKeyResultBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteApiKeyResultBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
             "content": {
               "text/plain": {
                 "schema": {
@@ -13358,6 +13906,85 @@
         "description": "How severe an alert is: `1` Critical, `2` Error, `3` Warning,\r\n`4` Information.",
         "format": "int32"
       },
+      "ApiKeyModel": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "string",
+            "description": "API key identifier.",
+            "format": "uuid"
+          },
+          "Name": {
+            "type": "string",
+            "description": "The name the key is identified by."
+          },
+          "Description": {
+            "type": "string",
+            "description": "What the key is for.",
+            "nullable": true
+          },
+          "Scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The scopes the key carries, as granted. Keys issued before per-verb scopes may carry a bare\r\nmodule name, such as `Tickets`, which grants every verb on that module."
+          },
+          "CreatedAt": {
+            "type": "string",
+            "description": "When the key was created (UTC).",
+            "format": "date-time"
+          },
+          "LastUsedAt": {
+            "type": "string",
+            "description": "When the key was last used to make a call (UTC), or null if it never has been.",
+            "format": "date-time",
+            "nullable": true
+          },
+          "RevokedAt": {
+            "type": "string",
+            "description": "When the key was revoked (UTC), or null while it is still active. A revoked key is rejected on every call.",
+            "format": "date-time",
+            "nullable": true
+          },
+          "ParentApiKeyId": {
+            "type": "string",
+            "description": "The key that created this one through `POST /v1/api-keys`, or null for a key created\r\nin Gorelo or by a signed-in user. The parent may since have been revoked; that does not\r\nrevoke this key.",
+            "format": "uuid",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "An API key belonging to the service provider. The key value itself is never returned - it is\r\nshown once, when the key is created. Timestamps are UTC."
+      },
+      "ApiKeyModelListBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiKeyModel"
+            },
+            "nullable": true
+          },
+          "DataContext": {
+            "$ref": "#/components/schemas/PaginationDataContext"
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "ApprovalDetailModel": {
         "type": "object",
         "properties": {
@@ -14990,9 +15617,9 @@
             "type": "array",
             "items": {
               "enum": [
-                "ServiceProvider:read",
-                "ServiceProvider:write",
-                "ServiceProvider:delete",
+                "Organization:read",
+                "Organization:write",
+                "Organization:delete",
                 "Tickets:read",
                 "Tickets:write",
                 "Tickets:delete",
@@ -15020,7 +15647,7 @@
               ],
               "type": "string"
             },
-            "description": "The scopes the new key carries, each an explicit `\"Module:verb\"`. Required, and every\r\nentry must be one the calling key already holds.\r\n            \r\n\nThe valid values are published as the enum on this property. Verbs are independent -\r\n`write` does not imply `read`. Note `Project` is singular, and the key\r\nmanagement screen shows `ServiceProvider` under the name <b>Organization</b>.",
+            "description": "The scopes the new key carries, each an explicit `\"Module:verb\"`. Required, and every\r\nentry must be one the calling key already holds.\r\n            \r\n\nThe valid values are published as the enum on this property. Verbs are independent -\r\n`write` does not imply `read`. Note `Project` is singular. Scopes are stored\r\nas published here, whatever casing is sent; the older `ServiceProvider:verb` is still\r\naccepted and is stored as `Organization:verb`.",
             "example": [
               "Tickets:read",
               "Tickets:write"
@@ -15217,7 +15844,7 @@
           },
           "CreatedOn": {
             "type": "string",
-            "description": "Backdate the comment's timestamp — for importing ticket history from another system.\r\nMust not be in the future or earlier than the ticket's own CreatedOn. Omit to use the\r\ncurrent time.\r\n            \r\nWhen supplied, the ticket's UpdatedOn becomes the later of its current value and this\r\ntimestamp, so importing older history does not push the ticket to the top of an\r\nupdatedOn-sorted list.",
+            "description": "Backdate the comment's timestamp — for importing ticket history from another system.\r\nMust not be in the future or earlier than the ticket's own CreatedOn. Omit to use the\r\ncurrent time.\r\n            \r\nWhen supplied, the ticket's UpdatedOn becomes the later of its current value and this\r\ntimestamp, so importing older history does not push the ticket to the top of an\r\nupdatedOn-sorted list.\r\n            \r\nSend only when importing history. A record with this field set sends no emails or notifications.",
             "format": "date-time",
             "nullable": true
           },
@@ -15350,6 +15977,106 @@
         },
         "additionalProperties": false,
         "description": "Request body for creating a contact, under a client or, with no client, as a temporary contact."
+      },
+      "CreateCustomAssetCommand": {
+        "type": "object",
+        "properties": {
+          "Name": {
+            "type": "string",
+            "description": "Display name of the asset. Required, max 300 characters, cannot be blank.",
+            "example": "Reception printer"
+          },
+          "ClientId": {
+            "type": "integer",
+            "description": "Identifier of the client the asset belongs to. Required; the client must be active.",
+            "format": "int64",
+            "example": 3521
+          },
+          "LocationId": {
+            "type": "integer",
+            "description": "Identifier of the client location the asset sits at. Required; must be an active location of\r\n`ClientId`.",
+            "format": "int64",
+            "example": 4410
+          },
+          "HardwareTypeId": {
+            "type": "integer",
+            "description": "Identifier of the asset's hardware type, one of the service provider's active custom asset\r\ntypes. Required.",
+            "format": "int64",
+            "example": 118
+          },
+          "Description": {
+            "type": "string",
+            "description": "Free-text description. Optional, max 1000 characters.",
+            "nullable": true,
+            "example": "HP LaserJet on the front desk"
+          },
+          "ContactId": {
+            "type": "integer",
+            "description": "Identifier of the contact the asset is assigned to. Optional; must be an active contact of\r\n`ClientId`.",
+            "format": "int64",
+            "nullable": true,
+            "example": 7962
+          },
+          "WarrantyEndDate": {
+            "type": "string",
+            "description": "Date the warranty ends, a calendar date (yyyy-MM-dd). Optional.",
+            "format": "date",
+            "nullable": true,
+            "example": "2027-03-31"
+          },
+          "IpAddress": {
+            "type": "string",
+            "description": "IPv4 address of the asset, such as 192.168.1.20. Optional.",
+            "nullable": true,
+            "example": "192.168.1.20"
+          },
+          "SerialNumber": {
+            "type": "string",
+            "description": "Hardware serial number. Optional, max 250 characters.",
+            "nullable": true,
+            "example": "CNB1K23456"
+          }
+        },
+        "additionalProperties": false,
+        "description": "Request body for creating a custom asset. The owning service provider is resolved from the\r\nrequest context, not from the body."
+      },
+      "CreateCustomAssetResult": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false,
+        "description": "The identifier of the created custom asset."
+      },
+      "CreateCustomAssetResultBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "$ref": "#/components/schemas/CreateCustomAssetResult"
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "CreateInvoiceCommand": {
         "type": "object",
@@ -15837,7 +16564,7 @@
           },
           "CreatedOn": {
             "type": "string",
-            "description": "Backdate the project's creation timestamp - for importing projects from another system.\r\nMust not be in the future. Omit to use the current time.",
+            "description": "Backdate the project's creation timestamp - for importing projects from another system.\r\nMust not be in the future. Omit to use the current time.\r\nSend only when importing history. A record with this field set sends no emails or notifications.",
             "format": "date-time",
             "nullable": true
           },
@@ -16303,7 +17030,7 @@
           },
           "CreatedOn": {
             "type": "string",
-            "description": "When the task was created. UTC. Defaults to now - supply it only when importing a task\r\nthat already existed elsewhere.",
+            "description": "When the task was created. UTC. Defaults to now - supply it only when importing a task\r\nthat already existed elsewhere.\r\nSend only when importing history. A record with this field set sends no emails or notifications.",
             "format": "date-time",
             "nullable": true
           },
@@ -16358,7 +17085,7 @@
           },
           "CreatedOn": {
             "type": "string",
-            "description": "When the comment was written. UTC. Defaults to now.",
+            "description": "When the comment was written. UTC. Defaults to now.\r\nSend only when importing history. A record with this field set sends no emails or notifications.",
             "format": "date-time",
             "nullable": true
           }
@@ -16534,13 +17261,13 @@
           },
           "CreatedOn": {
             "type": "string",
-            "description": "Backdate the ticket's creation timestamp — for importing tickets from another system.\r\nMust not be in the future. Omit to use the current time. Required when ClosedOn or\r\nUpdatedOn is supplied. A caller migrating a ticket sends CreatedOn, ClosedOn and UpdatedOn\r\ntogether, so the ticket keeps the dates it had in the other system.",
+            "description": "Backdate the ticket's creation timestamp — for importing tickets from another system.\r\nMust not be in the future. Omit to use the current time. Required when ClosedOn or\r\nUpdatedOn is supplied. A caller migrating a ticket sends CreatedOn, ClosedOn and UpdatedOn\r\ntogether, so the ticket keeps the dates it had in the other system.\r\nSend only when importing history. A record with this field set sends no emails or notifications.",
             "format": "date-time",
             "nullable": true
           },
           "ClosedOn": {
             "type": "string",
-            "description": "The date the ticket was closed, for importing already-closed tickets from another system.\r\nRequires CreatedOn to be supplied. Only valid when the ticket is created in a closed status.\r\nMust not be in the future or earlier than CreatedOn. Omit to have a ticket created in a\r\nclosed status closed as of its creation time.",
+            "description": "The date the ticket was closed, for importing already-closed tickets from another system.\r\nRequires CreatedOn to be supplied. Only valid when the ticket is created in a closed status.\r\nMust not be in the future or earlier than CreatedOn. Omit to have a ticket created in a\r\nclosed status closed as of its creation time.\r\nSend only when importing history. A record with this field set sends no emails or notifications.",
             "format": "date-time",
             "nullable": true
           },
@@ -16668,12 +17395,12 @@
           },
           "SendTicketCreatedEmail": {
             "type": "boolean",
-            "description": "When true, sends a \"ticket created\" email to the contact. Defaults to false.",
+            "description": "When true, sends a \"ticket created\" email to the contact. Defaults to false. Ignored when\r\nCreatedOn or ClosedOn is supplied.",
             "nullable": true
           },
           "IsUnread": {
             "type": "boolean",
-            "description": "Whether the ticket is created in an unread state. Defaults to true.",
+            "description": "Whether the ticket is created in an unread state. Defaults to true. Ignored when CreatedOn\r\nor ClosedOn is supplied: the ticket is created read.",
             "nullable": true
           }
         },
@@ -17008,7 +17735,22 @@
           },
           "HardwareType": {
             "type": "string",
-            "description": "Hardware type."
+            "description": "Hardware type name. Null when the type no longer exists.",
+            "nullable": true,
+            "example": "Printer"
+          },
+          "HardwareTypeId": {
+            "type": "integer",
+            "description": "Identifier of the hardware type: the value `POST`/`PATCH /v1/assets/custom` take as\r\n`HardwareTypeId`. `GET /v1/assets/custom/hardware-types` lists the ids a write accepts.",
+            "format": "int64",
+            "example": 118
+          },
+          "ContactId": {
+            "type": "integer",
+            "description": "Identifier of the contact the asset is assigned to. Null when unassigned.",
+            "format": "int64",
+            "nullable": true,
+            "example": 7962
           },
           "SerialNumber": {
             "type": "string",
@@ -17017,8 +17759,8 @@
           },
           "WarrantyEndDate": {
             "type": "string",
-            "description": "Warranty end date (UTC).",
-            "format": "date-time",
+            "description": "Date the warranty ends, a calendar date (yyyy-MM-dd).",
+            "format": "date",
             "nullable": true
           },
           "IpAddress": {
@@ -17079,6 +17821,43 @@
           },
           "Data": {
             "$ref": "#/components/schemas/DeleteAgentResult"
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeleteApiKeyResult": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeleteApiKeyResultBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "$ref": "#/components/schemas/DeleteApiKeyResult"
           },
           "DataContext": {
             "type": "object",
@@ -18424,6 +19203,65 @@
         },
         "additionalProperties": false,
         "description": "A resolved reference whose key is a GUID rather than a number - the same `{ Id, Name }`\r\nshape as `PublicCodeModel`. Used for tenant-configured values such as a\r\nproject's type."
+      },
+      "HardwareTypeListItemModel": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "integer",
+            "description": "Type identifier: the value `POST`/`PATCH /v1/assets/custom` take as `HardwareTypeId`.",
+            "format": "int64",
+            "example": 118
+          },
+          "Name": {
+            "type": "string",
+            "description": "Type display name.",
+            "example": "Printer"
+          },
+          "CreatedOn": {
+            "type": "string",
+            "description": "Creation timestamp (UTC).",
+            "format": "date-time"
+          },
+          "UpdatedOn": {
+            "type": "string",
+            "description": "Last-updated timestamp (UTC).",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false,
+        "description": "A hardware type a custom asset can be given. Timestamps are UTC."
+      },
+      "HardwareTypeListItemModelListBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HardwareTypeListItemModel"
+            },
+            "nullable": true
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "HttpStatusCode": {
         "enum": [
@@ -22442,6 +23280,110 @@
         },
         "additionalProperties": false,
         "description": "Request body for updating an existing contact. `ContactId`, bound from the route,\r\nidentifies the contact."
+      },
+      "UpdateCustomAssetCommand": {
+        "type": "object",
+        "properties": {
+          "Name": {
+            "type": "string",
+            "description": "Display name of the asset. Max 300 characters, cannot be blank. Null leaves it unchanged.",
+            "nullable": true,
+            "example": "Reception printer"
+          },
+          "ClientId": {
+            "type": "integer",
+            "description": "Identifier of the client the asset belongs to. The client cannot be changed: send the\r\nasset's current client or leave the field out.",
+            "format": "int64",
+            "nullable": true,
+            "example": 3521
+          },
+          "LocationId": {
+            "type": "integer",
+            "description": "Identifier of the client location the asset sits at; must be an active location of the\r\nasset's client. Null leaves it unchanged.",
+            "format": "int64",
+            "nullable": true,
+            "example": 4410
+          },
+          "HardwareTypeId": {
+            "type": "integer",
+            "description": "Identifier of the asset's hardware type, one of the service provider's active custom asset\r\ntypes. Null leaves it unchanged.",
+            "format": "int64",
+            "nullable": true,
+            "example": 118
+          },
+          "Description": {
+            "type": "string",
+            "description": "Free-text description, max 1000 characters. Send null to clear it.",
+            "nullable": true,
+            "example": "HP LaserJet on the front desk"
+          },
+          "ContactId": {
+            "type": "integer",
+            "description": "Identifier of the contact the asset is assigned to; must be an active contact of the asset's\r\nclient. Send null to unassign it.",
+            "format": "int64",
+            "nullable": true,
+            "example": 7962
+          },
+          "WarrantyEndDate": {
+            "type": "string",
+            "description": "Date the warranty ends, a calendar date (yyyy-MM-dd). Send null to clear it.",
+            "format": "date",
+            "nullable": true,
+            "example": "2027-03-31"
+          },
+          "IpAddress": {
+            "type": "string",
+            "description": "IPv4 address of the asset, such as 192.168.1.20. Send null to clear it.",
+            "nullable": true,
+            "example": "192.168.1.20"
+          },
+          "SerialNumber": {
+            "type": "string",
+            "description": "Hardware serial number, max 250 characters. Send null to clear it.",
+            "nullable": true,
+            "example": "CNB1K23456"
+          }
+        },
+        "additionalProperties": false,
+        "description": "Request body for updating a custom asset. Every field is optional - send only what should\r\nchange. An omitted field keeps the value the asset already holds."
+      },
+      "UpdateCustomAssetResult": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false,
+        "description": "The identifier of the updated custom asset."
+      },
+      "UpdateCustomAssetResultBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "$ref": "#/components/schemas/UpdateCustomAssetResult"
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "UpdateItemCommand": {
         "type": "object",

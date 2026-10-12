@@ -127,7 +127,7 @@ def test_the_real_index_loads_with_every_operation(spec_index):
     swapped = json.loads(DEFAULT_OVERRIDES_PATH.read_text(encoding="utf-8"))["replace_ops"]
     assert swapped == {}
     assert set(spec_index.ops) == (set(raw["ops"]) - set(swapped)) | set(swapped.values())
-    assert len(spec_index.ops) == len(raw["ops"]) == 98
+    assert len(spec_index.ops) == len(raw["ops"]) == 103
     # the hashes still describe the published spec, which is what the changelog watcher compares
     assert spec_index.sha256 == raw["sha256"] and spec_index.contract_sha256 == raw["contract_sha256"]
     assert spec_index.openapi == raw["openapi"] and spec_index.source == raw["source"]
@@ -538,7 +538,7 @@ def test_every_real_body_accepts_a_fully_populated_well_shaped_body(spec_index):
         names = validate_body(op, body)
         assert set(op.body["fields"]) <= names, key
         checked += 1
-    assert checked == 30  # every JSON body of the live spec
+    assert checked == 32  # every JSON body of the live spec
 
 
 def test_a_body_for_an_operation_without_one_is_a_violation(tiny):

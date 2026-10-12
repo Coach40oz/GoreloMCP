@@ -1,7 +1,7 @@
 """The live write matrix: the write tools against the test client and the second client, then clean up.
 
     python -m scripts.live.write_matrix [--skip-email] [--only AREA,...] [--leftovers] [--with-items] [--with-invoices]
-                                        [--with-approved-invoice]
+                                        [--with-custom-assets] [--with-approved-invoice]
 
 Run id MCPTEST-<UTC yyyymmddHHMMSS>. Every record the run creates is named with it, announced in the run manifest
 (.live-runs/<run id>.json) BEFORE the create call and recorded with its id right after (the details contract of
@@ -47,6 +47,20 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                skipped, with the same reason, when --only items is given without it: the three item tools cannot
                even be called then. A live run passed it, and a deleted item answers GET /v1/items/{itemId}
                with a 404 (code 070202)
+    custom_assets
+               list_custom_asset_hardware_types (the first row is used, no tenant id is hardcoded), the test client's default
+               location (list_client_locations), create_custom_asset (name `<run id>-asset`, a serial number, ip 192.0.2.10 from
+               the TEST-NET-1 documentation range and a warranty date), update_custom_asset (new name suffix, ip 192.0.2.11, a
+               description), then clear_fields description, ip_address and warranty_end_date (they must read back null or
+               empty), and a negative check: update_custom_asset with the second client as client_id must be refused by Gorelo
+               with HTTP 400 (an accepted one, or any other answer, fails the area; an accepted or unknown outcome records the second client, or
+               "unknown", as the asset's client in the manifest, and the residue text and the reminder name it). SKIPPED unless --with-custom-assets is given (and also
+               skipped, with the same reason, under --only custom_assets without it: its tools cannot even be called then).
+               A custom asset CANNOT BE DELETED through the API (DELETE /v1/assets/custom/{id} is forbidden, and there is no GET
+               of one asset), so this area leaves a residue: the asset stays on the test client until somebody removes it in
+               the Gorelo app. The manifest records it before and after the create; the cleanup sends nothing for it and
+               reports it as a known undeletable record (CUSTOM_ASSET_RESIDUE), and the summary prints a line telling the
+               operator to remove it in the Gorelo app. Never part of a default run
     invoices   list_items for the first active product that belongs to nobody or to the test client, create_invoice (always a
                Draft for the test client with one line and no recipients), get_invoice, list_invoices by the run label,
                export_invoice_pdf (a PDF file; the export event is recorded on the test invoice), then delete_invoice
@@ -208,6 +222,16 @@ Live requests per area (method and spec path, in the order they are sent; the te
         GET /v1/invoices  # delete_invoice finds the invoice by its Number
         DELETE /v1/invoices/{invoiceId}  # Draft: deleted (no longer listed); the answer says StatusId 6
         GET /v1/invoices  # list_invoices: no longer listed
+    custom_assets:
+        GET /v1/assets/custom/hardware-types  # the first row is used (only with --with-custom-assets)
+        GET /v1/clients/{clientId}/locations  # the test client's default location
+        POST /v1/assets/custom  # create_custom_asset: name <run id>-asset, serial number, ip 192.0.2.10, warranty date
+        GET /v1/assets/custom  # create_custom_asset reads the row back (list by ClientIds)
+        PATCH /v1/assets/custom/{customAssetId}  # rename, ip 192.0.2.11, description
+        GET /v1/assets/custom  # update_custom_asset reads the row back
+        PATCH /v1/assets/custom/{customAssetId}  # clear_fields description, ip_address, warranty_end_date
+        GET /v1/assets/custom
+        PATCH /v1/assets/custom/{customAssetId}  # negative check: the second client as ClientId, Gorelo must answer HTTP 400
     approved_invoice:
         GET /v1/contacts  # list_contacts for the test client: every contact must be Inactive (only with --with-approved-invoice)
         GET /v1/clients/{clientId}/locations  # list_client_locations: no location may name a billing contact
@@ -220,7 +244,7 @@ Live requests per area (method and spec path, in the order they are sent; the te
         GET /v1/invoices/{invoiceId}  # get_invoice: Status.Id 4
         GET /v1/invoices  # list_invoices: still listed, as Void
     uptime:
-        GET /v1/clients/{clientId}/locations  # the test client's location
+        GET /v1/clients/{clientId}/locations  # the test client's location (Matrix.location() is cached: not sent when an earlier area in the same run, custom_assets with --with-custom-assets, already read it)
         POST /v1/uptime  # http check, the probe domain URL, seattle, every 60 minutes
         GET /v1/uptime/{checkId}
         PATCH /v1/uptime/{checkId}  # maintenance window: start now, 60 minutes
@@ -261,7 +285,8 @@ when a big client truncates it; a rejected approver ends the email area after it
 comment), and so do stored approvers that are not only the operator contact after the approval's GET; a ticket stored with
 an audience the matrix did not ask for (or a read-back that failed) ends its area right after that ticket's GET;
 without the Project scope the projects area is its first two requests; the items, invoices and approved_invoice areas
-send nothing at all unless --with-items, respectively --with-invoices or --with-approved-invoice, is given; with
+send nothing at all unless --with-items, respectively --with-invoices or --with-approved-invoice, is given (the
+custom_assets area likewise, unless --with-custom-assets is given); with
 --with-invoices and no usable catalog item the invoices area is its first request; the two list_invoices checks of that
 area and delete_invoice's lookup by its
 Number are tried up to 3 times, like the ticket lookups, because a search can lag behind a write; an invoice that
@@ -313,14 +338,15 @@ itself and the second in its leftover text and in the help of --void-approved; e
 command (the area's FAIL for an invoice that never synced or has no Number, and the summary's line for an Approved invoice
 left over) ends with the second. Exit status 0 only when no area FAILED, nothing is left over (a known undeletable record,
 an attachment file or a voided invoice, is not a leftover) and the guard refused nothing; a skipped area (scope missing,
---skip-email, items without --with-items, invoices without --with-invoices, approved_invoice without
+--skip-email, items without --with-items, custom_assets without --with-custom-assets, invoices without --with-invoices, approved_invoice without
 --with-approved-invoice, a precondition of the approved invoice that does not hold) is not a failure; 1 otherwise; 2 for a
 usage or setup error (an unknown area, --with-approved-invoice without --only approved_invoice or beside another flag, no
 API key, a tool the matrix calls that the server would not offer); 130 when interrupted (the cleanup has run by then).
 Output holds ids and Gorelo's messages only, never customer data and never the API key.
 
 Safety nets besides the guard: the matrix may call only the tools in MATRIX_TOOLS (no post_alert, no
-create_approved_invoice; the three item tools only with --with-items; list_items, list_invoices, get_invoice,
+create_approved_invoice; the three item tools only with --with-items; the three custom asset tools only with
+--with-custom-assets; list_items, list_invoices, get_invoice,
 create_invoice, export_invoice_pdf and delete_invoice only with --with-invoices). With --with-approved-invoice the run
 may call ONLY APPROVED_INVOICE_TOOLS (create_approved_invoice, get_invoice, list_invoices, delete_invoice, list_items,
 list_contacts, list_client_locations) and its guard is built with allow_approved_invoice; create_approved_invoice is
@@ -351,6 +377,9 @@ from fastmcp import Client
 from gorelo_client import GoreloClient
 from scripts.live._env import EnvError, Pacer, live_settings, scrub
 from scripts.live.cleanup import (
+    CUSTOM_ASSET_CLIENT_UNKNOWN,
+    CUSTOM_ASSET_RESIDUE,
+    custom_asset_residue,
     MAX_REOPEN_ATTEMPTS,
     NO_SUCH_NUMBER,
     PACE_SECONDS,
@@ -373,8 +402,8 @@ LOOKUP_ATTEMPTS = 3  # get_ticket by number or display number may need a moment 
 LOOKUP_WAIT = 3.0  # (the invoice lists and delete_invoice's lookup by Number get the same patience)
 # NO_SUCH_NUMBER (imported above from the cleanup, which reads the same refusal) is what delete_invoice says, before it
 # sends any DELETE, when its lookup by Number finds nothing.
-CLIENT_PHONE = "5555550142"  # national number of the temporary client's location (a fictional 555-01xx number)
-CONTACT_PHONE = CLIENT_PHONE  # the one number the live probes already know Gorelo accepts with region US
+CLIENT_PHONE = "2025550142"  # national number of the temporary client's location: a fictional 555-01xx number in a real area code (Gorelo refused area code 555 on 2026-10-12)
+CONTACT_PHONE = CLIENT_PHONE  # accepted with region US by the live run of 2026-10-12
 REGION = "US"
 NO_CHARGE = 2  # billable status id
 APPROVER_HINT = re.compile(r"contact_ids|approvers?|eligible|\btags?\b", re.IGNORECASE)
@@ -394,6 +423,16 @@ NOT_PROCESSED = "it did not process this request"
 # ends every hint below that sends the user to `cleanup --void-approved`: that command voids in Gorelo only as well.
 # Why the items area does not run by default (it is also the area's detail in the summary).
 ITEMS_SKIP_REASON = "not live-tested by default: creates and deletes a catalog product on the test client"
+# Why the custom_assets area does not run by default (it is also the area's detail in the summary).
+CUSTOM_ASSETS_SKIP_REASON = (
+    "not live-tested by default: creates a custom asset on the test client, which cannot be deleted through the API "
+    "(it stays there until removed in the Gorelo app)"
+)
+CUSTOM_ASSETS_AREA = "custom_assets"
+# TEST-NET-1 (RFC 5737): addresses reserved for documentation, never routable, so no real host is named by the test asset.
+CUSTOM_ASSET_IP = "192.0.2.10"
+CUSTOM_ASSET_IP_CHANGED = "192.0.2.11"
+CUSTOM_ASSET_WARRANTY_DAYS = 365
 # Why the invoices area does not run by default (it is also the area's detail in the summary).
 INVOICES_SKIP_REASON = (
     "not live-tested by default: creates and deletes a Draft invoice on the test client, which uses up one invoice number"
@@ -446,6 +485,9 @@ MATRIX_TOOLS = frozenset(
         "delete_project_comment", "delete_project_task",
     }
 )
+# The custom asset tools: NOT part of MATRIX_TOOLS; tools_for adds them only with --with-custom-assets (the asset the area
+# creates cannot be deleted through the API).
+CUSTOM_ASSET_TOOLS = frozenset({"list_custom_asset_hardware_types", "create_custom_asset", "update_custom_asset"})
 # The catalog tools: callable only with --with-items (it creates, updates and deletes a catalog product on the test client).
 ITEM_TOOLS = frozenset({"create_item", "update_item", "delete_item"})
 # The invoice tools: callable only with --with-invoices (a Draft invoice uses up an invoice number, and the PDF export
@@ -465,15 +507,19 @@ APPROVED_INVOICE_TOOLS = frozenset(
 )
 
 
-def tools_for(with_items: bool, with_invoices: bool = False, with_approved_invoice: bool = False) -> frozenset[str]:
+def tools_for(
+    with_items: bool, with_invoices: bool = False, with_approved_invoice: bool = False, with_custom_assets: bool = False
+) -> frozenset[str]:
     """The tools a run may call: with --with-approved-invoice exactly APPROVED_INVOICE_TOOLS (that run has no other area);
-    otherwise MATRIX_TOOLS, without the three item tools unless --with-items was given and without the six invoice tools
-    unless --with-invoices was given."""
+    otherwise MATRIX_TOOLS, without the three item tools unless --with-items was given, without the six invoice tools
+    unless --with-invoices was given and with the three custom asset tools only when --with-custom-assets was given."""
     if with_approved_invoice:
         return APPROVED_INVOICE_TOOLS
     tools = MATRIX_TOOLS
     if not with_items:
         tools = tools - ITEM_TOOLS
+    if with_custom_assets:
+        tools = tools | CUSTOM_ASSET_TOOLS
     if not with_invoices:
         tools = tools - INVOICE_TOOLS
     return tools
@@ -912,6 +958,7 @@ class Matrix:
         sync_interval: float = SYNC_INTERVAL,
         sync_polls: int = SYNC_POLLS,
         gorelo: GoreloClient | None = None,
+        with_custom_assets: bool = False,
     ) -> None:
         if with_approved_invoice and gorelo is None:  # the one create is sent with 429 retries off: the client must be reachable
             raise SetupError(
@@ -929,6 +976,7 @@ class Matrix:
         self.with_items = with_items
         self.with_invoices = with_invoices
         self.with_approved_invoice = with_approved_invoice
+        self.with_custom_assets = with_custom_assets
         self.sync_interval = sync_interval
         self.sync_polls = sync_polls
         self.gorelo = gorelo  # only the approved invoice run holds it (see without_429_retries)
@@ -1594,6 +1642,110 @@ async def area_items(m: Matrix) -> None:
     m.mark_cleaned("item", item_id, "deleted by the write matrix (delete_item)")
 
 
+async def area_custom_assets(m: Matrix) -> None:
+    """One custom asset on the test client: created, changed, cleared, and refused when a wrong client is named.
+
+    The asset CANNOT be deleted through the API, so the area leaves it behind on purpose (see CUSTOM_ASSET_RESIDUE): it is
+    recorded in the manifest before and after the create, and the cleanup reports it as a known residue."""
+    if not m.with_custom_assets:  # nothing is announced or sent: the custom asset tools are not even callable without the flag
+        raise Skipped(CUSTOM_ASSETS_SKIP_REASON)
+    types = (await m.tool("list_custom_asset_hardware_types")).get("items")
+    hardware = first_int_id(types)
+    if hardware is None:
+        raise Skipped("list_custom_asset_hardware_types answered no hardware type with an Id; nothing was created")
+    location = await m.location()
+    warranty = (m.clock().astimezone(timezone.utc).date() + timedelta(days=CUSTOM_ASSET_WARRANTY_DAYS)).isoformat()
+    label = f"{m.manifest.run_id}-asset"
+    serial = f"{m.manifest.run_id}-sn"
+    asset = full(
+        await m.create(
+            "custom_asset",
+            label,
+            {"client_id": SITE.test_client},
+            "create_custom_asset",
+            {
+                "name": label,
+                "client_id": SITE.test_client,
+                "location_id": location,
+                "hardware_type_id": hardware,
+                "serial_number": serial,
+                "ip_address": CUSTOM_ASSET_IP,
+                "warranty_end_date": warranty,
+            },
+        ),
+        "create_custom_asset",
+    )
+    asset_id = asset["Id"]
+    m.note(f"custom asset {asset_id} on client {SITE.test_client}: {CUSTOM_ASSET_RESIDUE}")
+    expect("create_custom_asset Name", asset.get("Name"), label)
+    expect("create_custom_asset ClientId", asset.get("ClientId"), SITE.test_client)
+    expect("create_custom_asset LocationId", asset.get("LocationId"), location)
+    expect("create_custom_asset HardwareTypeId", asset.get("HardwareTypeId"), hardware)
+    expect("create_custom_asset SerialNumber", asset.get("SerialNumber"), serial)
+    expect("create_custom_asset IpAddress", asset.get("IpAddress"), CUSTOM_ASSET_IP)
+    expect("create_custom_asset WarrantyEndDate", date_text(asset.get("WarrantyEndDate")), warranty)
+
+    renamed, description = f"{label} v2", f"{label}: updated"
+    changed = full(
+        await m.tool(
+            "update_custom_asset",
+            custom_asset_id=asset_id,
+            client_id=SITE.test_client,
+            name=renamed,
+            ip_address=CUSTOM_ASSET_IP_CHANGED,
+            description=description,
+        ),
+        "update_custom_asset",
+    )
+    expect("update_custom_asset Name", changed.get("Name"), renamed)
+    expect("update_custom_asset IpAddress", changed.get("IpAddress"), CUSTOM_ASSET_IP_CHANGED)
+    expect("update_custom_asset Description", changed.get("Description"), description)
+    expect("update_custom_asset SerialNumber (left alone)", changed.get("SerialNumber"), serial)
+    expect("update_custom_asset WarrantyEndDate (left alone)", date_text(changed.get("WarrantyEndDate")), warranty)
+
+    cleared = full(
+        await m.tool(
+            "update_custom_asset",
+            custom_asset_id=asset_id,
+            client_id=SITE.test_client,
+            clear_fields=["description", "ip_address", "warranty_end_date"],
+        ),
+        "update_custom_asset",
+    )
+    for field_name in ("Description", "IpAddress", "WarrantyEndDate"):
+        value = cleared.get(field_name)
+        check(value is None or value == "", f"update_custom_asset clear_fields: {field_name} still reads back {kind_of(value)}")
+    expect("update_custom_asset Name (left alone by clear_fields)", cleared.get("Name"), renamed)
+    expect("update_custom_asset SerialNumber (left alone by clear_fields)", cleared.get("SerialNumber"), serial)
+
+    # The negative check: Gorelo must refuse a client that does not own the asset, with HTTP 400. The second client is the only
+    # other client the guard lets the PATCH name; the name sent is the current one, but the ClientId itself is the change: an
+    # (unexpected) acceptance MOVES the asset to the second client. So the manifest details say where the asset may be.
+    try:
+        await m.tool("update_custom_asset", custom_asset_id=asset_id, client_id=SITE.second_client, name=renamed)
+    except ToolFailed as exc:
+        if exc.sent and exc.status == 400 and exc.rejected:
+            m.note(f"update_custom_asset with another client_id: refused by Gorelo (HTTP {exc.status})")
+            return
+        if exc.sent and not exc.rejected:  # a 5xx, a timeout or an unconfirmed write: Gorelo may have processed it
+            m.manifest.update_details("custom_asset", asset_id, client_id=CUSTOM_ASSET_CLIENT_UNKNOWN)
+            where = f"unknown whether the asset moved to client {SITE.second_client}; look for {label!r} in the Gorelo app"
+            m.note(f"update_custom_asset with another client_id: outcome unknown ({exc.text[:80]}); {where}")
+            raise CheckFailed(f"update_custom_asset with another client was unexpected: {exc.text[:120]} ({where})") from None
+        # not sent (a local validation error) or a 4xx other than 400 (401, 403, 404, 429, ...): Gorelo did not process it
+        status = f"HTTP {exc.status}" if exc.status is not None else "no HTTP answer"
+        raise CheckFailed(
+            f"update_custom_asset with another client was not refused by Gorelo with HTTP 400, so the negative check was not "
+            f"evaluated ({status}): {exc.text[:120]} (the asset stays on the test client)"
+        ) from None
+    m.manifest.update_details("custom_asset", asset_id, client_id=SITE.second_client)
+    m.note(f"custom asset {asset_id} MOVED to client {SITE.second_client}: {custom_asset_residue(SITE.second_client)}")
+    raise CheckFailed(
+        "update_custom_asset with another client_id was ACCEPTED by Gorelo (the asset may now belong to client "
+        f"{SITE.second_client}; look for {label!r} in the Gorelo app)"
+    )
+
+
 async def area_invoices(m: Matrix) -> None:
     """A Draft invoice for the test client, created, read, listed, exported as a PDF and deleted again.
 
@@ -2065,6 +2217,7 @@ AREAS: tuple[Area, ...] = (
     Area("email", area_email, sends_email=True),
     Area("time", area_time),
     Area("items", area_items),
+    Area(CUSTOM_ASSETS_AREA, area_custom_assets),
     Area("invoices", area_invoices),
     Area(APPROVED_INVOICE_AREA, area_approved_invoice),
     Area("uptime", area_uptime),
@@ -2105,7 +2258,8 @@ def select_areas(only: Sequence[str] | None, skip_email: bool, with_approved_inv
 
 @dataclass
 class AreaResult:
-    """status: pass, FAIL, skipped (scope missing, no run ticket, items without --with-items, invoices without
+    """status: pass, FAIL, skipped (scope missing, no run ticket, items without --with-items, custom_assets without
+    --with-custom-assets, invoices without
     --with-invoices, approved_invoice without --with-approved-invoice or with a precondition that does not hold, no
     catalog item or project type to use) or not run (the run stopped after a guard refusal)."""
 
@@ -2167,6 +2321,8 @@ class MatrixReport:
     refused: int = 0
     interrupted: str | None = None
     voided: list[str] = field(default_factory=list)
+    assets: list[str] = field(default_factory=list)
+    asset_clients: dict[str, Any] = field(default_factory=dict)  # asset id -> client_id of its manifest details (see residue_asset_clients)
 
     @property
     def ok(self) -> bool:
@@ -2213,6 +2369,8 @@ class MatrixReport:
                     "an Approved invoice is left over: check the accounting system, then void it with: "
                     f"python -m scripts.live.cleanup {self.manifest_path} --void-approved ({VOID_COMMAND_NOTE})"
                 )
+        for asset in self.assets:  # a custom asset cannot be deleted through the API: the operator removes it by hand
+            lines.append(f"reminder: custom asset {asset} {custom_asset_residue(self.asset_clients.get(asset))}")
         for name in self.voided:  # the last thing said before the result: an invoice voided in Gorelo may still be open in Xero
             lines.append(f"reminder: approved invoice {name}: {VOID_REMINDER}")
         lines.append("result: " + ("PASSED" if self.ok else "FAILED"))
@@ -2238,6 +2396,20 @@ def voided_invoices(manifest: Manifest) -> list[str]:
     return names
 
 
+def residue_assets(manifest: Manifest) -> list[str]:
+    """The ids of the custom assets of this run: none of them can be deleted through the API, so each stays on the test
+    client until the operator removes it in the Gorelo app (the cleanup reports each as a known residue, CUSTOM_ASSET_RESIDUE)."""
+    return [str(record.id) for record in manifest.all_created() if record.kind == "custom_asset"]
+
+
+def residue_asset_clients(manifest: Manifest) -> dict[str, Any]:
+    """Where each custom asset of this run may be: its id -> the client_id of its manifest details. The negative check changes
+    that to the second client (it was accepted) or to CUSTOM_ASSET_CLIENT_UNKNOWN (it is not known); the reminder names it."""
+    return {
+        str(record.id): record.details.get("client_id") for record in manifest.all_created() if record.kind == "custom_asset"
+    }
+
+
 async def run_matrix(
     *,
     areas: Sequence[str] | None = None,
@@ -2246,6 +2418,7 @@ async def run_matrix(
     with_items: bool = False,
     with_invoices: bool = False,
     with_approved_invoice: bool = False,
+    with_custom_assets: bool = False,
     settings: Settings | None = None,
     transport: Any = None,
     pace: float = PACE_SECONDS,
@@ -2263,6 +2436,11 @@ async def run_matrix(
     leftovers    also delete the leftovers listed in site.local.toml [leftovers] (run_cleanup(leftovers=True)).
     with_items   run the items area (--with-items). Without it the area is skipped with ITEMS_SKIP_REASON, also when
                  it was selected with areas=["items"], and the three item tools cannot be called.
+    with_custom_assets run the custom_assets area (--with-custom-assets). Without it the area is skipped with
+                 CUSTOM_ASSETS_SKIP_REASON, also when it was selected with areas=["custom_assets"], and the three custom asset
+                 tools cannot be called. The asset it creates cannot be deleted through the API: the cleanup reports it as a
+                 known residue and the summary tells the operator to remove it in the Gorelo app. Not allowed beside
+                 with_approved_invoice (that run takes no other flag).
     with_invoices run the invoices area (--with-invoices). Without it the area is skipped with INVOICES_SKIP_REASON,
                  also when it was selected with areas=["invoices"], and the six invoice tools cannot be called.
     with_approved_invoice run the approved_invoice area (--with-approved-invoice), which approves one $1 invoice on
@@ -2292,7 +2470,8 @@ async def run_matrix(
         alongside = [
             flag
             for flag, given in (
-                ("--with-items", with_items), ("--with-invoices", with_invoices), ("--leftovers", leftovers),
+                ("--with-items", with_items), ("--with-invoices", with_invoices),
+                ("--with-custom-assets", with_custom_assets), ("--leftovers", leftovers),
                 ("--skip-email", skip_email),
             )
             if given
@@ -2300,7 +2479,7 @@ async def run_matrix(
         if alongside:
             raise UsageError(f"--with-approved-invoice runs alone: it cannot be combined with {', '.join(alongside)}")
     chosen = settings if settings is not None else live_settings()
-    needed = tools_for(with_items, with_invoices, with_approved_invoice)
+    needed = tools_for(with_items, with_invoices, with_approved_invoice, with_custom_assets)
     offered = {spec.name for spec in REGISTRY.select(chosen.toolsets, chosen.destructive)}
     if needed - offered:  # a renamed or gated tool would otherwise show up half way through the run
         raise SetupError("the server does not offer the tools the matrix calls: " + ", ".join(sorted(needed - offered)))
@@ -2308,7 +2487,10 @@ async def run_matrix(
     manifest = Manifest.start(started, directory=directory)
     echo(f"write matrix {manifest.run_id}: manifest {manifest.path}")
     echo("areas: " + ", ".join(area.key for area in selected))
-    guard = LiveGuard("write", manifest, require_intents=True, allow_approved_invoice=with_approved_invoice)
+    guard = LiveGuard(
+        "write", manifest, require_intents=True, allow_approved_invoice=with_approved_invoice,
+        allow_custom_assets=with_custom_assets,
+    )
     pacer = Pacer(pace)
     hooks = {"request": [guard, pacer]}
     results: list[AreaResult] = []
@@ -2335,6 +2517,7 @@ async def run_matrix(
                     with_items=with_items,
                     with_invoices=with_invoices,
                     with_approved_invoice=with_approved_invoice,
+                    with_custom_assets=with_custom_assets,
                     sync_interval=sync_interval,
                     sync_polls=sync_polls,
                     gorelo=gorelo,
@@ -2376,6 +2559,8 @@ async def run_matrix(
             refused=len(guard.violations),
             interrupted=interrupted,
             voided=voided_invoices(manifest),  # after the cleanup: it may have found an invoice void too
+            assets=residue_assets(manifest),
+            asset_clients=residue_asset_clients(manifest),
         )
         for line in report.render():
             echo(scrub(line, chosen.api_key))
@@ -2409,6 +2594,13 @@ def main(argv: list[str] | None = None) -> int:
         "area is skipped, also under --only items",
     )
     parser.add_argument(
+        "--with-custom-assets",
+        action="store_true",
+        help="also run the custom_assets area (creates and updates ONE custom asset on the test client, which CANNOT be deleted "
+        "through the API: it stays there until removed in the Gorelo app); without it the area is skipped, also under "
+        "--only custom_assets",
+    )
+    parser.add_argument(
         "--with-invoices",
         action="store_true",
         help="also run the invoices area (creates and deletes a Draft invoice on the test client, which uses up one invoice "
@@ -2431,6 +2623,7 @@ def main(argv: list[str] | None = None) -> int:
                 with_items=args.with_items,
                 with_invoices=args.with_invoices,
                 with_approved_invoice=args.with_approved_invoice,
+                with_custom_assets=args.with_custom_assets,
             )
         )
     except UsageError as exc:

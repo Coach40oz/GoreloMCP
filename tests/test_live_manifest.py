@@ -129,16 +129,18 @@ SAMPLE_IDS = {
     "side_conversation": uid(9),
     "approval": "approval-1",
     "invoice": uid(11),
+    "custom_asset": uid(12),
 }
 
 
-def test_the_kinds_are_the_fifteen_the_harness_creates():
+def test_the_kinds_are_the_sixteen_the_harness_creates():
     assert KINDS == (
         "client", "contact", "ticket", "comment", "time_entry", "item", "uptime", "project", "section", "task",
-        "project_comment", "attachment", "side_conversation", "approval", "invoice",
+        "project_comment", "attachment", "side_conversation", "approval", "invoice", "custom_asset",
     )
     assert set(ID_TYPES) == set(KINDS) and set(SAMPLE_IDS) == set(KINDS)
     assert ID_TYPES["invoice"] == "uuid"  # an invoice is named by a GUID, never by a number
+    assert ID_TYPES["custom_asset"] == "uuid"  # so is a custom asset (customAssetId is a uuid)
 
 
 def test_an_invoice_is_recorded_with_its_status_number_and_display_number(manifest):

@@ -49,7 +49,7 @@ The guard and cleanup read these `details` keys, so the harness must record them
                        cleaned nor a leftover), like an uploaded file
 
 `id` is an int for client, contact and time_entry, a UUID for ticket, comment, item, uptime, project,
-section, task, project_comment and invoice, and any short token for attachment, side_conversation and approval.
+section, task, project_comment, invoice and custom_asset, and any short token for attachment, side_conversation and approval.
 Never put secrets in `details` (the manifest refuses keys that look like one). An uploaded attachment's url
 carries an access token: record its name, not its url.
 """
@@ -85,6 +85,7 @@ KINDS: tuple[str, ...] = (
     "side_conversation",
     "approval",
     "invoice",
+    "custom_asset",
 )
 # "int": a positive integer. "uuid": a UUID (stored lowercase, hyphenated). "any": either of those or a short token.
 ID_TYPES: dict[str, str] = {
@@ -103,6 +104,7 @@ ID_TYPES: dict[str, str] = {
     "side_conversation": "any",
     "approval": "any",
     "invoice": "uuid",
+    "custom_asset": "uuid",
 }
 # the kinds of records that exist before a run (listed leftovers of earlier probes)
 LEFTOVER_KINDS = ("client", "contact")

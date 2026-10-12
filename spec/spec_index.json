@@ -1,8 +1,34 @@
 {
- "contract_sha256": "56005ff283308e99baac861b53b44adbb50c82cb4b185e44a07a08d4c7518b1b",
- "op_count": 98,
+ "contract_sha256": "bce2fad59937fd6f1cda91c27b9e4ee81fb6cf9d87de8b0680c2a8962cc64a41",
+ "op_count": 103,
  "openapi": "3.0.1",
  "ops": {
+  "DELETE /v1/api-keys/{apiKeyId}": {
+   "body": null,
+   "method": "DELETE",
+   "operation_id": "delete_v1_api-keys_apiKeyId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/api-keys/{apiKeyId}",
+   "path_params": {
+    "apiKeyId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "DeleteApiKeyResult",
+    "kind": "envelope",
+    "schema": "DeleteApiKeyResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
   "DELETE /v1/assets/agents/{deviceId}": {
    "body": null,
    "method": "DELETE",
@@ -548,6 +574,38 @@
     "500"
    ]
   },
+  "GET /v1/api-keys": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_api-keys",
+   "page_size_rule": "reject",
+   "paged": true,
+   "path": "/v1/api-keys",
+   "path_params": {},
+   "query_params": {
+    "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "PageSize": {
+     "default": 50,
+     "format": "int32",
+     "required": false,
+     "type": "integer"
+    }
+   },
+   "response": {
+    "data": "[ApiKeyModel]",
+    "kind": "envelope",
+    "schema": "ApiKeyModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "500"
+   ]
+  },
   "GET /v1/assets/agents": {
    "body": null,
    "method": "GET",
@@ -695,6 +753,26 @@
    "status_codes": [
     "200",
     "400",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/assets/custom/hardware-types": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_assets_custom_hardware-types",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/custom/hardware-types",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "[HardwareTypeListItemModel]",
+    "kind": "envelope",
+    "schema": "HardwareTypeListItemModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
     "401",
     "500"
    ]
@@ -2529,6 +2607,80 @@
     "500"
    ]
   },
+  "PATCH /v1/assets/custom/{customAssetId}": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "ClientId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "ContactId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "Description": {
+      "nullable": true,
+      "type": "string"
+     },
+     "HardwareTypeId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "IpAddress": {
+      "nullable": true,
+      "type": "string"
+     },
+     "LocationId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "Name": {
+      "nullable": true,
+      "type": "string"
+     },
+     "SerialNumber": {
+      "nullable": true,
+      "type": "string"
+     },
+     "WarrantyEndDate": {
+      "format": "date",
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "UpdateCustomAssetCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_assets_custom_customAssetId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/custom/{customAssetId}",
+   "path_params": {
+    "customAssetId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "UpdateCustomAssetResult",
+    "kind": "envelope",
+    "schema": "UpdateCustomAssetResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "500"
+   ]
+  },
   "PATCH /v1/clients/{clientId}": {
    "body": {
     "content_type": "application/json-patch+json",
@@ -3534,6 +3686,74 @@
     "data": "CreateApiKeyResult",
     "kind": "envelope",
     "schema": "CreateApiKeyResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "500"
+   ]
+  },
+  "POST /v1/assets/custom": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "ClientId": {
+      "format": "int64",
+      "nullable": false,
+      "type": "integer"
+     },
+     "ContactId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "Description": {
+      "nullable": true,
+      "type": "string"
+     },
+     "HardwareTypeId": {
+      "format": "int64",
+      "nullable": false,
+      "type": "integer"
+     },
+     "IpAddress": {
+      "nullable": true,
+      "type": "string"
+     },
+     "LocationId": {
+      "format": "int64",
+      "nullable": false,
+      "type": "integer"
+     },
+     "Name": {
+      "nullable": false,
+      "type": "string"
+     },
+     "SerialNumber": {
+      "nullable": true,
+      "type": "string"
+     },
+     "WarrantyEndDate": {
+      "format": "date",
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "CreateCustomAssetCommand"
+   },
+   "method": "POST",
+   "operation_id": "post_v1_assets_custom",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/custom",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "CreateCustomAssetResult",
+    "kind": "envelope",
+    "schema": "CreateCustomAssetResultBaseResponse"
    },
    "status_codes": [
     "200",
@@ -5176,6 +5396,90 @@
    "format": "int32",
    "required": [],
    "type": "integer"
+  },
+  "ApiKeyModel": {
+   "additional_properties": false,
+   "fields": {
+    "CreatedAt": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Description": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "LastUsedAt": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "ParentApiKeyId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "RevokedAt": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "Scopes": {
+     "items": {
+      "type": "string"
+     },
+     "nullable": false,
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ApiKeyModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "ApiKeyModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "nullable": false,
+     "ref": "PaginationDataContext",
+     "type": null
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
   },
   "ApprovalDetailModel": {
    "additional_properties": false,
@@ -7239,6 +7543,100 @@
    ],
    "type": "object"
   },
+  "CreateCustomAssetCommand": {
+   "additional_properties": false,
+   "fields": {
+    "ClientId": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "ContactId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Description": {
+     "nullable": true,
+     "type": "string"
+    },
+    "HardwareTypeId": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "IpAddress": {
+     "nullable": true,
+     "type": "string"
+    },
+    "LocationId": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "SerialNumber": {
+     "nullable": true,
+     "type": "string"
+    },
+    "WarrantyEndDate": {
+     "format": "date",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "CreateCustomAssetResult": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "CreateCustomAssetResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "CreateCustomAssetResult",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "CreateInvoiceCommand": {
    "additional_properties": false,
    "fields": {
@@ -8832,6 +9230,11 @@
      "nullable": true,
      "type": "integer"
     },
+    "ContactId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
     "CreatedOn": {
      "format": "date-time",
      "nullable": false,
@@ -8842,8 +9245,13 @@
      "type": "string"
     },
     "HardwareType": {
-     "nullable": false,
+     "nullable": true,
      "type": "string"
+    },
+    "HardwareTypeId": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
     },
     "Id": {
      "format": "uuid",
@@ -8873,7 +9281,7 @@
      "type": "string"
     },
     "WarrantyEndDate": {
-     "format": "date-time",
+     "format": "date",
      "nullable": true,
      "type": "string"
     }
@@ -8936,6 +9344,52 @@
     "Data": {
      "nullable": false,
      "ref": "DeleteAgentResult",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DeleteApiKeyResult": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DeleteApiKeyResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "DeleteApiKeyResult",
      "type": null
     },
     "DataContext": {
@@ -10451,6 +10905,69 @@
     "Name": {
      "nullable": false,
      "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "HardwareTypeListItemModel": {
+   "additional_properties": false,
+   "fields": {
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "HardwareTypeListItemModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "HardwareTypeListItemModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
     }
    },
    "required": [],
@@ -14621,6 +15138,100 @@
    ],
    "type": "object"
   },
+  "UpdateCustomAssetCommand": {
+   "additional_properties": false,
+   "fields": {
+    "ClientId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "ContactId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Description": {
+     "nullable": true,
+     "type": "string"
+    },
+    "HardwareTypeId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "IpAddress": {
+     "nullable": true,
+     "type": "string"
+    },
+    "LocationId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Name": {
+     "nullable": true,
+     "type": "string"
+    },
+    "SerialNumber": {
+     "nullable": true,
+     "type": "string"
+    },
+    "WarrantyEndDate": {
+     "format": "date",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateCustomAssetResult": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateCustomAssetResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "UpdateCustomAssetResult",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "UpdateItemCommand": {
    "additional_properties": false,
    "fields": {
@@ -15869,6 +16480,6 @@
    "type": "apiKey"
   }
  },
- "sha256": "a7d66dbfee064477fcb8e5bc2cdd70ae530abc7a5b8e4188827586e137a26479",
+ "sha256": "929bcea8f9703221cff551b1185c0be3558e13171c550664ce3170ceb9c215d4",
  "source": "https://api.usw.gorelo.io/swagger/v1/swagger.json"
 }

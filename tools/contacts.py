@@ -216,7 +216,7 @@ async def list_contacts(
     client_ids: Annotated[
         list[StrictId] | None, Field(description="Only these clients' contacts (list_clients). Not with client_id.")
     ] = None,
-    status_ids: Annotated[list[StrictId] | None, Field(description="Status.Id values from contact records.")] = None,
+    status_ids: Annotated[list[StrictId] | None, Field(description="1 Active, 2 Inactive, 3 Temporary, 4 Archive.")] = None,
     query: Annotated[str | None, Field(description="Matches email addresses, first name and last name.")] = None,
     created_since: Annotated[str | None, Field(description=f"Created at or after; {SINCE_HELP}")] = None,
     created_before: Annotated[str | None, Field(description="Created before.")] = None,
@@ -226,7 +226,7 @@ async def list_contacts(
     cursor: Annotated[str | None, Field(description="next_cursor from the previous call.")] = None,
 ) -> dict:
     """List contacts one page per call; returns {items, has_more, next_cursor, total_count, ...}.
-    Filter by client_id (one) or client_ids (several), not both. Rows never include SecondaryEmail: Gorelo does not return it. Paging: pass next_cursor as cursor, same filters, until has_more is false.
+    Filter by client_id (one) or client_ids (several), not both. Rows can be temporary contacts (IsTemporaryContact true, ClientId null) that belong to no client (Gorelo's release notes of 2026-10-09). Rows never include SecondaryEmail: Gorelo does not return it. Paging: pass next_cursor as cursor, same filters, until has_more is false.
     """
     if client_id is not None and client_ids is not None:
         raise ValueError(
@@ -314,7 +314,7 @@ async def create_contact(
     description: Annotated[str | None, Field(description="Free-text notes.")] = None,
 ) -> dict:
     """Create a contact under a client; returns the created contact record.
-    Only client_id, first_name, last_name and primary_email are required; nothing else is inferred or defaulted. Check list_contacts first for a duplicate. Side effects: creates a real contact at once; this server cannot delete contacts, so a mistaken one is removed in the Gorelo app.
+    This tool always creates a contact for a client, never a client-less temporary one. Only client_id, first_name, last_name and primary_email are required; nothing else is inferred or defaulted. Check list_contacts first for a duplicate. Side effects: creates a real contact at once; this server cannot delete contacts, so a mistaken one is removed in the Gorelo app.
     """
     cid = positive_id("client_id", client_id)
     non_empty("first_name", first_name)

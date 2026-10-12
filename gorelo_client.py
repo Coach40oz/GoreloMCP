@@ -78,7 +78,9 @@ PAGE_SIZE_MIN, PAGE_SIZE_MAX = 1, 200
 
 # Never callable, by any tool, whatever its kind. Deleting an agent asset UNINSTALLS the RMM agent
 # from the host; the other deletes destroy records the operator wants to remove by hand in the app;
-# POST /v1/api-keys would let a tool mint API credentials (a key with any scope, returned once).
+# POST /v1/api-keys would let a tool mint API credentials (a key with any scope, returned once);
+# DELETE /v1/api-keys/{apiKeyId} revokes a key at once and for good, and a key may revoke itself, so a
+# tool could revoke the server's own key and lock the server out.
 # Keys are written the way the spec index spells them today, but they are COMPARED by shape
 # (is_forbidden_op): see normalize_op_key.
 FORBIDDEN_OPS = frozenset(
@@ -90,6 +92,7 @@ FORBIDDEN_OPS = frozenset(
         "DELETE /v1/assets/custom/{customAssetId}",
         "DELETE /v1/contracts/{contractId}",
         "POST /v1/api-keys",
+        "DELETE /v1/api-keys/{apiKeyId}",
     }
 )
 

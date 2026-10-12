@@ -416,7 +416,7 @@ async def create_ticket_comment(
     ] = None,
 ) -> dict:
     """Add a comment to a ticket and return it.
-    Who is emailed: private (default) nobody; public the ticket contact and CCs; side_conversation that conversation's recipients; approval the approvers. Tell the user who before posting anything not private. Recorded as written by the API; cannot be edited; only private ones can be deleted (delete_ticket_comment, when deletes are enabled). If the read-back fails the result is {Id, warning}: it WAS posted, do not post it again (a repeat re-sends any email); check list_ticket_comments.
+    Who is emailed: private (default) nobody; public the ticket contact and CCs; side_conversation that conversation's recipients; approval the approvers. Tell the user who before posting anything not private. A comment sent with created_on (a backdated import) sends no emails or notifications, whatever its type. Recorded as written by the API; cannot be edited; only private ones can be deleted (delete_ticket_comment, when deletes are enabled). If the read-back fails the result is {Id, warning}: it WAS posted, do not post it again (a repeat re-sends any email); check list_ticket_comments.
     """
     ticket = guid("ticket_id", ticket_id)
     text = _required_text("body", body)

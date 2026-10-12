@@ -878,7 +878,7 @@ async def create_ticket(
         str | None, Field(description="Imported close date; needs created_on and a closed status_id")
     ] = None,
     created_by_name: Annotated[str | None, Field(description="Creator name when no contact is resolved")] = None,
-    is_unread: Annotated[bool | None, Field(description="false creates it read (default unread)")] = None,
+    is_unread: Annotated[bool | None, Field(description="false creates it read (default unread); not true if backdated")] = None,
     send_created_email: Annotated[
         StrictBool,
         Field(
@@ -895,8 +895,7 @@ async def create_ticket(
     Resolve every id first, never guess.
     Side effects: creates the ticket and runs the tenant's ticket automation, which may still notify contacts;
     send_created_email=true also emails the contact.
-    Backdating (imports): created_on, updated_on, closed_on need an offset and no future times; updated_on and
-    closed_on require created_on.
+    Backdating: created_on, updated_on, closed_on need an offset, no future times; updated_on and closed_on require created_on. Backdated tickets send no emails or notifications: send_created_email=true and is_unread=true are refused.
     The record is read back; if that fails the result is {Id, warning}: the ticket WAS created, do not create it again.
     """
     _title("title", title)
@@ -920,6 +919,18 @@ async def create_ticket(
     for param, text, moment in (("updated_on", updated_text, updated_at), ("closed_on", closed_text, closed_at)):
         if moment is not None and created_at is not None and moment < created_at:
             raise ValueError(f"{param}: {text} is earlier than created_on ({created_text}); it must not be")
+    backdated = "created_on" if created_at is not None else ("closed_on" if closed_at is not None else None)
+    if backdated is not None:
+        if send_created_email:
+            raise ValueError(
+                f"send_created_email: Gorelo ignores it when {backdated} is supplied (a backdated import sends no "
+                f"emails); omit send_created_email or drop {backdated}"
+            )
+        if is_unread:
+            raise ValueError(
+                f"is_unread: Gorelo ignores it when {backdated} is supplied (the ticket is created read); "
+                f"omit is_unread or drop {backdated}"
+            )
     values: dict[str, Any] = {
         "title": title,
         "description": description,

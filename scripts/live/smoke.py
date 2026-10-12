@@ -438,6 +438,7 @@ CASES: tuple[Case, ...] = (
     Case("list_agents", "paged", args=lambda found: {"page_size": 10}, provides="agent"),
     Case("get_agent", "record", args=_by("agent", "an agent", "agent_id"), same_id="agent"),
     Case("list_custom_assets", "paged", args=lambda found: {"page_size": 10}),
+    Case("list_custom_asset_hardware_types", "list"),
     Case("list_alerts", "paged", args=lambda found: {"page_size": 20}),
     # tickets
     Case("list_ticket_statuses", "list", nonempty=True),

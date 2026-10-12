@@ -73,6 +73,7 @@ class ReadFake:
         on("/v1/assets/agents", Pages([row(uid(31))]))
         on("/v1/assets/agents/{deviceId}", lambda q: envelope(row(last(q, 4))))
         on("/v1/assets/custom", Pages([row(uid(32))]))
+        on("/v1/assets/custom/hardware-types", Items([row(42)]))
         on("/v1/alerts", Pages([row(uid(33))]))
         on("/v1/tickets/statuses", Items([row(1), row(4)]))
         on("/v1/tickets/types", Items([row(7101)]))
@@ -178,14 +179,14 @@ def outcomes(report) -> dict[str, smoke.Row]:
 
 def test_the_plan_covers_exactly_the_registered_read_tools_once_and_get_ticket_three_times():
     reads = smoke.read_tools()
-    assert len(reads) == 51 and "export_invoice_pdf" not in reads
+    assert len(reads) == 52 and "export_invoice_pdf" not in reads
     assert {"list_alerts", "get_invoice"} <= set(reads)
     assert {spec.name for spec in REGISTRY.specs if spec.kind == "read"} == set(reads)
     assert smoke.plan_problems(smoke.CASES, reads) == ([], [])
     tools = [case.tool for case in smoke.CASES]
     assert {name: count for name, count in collections.Counter(tools).items() if count > 1} == {"get_ticket": 3}
     labels = [case.row for case in smoke.CASES]
-    assert len(labels) == len(set(labels)) == 53
+    assert len(labels) == len(set(labels)) == 54
     assert [case.row for case in smoke.CASES if case.tool == "get_ticket"] == [
         "get_ticket (guid)", "get_ticket (number)", "get_ticket (display number)",
     ]
@@ -211,14 +212,14 @@ async def test_a_full_run_calls_every_read_tool_once_sends_only_gets_and_passes(
     fake = ReadFake()
     report = await run(fake)
     assert report.ok, "\n".join(lines)
-    assert len(report.rows) == 53 and all(r.outcome == smoke.OK for r in report.rows), [
+    assert len(report.rows) == 54 and all(r.outcome == smoke.OK for r in report.rows), [
         (r.label, r.outcome, r.note) for r in report.rows if r.outcome != smoke.OK
     ]
     assert {r.method for r in fake.mock.requests} == {"GET"}
-    # 51 calls with HTTP (two local tables make none) plus the search behind get_ticket by number and by display number
-    assert report.requests == len(fake.mock.requests) == 53 and report.refused == 0
-    assert report.counts() == {smoke.OK: 53, smoke.SCOPE_MISSING: 0, smoke.SKIPPED: 0, smoke.FAILED: 0}
-    assert lines[-1] == "result: PASSED" and "53 checks: 53 ok, 0 scope missing, 0 skipped, 0 FAILED; 53 requests sent" in lines[-2]
+    # 52 calls with HTTP (two local tables make none) plus the search behind get_ticket by number and by display number
+    assert report.requests == len(fake.mock.requests) == 54 and report.refused == 0
+    assert report.counts() == {smoke.OK: 54, smoke.SCOPE_MISSING: 0, smoke.SKIPPED: 0, smoke.FAILED: 0}
+    assert lines[-1] == "result: PASSED" and "54 checks: 54 ok, 0 scope missing, 0 skipped, 0 FAILED; 54 requests sent" in lines[-2]
     assert not fake.mock.unmatched
 
 
@@ -230,7 +231,7 @@ async def test_the_rows_are_printed_as_they_complete_and_make_up_the_rendered_ta
     by_start = {line.split()[0]: made for line, made in seen if line.split()[0] in ("tool", "health_check", "list_clients", "list_form_responses")}
     assert by_start["tool"] == 0  # the header is out before the first request
     assert by_start["health_check"] == 1 and by_start["list_clients"] == 2  # each row appears when its call is done
-    assert by_start["list_form_responses"] == 53  # the last row only after the last request
+    assert by_start["list_form_responses"] == 54  # the last row only after the last request
 
 
 async def test_get_ticket_is_called_with_the_guid_the_number_and_the_display_number_of_a_listed_ticket(run):
@@ -282,7 +283,7 @@ async def test_list_alerts_is_read_as_a_paged_list_of_20_and_get_invoice_reads_t
     assert one.method == "GET" and one.query == {}
     names = [row_.label for row_ in report.rows]
     assert names.index("list_invoices") < names.index("get_invoice") < names.index("list_items")
-    assert names.index("list_custom_assets") < names.index("list_alerts") < names.index("list_ticket_statuses")
+    assert names.index("list_custom_assets") < names.index("list_custom_asset_hardware_types") < names.index("list_alerts") < names.index("list_ticket_statuses")
 
 
 async def test_the_smoke_stays_read_only_it_never_exports_an_invoice_pdf(run):
@@ -493,8 +494,8 @@ async def test_the_requests_are_paced_one_second_apart(run, monkeypatch):
     monkeypatch.setattr(smoke, "Pacer", lambda interval: _env.Pacer(interval, clock=time.clock, sleep=time.sleep))
     assert smoke.PACE_SECONDS == 1.0
     report = await run(ReadFake(), pace=smoke.PACE_SECONDS)
-    assert report.ok and report.requests == 53
-    assert time.sleeps == [1.0] * 52  # one second between two requests, none before the first
+    assert report.ok and report.requests == 54
+    assert time.sleeps == [1.0] * 53  # one second between two requests, none before the first
 
 
 # --------------------------------------------------------------------------

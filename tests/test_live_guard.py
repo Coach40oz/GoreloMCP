@@ -2933,6 +2933,8 @@ SPEC = load_spec_index()
 NEVER_OPS = {
     "POST /v1/alerts",
     "POST /v1/api-keys",
+    "GET /v1/api-keys",
+    "DELETE /v1/api-keys/{apiKeyId}",
     "DELETE /v1/assets/agents/{deviceId}",
     "DELETE /v1/assets/custom/{customAssetId}",
     "DELETE /v1/contracts/{contractId}",
@@ -2967,7 +2969,7 @@ def test_every_write_operation_of_the_spec_is_blocked_for_a_stranger(guard, clea
             subject.check(request)
 
 
-@pytest.mark.parametrize("key", [k for k in GET_OPS if k not in CONDITIONAL_GETS])
+@pytest.mark.parametrize("key", [k for k in GET_OPS if k not in CONDITIONAL_GETS and k not in NEVER_OPS])
 def test_every_get_operation_of_the_spec_is_allowed_in_both_modes(guard, read_guard, key):
     request = stranger_request(SPEC.op(key))
     for subject in (guard, read_guard):
@@ -3196,3 +3198,127 @@ def test_a_guard_refuses_to_be_built_when_a_key_is_missing_and_names_it(manifest
     drop_key(monkeypatch, tmp_path, section, key)
     with pytest.raises(SiteConfigError, match=rf"missing key \[{section}\] {key}.*site\.example\.toml"):
         LiveGuard("write", manifest)
+
+
+# --------------------------------------------------------------------------
+# API keys and custom assets (r6)
+# --------------------------------------------------------------------------
+
+CUSTOM_ASSET = uid(61)  # a custom asset the run created
+CUSTOM_BODY = {"Name": f"{RUN}-asset", "ClientId": TEST_CLIENT, "LocationId": 5001, "HardwareTypeId": 42, "IpAddress": "192.0.2.10"}
+
+
+@pytest.fixture
+def assets_manifest(manifest) -> Manifest:
+    manifest.created("custom_asset", CUSTOM_ASSET, manifest.label("asset"), {"client_id": TEST_CLIENT})
+    return manifest
+
+
+@pytest.fixture
+def assets_guard(assets_manifest) -> LiveGuard:
+    return LiveGuard("write", assets_manifest, allow_custom_assets=True)
+
+
+@pytest.mark.parametrize("method, path", [("GET", "/api-keys"), ("DELETE", f"/api-keys/{uid(7)}"), ("POST", "/api-keys")])
+def test_api_keys_are_never_listed_revoked_or_created_in_any_mode(guard, cleanup_guard, read_guard, assets_guard, method, path):
+    body = {"Name": "x", "Scopes": []} if method == "POST" else None
+    for subject in (guard, cleanup_guard, read_guard, assets_guard):
+        error = refused(subject, build(method, path, body), "an API key is a credential|read mode allows only GET")
+    assert guard.rule_table()[f"{method} /v1/api-keys" + ("/{apiKeyId}" if method == "DELETE" else "")].startswith("never: ")
+
+
+def test_the_api_key_list_is_refused_by_shape_even_with_a_renamed_placeholder_and_a_query(guard, read_guard):
+    refused(read_guard, build("GET", "/api-keys", params={"PageSize": 5}), "never lists API keys")
+    refused(guard, build("DELETE", f"/api-keys/{uid(7)}"), "never revokes API keys")
+
+
+def test_the_hardware_types_list_is_a_plain_read(guard, read_guard):
+    for subject in (guard, read_guard):
+        subject.check(build("GET", "/assets/custom/hardware-types"))
+    assert guard.rule_table()["GET /v1/assets/custom/hardware-types"] == "allowed"
+
+
+def test_custom_assets_cannot_be_created_or_changed_unless_the_run_enabled_the_area(guard, cleanup_guard, assets_manifest):
+    plain = LiveGuard("write", assets_manifest)
+    for subject in (plain, guard, cleanup_guard):
+        refused(subject, build("POST", "/assets/custom", CUSTOM_BODY), "custom assets cannot be created unless the run enabled")
+        refused(
+            subject, build("PATCH", f"/assets/custom/{CUSTOM_ASSET}", {"ClientId": TEST_CLIENT, "Name": f"{RUN}-x"}),
+            "custom assets cannot be changed unless the run enabled",
+        )
+    assert plain.allow_custom_assets is False  # opt-in, never a default
+
+
+def test_a_cleanup_guard_never_creates_or_changes_a_custom_asset_even_with_the_option(assets_manifest):
+    cleaner = LiveGuard("write", assets_manifest, cleanup=True, allow_custom_assets=True)
+    refused(cleaner, build("POST", "/assets/custom", CUSTOM_BODY), "cannot be created")
+    refused(cleaner, build("PATCH", f"/assets/custom/{CUSTOM_ASSET}", {"ClientId": TEST_CLIENT}), "cannot be changed")
+
+
+def test_the_option_needs_write_mode():
+    with pytest.raises(ValueError, match="allow_custom_assets=True only makes sense in write mode"):
+        LiveGuard("read", None, allow_custom_assets=True)
+
+
+def test_a_custom_asset_is_created_for_the_test_client_with_the_run_name(assets_guard):
+    assets_guard.check(build("POST", "/assets/custom", CUSTOM_BODY))
+    assets_guard.check(build("POST", "/assets/custom", {**CUSTOM_BODY, "ContactId": OPERATOR_CONTACT}))
+    refused(assets_guard, build("POST", "/assets/custom", {**CUSTOM_BODY, "ClientId": SECOND}), "ClientId must be 9501")
+    refused(assets_guard, build("POST", "/assets/custom", {**CUSTOM_BODY, "ClientId": 12345}), "ClientId must be 9501")
+    refused(assets_guard, build("POST", "/assets/custom", {**CUSTOM_BODY, "ClientId": str(TEST_CLIENT)}), "ClientId must be a JSON integer")
+    refused(assets_guard, build("POST", "/assets/custom", {k: v for k, v in CUSTOM_BODY.items() if k != "ClientId"}), "ClientId is required")
+    refused(assets_guard, build("POST", "/assets/custom", {**CUSTOM_BODY, "Name": "Customer laptop"}), "Name must start with the run id")
+    refused(assets_guard, build("POST", "/assets/custom", {**CUSTOM_BODY, "Name": "MCPTEST-20000101000000-asset"}), "Name must start with the run id")
+    refused(assets_guard, build("POST", "/assets/custom", {k: v for k, v in CUSTOM_BODY.items() if k != "Name"}), "Name is required")
+    refused(assets_guard, build("POST", "/assets/custom", {**CUSTOM_BODY, "ContactId": 4242}), "neither the operator contact")
+    refused(assets_guard, build("POST", "/assets/custom", {**CUSTOM_BODY, "Surprise": 1}), "field the spec does not define")
+
+
+def test_a_custom_asset_create_needs_an_open_custom_asset_intent_when_intents_are_required(assets_manifest):
+    strict = LiveGuard("write", assets_manifest, require_intents=True, allow_custom_assets=True)
+    refused(strict, build("POST", "/assets/custom", CUSTOM_BODY), "no open intent of kind 'custom_asset'")
+    assets_manifest.intent("custom_asset", f"{RUN}-asset", {"client_id": TEST_CLIENT})
+    strict.check(build("POST", "/assets/custom", CUSTOM_BODY))
+    assert _CREATES["POST /v1/assets/custom"] == "custom_asset"
+
+
+def test_a_custom_asset_is_changed_only_when_the_run_created_it_for_the_test_client(assets_guard):
+    path = f"/assets/custom/{CUSTOM_ASSET}"
+    assets_guard.check(build("PATCH", path, {"ClientId": TEST_CLIENT, "Name": f"{RUN}-asset renamed", "IpAddress": None}))
+    assets_guard.check(build("PATCH", path, {"ClientId": TEST_CLIENT, "Description": None, "WarrantyEndDate": None}))
+    refused(assets_guard, build("PATCH", path, {"Description": "no client"}), "ClientId is required and must be 9501")
+    refused(assets_guard, build("PATCH", path, {"ClientId": None, "Description": "x"}), "ClientId is required")
+    refused(assets_guard, build("PATCH", path, {"ClientId": 12345}), "ClientId must be 9501")
+    refused(assets_guard, build("PATCH", path, {"ClientId": str(TEST_CLIENT)}), "ClientId must be a JSON integer")
+    refused(assets_guard, build("PATCH", path, {"ClientId": TEST_CLIENT, "Name": "Customer laptop"}), "Name must start with the run id")
+    refused(assets_guard, build("PATCH", f"/assets/custom/{FOREIGN}", {"ClientId": TEST_CLIENT}), "is not a custom asset created by this run")
+    refused(assets_guard, build("PATCH", f"/assets/custom/{ITEM}", {"ClientId": TEST_CLIENT}), "is not a custom asset created by this run")
+    refused(assets_guard, build("PATCH", "/assets/custom/hardware-types", {"ClientId": TEST_CLIENT}), "not a valid custom asset id")
+    refused(assets_guard, build("PATCH", path, {"ClientId": TEST_CLIENT, "Surprise": 1}), "field the spec does not define")
+
+
+def test_the_negative_check_may_name_the_second_client_and_no_other(assets_guard):
+    path = f"/assets/custom/{CUSTOM_ASSET}"
+    assets_guard.check(build("PATCH", path, {"ClientId": SECOND, "Name": f"{RUN}-asset wrong client"}))
+    refused(assets_guard, build("PATCH", path, {"ClientId": 777, "Name": f"{RUN}-asset"}), "ClientId must be 9501")
+
+
+def test_custom_assets_are_never_deleted_and_the_option_opens_nothing_else(assets_guard):
+    refused(assets_guard, build("DELETE", f"/assets/custom/{CUSTOM_ASSET}"), "writes under /assets/ are never allowed")
+    refused(assets_guard, build("DELETE", f"/assets/agents/{uid(5)}"), "writes under /assets/ are never allowed")
+    refused(assets_guard, build("POST", "/assets/custom/hardware-types", {}), "writes under /assets/ are never allowed")
+    refused(assets_guard, build("PATCH", f"/assets/agents/{uid(5)}", {"ClientId": TEST_CLIENT}), "writes under /assets/ are never allowed")
+    refused(assets_guard, build("POST", f"/assets/custom/{CUSTOM_ASSET}", {"ClientId": TEST_CLIENT}), "writes under /assets/ are never allowed")
+    refused(assets_guard, build("POST", "/alerts", {"ClientId": TEST_CLIENT, "Name": "x", "Resource": "y"}), "never posts alerts")
+    assert assets_guard.rule_table()["DELETE /v1/assets/custom/{customAssetId}"].startswith("never: custom assets are never deleted")
+
+
+def test_the_custom_asset_rules_are_in_the_rule_table(guard):
+    table = guard.rule_table()
+    assert table["POST /v1/assets/custom"].startswith("only with allow_custom_assets (never from a cleanup); ClientId is the test client")
+    assert table["PATCH /v1/assets/custom/{customAssetId}"].startswith("path ids run-created: customAssetId; only with allow_custom_assets")
+
+
+def test_a_custom_asset_id_must_be_a_uuid_in_the_manifest(assets_manifest):
+    with pytest.raises(ValueError):
+        assets_manifest.created("custom_asset", 5, assets_manifest.label("bad"))

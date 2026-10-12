@@ -13,6 +13,8 @@ Modes:  "read"   only GET (and never the invoice PDF).
                  site.local.toml [leftovers] be deleted (the leftover clients and contact), and nothing else.
                  `allow_approved_invoice=True` (off by default; only write_matrix --with-approved-invoice and
                  cleanup --void-approved set it) opens the two invoice rules named below, and nothing else.
+                 `allow_custom_assets=True` (off by default; only write_matrix --with-custom-assets sets it) opens
+                 the two custom asset rules named below, and nothing else.
 
 How a request is read: method; URL (https, the Gorelo API host, no credentials, base path /v1 stripped);
 every path segment is checked (no empty, dot, percent-encoded or odd segment), then the request is matched
@@ -65,6 +67,16 @@ Allowlist (write mode). "Run-created" means the id is in the manifest of this ru
     POST /forms/{formId}/submission-links   TicketId or TaskId run-created
     POST /alerts                  never
     POST /api-keys                never (an API key is a credential: the harness never mints one)
+    GET, DELETE /api-keys         never (an API key is a credential: the harness never lists or revokes one; this also
+                                  holds in read mode, where GET /api-keys is the one GET that is refused besides the PDF)
+    POST /assets/custom           only with allow_custom_assets=True (write_matrix --with-custom-assets) and never from
+                                  a cleanup; ClientId is the test client; Name starts with the run id (MCPTEST-...)
+    PATCH /assets/custom/{customAssetId}  only with allow_custom_assets=True; the path id is a custom asset this run
+                                  created; ClientId is required and is the test client, or the second client (the one
+                                  negative check of the custom_assets area sends a wrong client on purpose and expects
+                                  Gorelo to refuse it); Name, if present, starts with the run id
+    GET /assets/custom/hardware-types  a plain read
+    DELETE /assets/custom/{customAssetId}  never (a custom asset cannot be removed through the API)
     POST /invoices                ClientId is the test client (a JSON integer); StatusId is present and exactly the JSON integer 1
                                   (a Draft: any other value, 5 (Approved, which pushes the invoice to the accounting
                                   system), "1", 1.0, true or no StatusId at all is refused); RecipientEmails absent,
@@ -196,6 +208,7 @@ _KIND_NAMES = {
     "task": "project task",
     "project_comment": "project or task comment",
     "invoice": "test invoice",
+    "custom_asset": "custom asset",
 }
 
 # The manifest kind a comment's ConversationTypeId 3 or 4 may post into, with the words for it: (one, many).
@@ -207,8 +220,10 @@ _NEVER: dict[str, str] = {
     "POST /v1/alerts": "the live harness never posts alerts (an alert can open tickets or notify technicians "
     "and cannot be deleted)",
     "POST /v1/api-keys": "the live harness never creates API keys (an API key is a credential)",
+    "GET /v1/api-keys": "the live harness never lists API keys (an API key is a credential)",
+    "DELETE /v1/api-keys/{apiKeyId}": "the live harness never revokes API keys (an API key is a credential)",
     "DELETE /v1/assets/agents/{deviceId}": "deleting an agent asset UNINSTALLS the RMM agent from the host",
-    "DELETE /v1/assets/custom/{customAssetId}": "custom assets are never deleted",
+    "DELETE /v1/assets/custom/{customAssetId}": "custom assets are never deleted (the API cannot remove one that was created)",
     "DELETE /v1/contracts/{contractId}": "the live harness never deletes contracts",
     "POST /v1/payments": "the live harness never records payments (a payment is accounting data that reaches the connected system)",
     "DELETE /v1/payments/{paymentId}": "the live harness never deletes payments (a payment is accounting data)",
@@ -235,6 +250,16 @@ def _is_side_effect_get(op_key: str) -> bool:
     return normalize_op_key(op_key) in _SIDE_EFFECT_SHAPES
 
 
+def _is_custom_asset_write(method: str, segments: tuple[str, ...]) -> bool:
+    """True for the only two writes under /assets/ that are not refused outright: POST /assets/custom and PATCH
+    /assets/custom/{id} (the rules of LiveGuard decide whether the run may send them). DELETE under /assets/ and every
+    write to agents stay refused before any rule is read."""
+    lowered = tuple(segment.lower() for segment in segments)
+    if lowered[:2] != ("assets", "custom"):
+        return False
+    return (method == "POST" and len(lowered) == 2) or (method == "PATCH" and len(lowered) == 3)
+
+
 # Writes whose path ids must ALL name records this run created: op key -> ((kind, placeholder), ...).
 _TICKET = (("ticket", "ticketId"),)
 _PROJECT = (("project", "projectId"),)
@@ -249,6 +274,7 @@ _PATH_KINDS: dict[str, tuple[tuple[str, str], ...]] = {
     "POST /v1/tickets/{ticketId}/conversations/approval": _TICKET,
     "PATCH /v1/time-entries/{timeEntryId}": (("time_entry", "timeEntryId"),),
     "DELETE /v1/time-entries/{timeEntryId}": (("time_entry", "timeEntryId"),),
+    "PATCH /v1/assets/custom/{customAssetId}": (("custom_asset", "customAssetId"),),
     "PATCH /v1/items/{itemId}": (("item", "itemId"),),
     "DELETE /v1/items/{itemId}": (("item", "itemId"),),
     "PATCH /v1/uptime/{checkId}": (("uptime", "checkId"),),
@@ -283,6 +309,7 @@ _CREATES: dict[str, str] = {
     "POST /v1/tickets/{ticketId}/conversations/approval": "approval",
     "POST /v1/attachments": "attachment",
     "POST /v1/time-entries": "time_entry",
+    "POST /v1/assets/custom": "custom_asset",
     "POST /v1/items": "item",
     "POST /v1/uptime": "uptime",
     "POST /v1/invoices": "invoice",
@@ -576,6 +603,9 @@ class LiveGuard:
                with StatusId 5 under the rules of "The approved invoice" in the module docstring) and the void of an
                invoice recorded with status_id 5 (DELETE /invoices/{invoiceId}). Only write_matrix --with-approved-invoice
                and cleanup --void-approved set it. With cleanup=True the create stays refused: a cleanup creates nothing.
+    allow_custom_assets: write mode only, off by default: also allow POST /assets/custom and PATCH /assets/custom/{id}
+               under the rules of the module docstring. Only write_matrix --with-custom-assets sets it. A custom asset
+               cannot be deleted through the API, so the run that creates one leaves it on the test client.
     The other keyword arguments tune the constants of the allowlist (the defaults are the configured values);
     `allowed_hosts` and `spec` exist for tests. probe_domains: the domains an uptime check may target.
     require_intents: refuse a create unless the manifest holds an open intent of that kind (see the module docstring).
@@ -598,6 +628,7 @@ class LiveGuard:
         probe_domains: frozenset[str] | set[str] | None = None,
         require_intents: bool = False,
         allow_approved_invoice: bool = False,
+        allow_custom_assets: bool = False,
         spec: SpecIndex | None = None,
     ) -> None:
         if mode not in ("read", "write"):
@@ -608,6 +639,8 @@ class LiveGuard:
             raise ValueError("cleanup=True only makes sense in write mode")
         if allow_approved_invoice and mode != "write":
             raise ValueError("allow_approved_invoice=True only makes sense in write mode")
+        if allow_custom_assets and mode != "write":
+            raise ValueError("allow_custom_assets=True only makes sense in write mode")
         cfg = site()  # raises SiteConfigError (names the missing key and site.example.toml) when not configured
         if allowed_clients is None:
             allowed_clients = {cfg.test_client, cfg.second_client}
@@ -627,6 +660,7 @@ class LiveGuard:
         self.manifest = manifest
         self.cleanup = cleanup
         self.allow_approved_invoice = allow_approved_invoice
+        self.allow_custom_assets = allow_custom_assets
         self.allowed_clients = frozenset(allowed_clients)
         self.operator_contact = operator_contact
         self.operator_user = operator_user
@@ -729,7 +763,7 @@ class LiveGuard:
                     "(empty, dot, percent-encoded or unusual characters)",
                     label=label,
                 )
-        if method != "GET" and segments[0].lower() == "assets":
+        if method != "GET" and segments[0].lower() == "assets" and not _is_custom_asset_write(method, segments):
             raise GuardViolation(f"blocked {label}: writes under /assets/ are never allowed", label=label)
         match = self._match(method, segments)
         if match is None:
@@ -738,6 +772,9 @@ class LiveGuard:
         req = _Req(method=method, path=relative, params=params)
         content = self._content(request)
         if method == "GET":
+            never = _never_reason(route.key)
+            if never is not None:
+                raise req.block(never)
             if _is_side_effect_get(route.key):
                 self._check_export(req)
             if content:
@@ -1295,6 +1332,47 @@ class LiveGuard:
             self._body_created(req, "task", "TaskId", task)
         if self._scalar_int(req, "UserId") != self.operator_user:
             raise req.block(f"UserId is required and must be the operator user {self.operator_user}")
+
+    @_rule(
+        "POST /v1/assets/custom",
+        "only with allow_custom_assets (never from a cleanup); ClientId is the test client; Name starts with the run id",
+    )
+    def _post_custom_asset(self, req: _Req) -> None:
+        if not self.allow_custom_assets or self.cleanup:
+            raise req.block(
+                "custom assets cannot be created unless the run enabled the custom_assets area (--with-custom-assets); "
+                "a custom asset cannot be deleted through the API, so it would stay on the test client"
+            )
+        self._require_test_client(req, self._scalar_int(req, "ClientId"), required=True)
+        self._require_run_name(req)
+
+    @_rule(
+        "PATCH /v1/assets/custom/{customAssetId}",
+        "only with allow_custom_assets; ClientId is required and is the test client (or the second client, for the one "
+        "negative check); Name, if present, starts with the run id",
+    )
+    def _patch_custom_asset(self, req: _Req) -> None:
+        # the path id was already checked to be a custom asset this run created (_PATH_KINDS)
+        if not self.allow_custom_assets or self.cleanup:
+            raise req.block("custom assets cannot be changed unless the run enabled the custom_assets area (--with-custom-assets)")
+        client = self._scalar_int(req, "ClientId")
+        if client is None:
+            raise req.block(f"ClientId is required and must be {self.test_client} (the test client)")
+        if client != self.test_client:
+            second = sorted(self.allowed_clients - {self.test_client})
+            if client not in second:
+                raise req.block(f"ClientId must be {self.test_client} (the test client), not {client}")
+        self._require_run_name(req, required=False)
+
+    def _require_run_name(self, req: _Req, *, required: bool = True) -> None:
+        assert req.body is not None and self.manifest is not None
+        name = req.body.get("Name")
+        if name is None:
+            if required:
+                raise req.block(f"Name is required and must start with the run id {self.manifest.run_id}")
+            return
+        if not isinstance(name, str) or not name.startswith(self.manifest.run_id):
+            raise req.block(f"Name must start with the run id {self.manifest.run_id}")
 
     @_rule("POST /v1/items", "ClientId is the test client")
     def _post_item(self, req: _Req) -> None:

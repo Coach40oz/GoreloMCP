@@ -59,6 +59,13 @@ UNDELETABLE: it is not counted as cleaned, it is not a leftover, the result line
 over" while one exists, and it never alone turns the exit status to 1 (an attachment whose parent could not be
 deleted is a plain leftover).
 
+A custom asset (kind custom_asset, made by write_matrix --with-custom-assets) cannot be deleted through the API either
+(there is no delete the harness may send, and the API has no GET of one asset to confirm anything): the cleanup sends
+nothing for it and reports it as KNOWN UNDELETABLE, like the file and the voided invoice, with the outcome
+"stays on the test client until removed in the Gorelo app (a custom asset cannot be deleted through the API)". When the
+negative check of the matrix moved the asset to the second client, or could not tell, the manifest details hold that client_id
+and the outcome names where the asset is (custom_asset_residue).
+
 With --leftovers the leftovers listed in site.local.toml [leftovers] are handled FIRST: each is read (GET) and deleted only if its
 name matches (the optional name rules of [leftovers]: client_name_contains for clients, contact_first_name and
 contact_last_name_prefix for the contact; a rule left out does not apply); otherwise it is reported and skipped. Names are never printed.
@@ -68,7 +75,7 @@ A record counts as cleaned when the delete succeeded or Gorelo says it is gone (
 ids, labels and Gorelo's messages only, never customer data and never the API key. The exit status is 0 when
 nothing is left over (no leftover record, no create announced without an id, no listed leftover that failed to
 delete; one skipped because its name does not match is fine, and so is a known undeletable record: an uploaded file
-or a voided invoice), 1 otherwise, 2 for a usage or setup error.
+or a voided invoice, or a custom asset), 1 otherwise, 2 for a usage or setup error.
 """
 
 from __future__ import annotations
@@ -104,6 +111,24 @@ COVERED_KINDS = frozenset({"comment", "project_comment", "task", "section", "sid
 # An uploaded file has no delete in the API: it is reported (not cleaned) once its parent is deleted, and apart from
 # the leftovers, because nobody can do anything about it. The outcome text ends with UNDELETABLE_REASON.
 UNDELETABLE_KINDS = frozenset({"attachment"})
+# A custom asset cannot be deleted through the API (DELETE /v1/assets/custom/{id} is forbidden): a known residue from the
+# moment it is created. Every outcome of one ends like this; write_matrix.py prints its own line from the same text.
+CUSTOM_ASSET_RESIDUE_TAIL = "until removed in the Gorelo app (a custom asset cannot be deleted through the API)"
+CUSTOM_ASSET_RESIDUE = "stays on the test client " + CUSTOM_ASSET_RESIDUE_TAIL
+# The client_id recorded in the manifest details of a custom asset when the negative check of the matrix could not tell
+# whether Gorelo moved the asset to the second client (a 5xx, a timeout or an unconfirmed write).
+CUSTOM_ASSET_CLIENT_UNKNOWN = "unknown: test or second client"
+
+
+def custom_asset_residue(client_id: Any = None) -> str:
+    """The residue text of a custom asset, naming where it may be: the test client (also when nothing is recorded), the second
+    client (the negative check was ACCEPTED, so the asset moved) or either of the two (the outcome of that check is unknown).
+    `client_id` is the client_id of the manifest details of the asset. Every text ends with CUSTOM_ASSET_RESIDUE_TAIL."""
+    if client_id is None or client_id == SITE.test_client:
+        return CUSTOM_ASSET_RESIDUE
+    if isinstance(client_id, str):
+        return f"may be on the test client or on the second client ({client_id}), and stays there {CUSTOM_ASSET_RESIDUE_TAIL}"
+    return f"stays on client {client_id}, not on the test client {CUSTOM_ASSET_RESIDUE_TAIL}"
 UNDELETABLE_REASON = "the file itself cannot be deleted through the API"
 _PARENT_KEYS = (("ticket_id", "ticket"), ("task_id", "task"), ("project_id", "project"))
 _RAW_PATHS = {"ticket": "/tickets/{}", "contact": "/contacts/{}", "client": "/clients/{}", "project": "/projects/{}"}
@@ -155,6 +180,8 @@ def is_known_undeletable(record: Record) -> bool:
     outcome = record.outcome or ""
     if record.kind in UNDELETABLE_KINDS:
         return outcome.endswith(UNDELETABLE_REASON)
+    if record.kind == "custom_asset":
+        return outcome.endswith(CUSTOM_ASSET_RESIDUE_TAIL)
     return record.kind == "invoice" and outcome.endswith(VOID_RESIDUE)
 
 
@@ -326,6 +353,10 @@ class _Cleaner:
         kind, ident = record.kind, record.id
         if kind == "invoice":
             await self._clean_invoice(record)
+            return
+        if kind == "custom_asset":  # nothing is sent: it cannot be removed, so it is a known residue
+            if not is_known_undeletable(record):
+                self.manifest.cleanup_failed(kind, ident, custom_asset_residue(record.details.get("client_id")))
             return
         if kind in _RAW_PATHS:
             outcome = await self._raw("DELETE", _RAW_PATHS[kind].format(ident))

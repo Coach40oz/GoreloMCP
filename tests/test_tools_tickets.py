@@ -1612,7 +1612,7 @@ CREATE_FULL = {
     "closed_on": "2020-03-03T12:00:00+02:00",
     "created_by_name": "Import bot",
     "is_unread": False,
-    "send_created_email": True,
+    "send_created_email": False,
 }
 CREATE_FULL_BODY = {
     **CREATE_MIN_BODY,
@@ -1631,7 +1631,7 @@ CREATE_FULL_BODY = {
     "ClosedOn": "2020-03-03T10:00:00Z",
     "CreatedByName": "Import bot",
     "IsUnread": False,
-    "SendTicketCreatedEmail": True,
+    "SendTicketCreatedEmail": False,
 }
 
 
@@ -1732,6 +1732,38 @@ async def test_create_ticket_created_on_alone_is_enough_for_a_backdated_ticket(s
     await call_tool(server, "create_ticket", {**CREATE_MIN, "created_on": "2020-01-01T00:00:00+00:00"})
     body = mock_gorelo.calls("POST", LIST)[0].json
     assert body["CreatedOn"] == "2020-01-01T00:00:00Z" and "UpdatedOn" not in body and "ClosedOn" not in body
+
+
+@pytest.mark.parametrize("flag", [{"send_created_email": True}, {"is_unread": True}])
+@pytest.mark.parametrize("date", [
+    {"created_on": "2020-01-01T00:00:00Z"},
+    {"created_on": "2020-01-01T00:00:00Z", "closed_on": "2020-01-02T00:00:00Z"},
+])
+async def test_create_ticket_refuses_a_flag_gorelo_ignores_on_a_backdated_import(server, mock_gorelo, flag, date):
+    param = next(iter(flag))
+    text = await call_tool_error(server, "create_ticket", {**CREATE_MIN, **date, **flag})
+    assert f"{param}: Gorelo ignores it when created_on is supplied" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_create_ticket_false_flags_are_still_allowed_on_a_backdated_import(server, mock_gorelo):
+    created(mock_gorelo)
+    args = {**CREATE_MIN, "created_on": "2020-01-01T00:00:00Z", "is_unread": False, "send_created_email": False}
+    await call_tool(server, "create_ticket", args)
+    body = mock_gorelo.calls("POST", LIST)[0].json
+    assert body["IsUnread"] is False and body["SendTicketCreatedEmail"] is False
+
+
+def test_the_spec_sentences_behind_the_backdating_refusals_are_pinned():
+    spec = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
+    if not spec.exists():
+        pytest.skip("backups/swagger-latest.json is missing")
+    props = json.loads(spec.read_text(encoding="utf-8"))["components"]["schemas"]["CreateTicketCommand"]["properties"]
+    text = lambda name: " ".join(props[name]["description"].split())
+    assert "Ignored when CreatedOn or ClosedOn is supplied: the ticket is created read" in text("IsUnread")
+    assert "Ignored when CreatedOn or ClosedOn is supplied" in text("SendTicketCreatedEmail")
+    for name in ("CreatedOn", "ClosedOn"):
+        assert "A record with this field set sends no emails or notifications" in text(name)
 
 
 REREAD = "GET /v1/tickets/{ticketId}"

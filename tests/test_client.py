@@ -88,6 +88,7 @@ def test_constants():
             "DELETE /v1/assets/custom/{customAssetId}",
             "DELETE /v1/contracts/{contractId}",
             "POST /v1/api-keys",
+            "DELETE /v1/api-keys/{apiKeyId}",
         }
     )
 
@@ -387,6 +388,7 @@ FORBIDDEN_CALLS = {
     "DELETE /v1/assets/custom/{customAssetId}": {"customAssetId": "11111111-1111-1111-1111-111111111111"},
     "DELETE /v1/contracts/{contractId}": {"contractId": 1},
     "POST /v1/api-keys": {},
+    "DELETE /v1/api-keys/{apiKeyId}": {"apiKeyId": "11111111-1111-1111-1111-111111111111"},
 }
 
 
@@ -441,7 +443,7 @@ def test_is_forbidden_op_is_false_for_everything_else():
     for allowed in (
         "GET /v1/clients/{clientId}", "PATCH /v1/clients/{clientId}", "POST /v1/clients", "GET /v1/tickets/{ticketId}",
         "DELETE /v1/tickets/{ticketId}/comments/{commentId}", "DELETE /v1/items/{itemId}", "GET /v1/api-keys",
-        "PATCH /v1/api-keys", "POST /v1/api-keys/{keyId}", "POST /v1/alerts", "DELETE /v1/clients",
+        "PATCH /v1/api-keys", "POST /v1/api-keys/{keyId}", "GET /v1/api-keys/{apiKeyId}", "DELETE /v1/api-keys", "POST /v1/alerts", "DELETE /v1/clients",
         "DELETE /v1/clients/{clientId}/locations", "POST /v1/invoices", "GET /v1/invoices/{invoiceId}",
     ):
         assert not is_forbidden_op(allowed), allowed

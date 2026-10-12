@@ -11,7 +11,7 @@ uv run --frozen python scripts/gen_tool_catalog.py
 
 `tests/test_tool_catalog.py` fails when the committed file differs from a fresh generation.
 
-The registry holds 89 tools in 7 toolsets. A server started with the default settings (toolsets core, tickets, time, billing, uptime; GORELO_ENABLE_DESTRUCTIVE off, so no gated tool: no delete or void tool and no `create_approved_invoice`) registers 58 of them.
+The registry holds 92 tools in 7 toolsets. A server started with the default settings (toolsets core, tickets, time, billing, uptime; GORELO_ENABLE_DESTRUCTIVE off, so no gated tool: no delete or void tool and no `create_approved_invoice`) registers 61 of them.
 
 How to read it:
 
@@ -25,14 +25,14 @@ How to read it:
 
 | Toolset | Default | Tools | read | write | destructive |
 |---|---|---|---|---|---|
-| core | yes | 17 | 12 | 5 | 0 |
+| core | yes | 20 | 13 | 7 | 0 |
 | tickets | yes | 19 | 12 | 6 | 1 |
 | time | yes | 7 | 4 | 2 | 1 |
 | billing | yes | 15 | 8 | 4 | 3 |
 | uptime | yes | 6 | 2 | 3 | 1 |
 | projects | no | 22 | 11 | 9 | 2 |
 | forms | no | 3 | 2 | 1 | 0 |
-| Total | | 89 | 51 | 30 | 8 |
+| Total | | 92 | 52 | 32 | 8 |
 
 ## core
 
@@ -42,6 +42,7 @@ In the default set.
 |---|---|---|---|---|
 | `create_client` | write | `POST /v1/clients` | `name`, `location_name` | Create a client together with its default location; returns the created client record. |
 | `create_contact` | write | `POST /v1/contacts` | `client_id`, `first_name`, `last_name`, `primary_email` | Create a contact under a client; returns the created contact record. |
+| `create_custom_asset` | write | `POST /v1/assets/custom`, `GET /v1/assets/custom` | `name`, `client_id`, `location_id`, `hardware_type_id` | Create a custom (non-agent) asset at a location of a client; returns the new row (read back from the client's list), or {Id, warning} if the read-back fails: then do not repeat the create. |
 | `get_agent` | read | `GET /v1/assets/agents/{deviceId}` | `agent_id` | Get one agent (managed device) by UUID; returns Gorelo's full device record. |
 | `get_client` | read | `GET /v1/clients/{clientId}` | `client_id` | Get one client by id; returns Gorelo's client record. |
 | `get_contact` | read | `GET /v1/contacts/{contactId}` | `contact_id` | Get one contact by id; returns Gorelo's contact record (SecondaryEmail is never included). |
@@ -51,12 +52,14 @@ In the default set.
 | `list_client_locations` | read | `GET /v1/clients/{clientId}/locations` | `client_id` | List every location of one client (not paged); returns {items, count}. |
 | `list_clients` | read | `GET /v1/clients` | none | List clients one page per call; returns {items, has_more, next_cursor, total_count, ...}. |
 | `list_contacts` | read | `GET /v1/contacts` | none | List contacts one page per call; returns {items, has_more, next_cursor, total_count, ...}. |
+| `list_custom_asset_hardware_types` | read | `GET /v1/assets/custom/hardware-types` | none | List the hardware types a custom asset can be given; returns {items, count}, each item {Id, Name, CreatedOn, UpdatedOn}. |
 | `list_custom_assets` | read | `GET /v1/assets/custom` | none | List custom (non-agent) assets one page per call; returns {items, has_more, next_cursor, total_count, ...}. |
 | `list_org_groups` | read | `GET /v1/organization/groups` | none | List every technician group (not paged); returns {items, count}. |
 | `list_org_users` | read | `GET /v1/organization/users` | none | List every user (technician); all pages are read for you. |
 | `post_alert` | write | `POST /v1/alerts` | `name`, `client_id`, `resource`, `severity` | Post an external alert for a client's resource; returns {"ok": true} when Gorelo accepts it. |
 | `update_client` | write (overwrites data) | `PATCH /v1/clients/{clientId}` | `client_id` | Update a client's name, status, billing name or alternate name; returns the updated client record. |
 | `update_contact` | write (overwrites data) | `GET /v1/contacts/{contactId}`, `PATCH /v1/contacts/{contactId}` | `contact_id` | Update a contact; returns the updated contact record. |
+| `update_custom_asset` | write (overwrites data) | `PATCH /v1/assets/custom/{customAssetId}`, `GET /v1/assets/custom` | `custom_asset_id`, `client_id` | Change fields of one custom asset; returns the updated row (read back from the client's list), or {Id, warning} if the read-back fails. |
 
 ## tickets
 

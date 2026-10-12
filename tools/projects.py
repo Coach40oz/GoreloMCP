@@ -553,7 +553,7 @@ async def create_project(
     ] = None,
 ) -> dict:
     """Create a project and return its record. Required: title, client_id, location_id, type_id and group_id (a project belongs to one client, one of its locations, one project type and one technician group); everything else is optional.
-    Side effects: creates a real project as NotStarted, with the app's numbering and the project-created notification the app sends (Gorelo does not say who receives it). Projects cannot be deleted through this server (a delete removes every task in it). If the result is {Id, warning} the project exists: do not create it again.
+    Side effects: creates a real project as NotStarted, with the app's numbering and the project-created notification the app sends (Gorelo does not say who receives it); the CreatedOn field text says a backdated project sends no emails or notifications (the operation text still describes the creation notification). Projects cannot be deleted through this server (a delete removes every task in it). If the result is {Id, warning} the project exists: do not create it again.
     """
     non_empty("title", title)
     created_text, created_at = _instant("created_on", created_on)
@@ -971,7 +971,7 @@ async def create_project_comment(
     ] = None,
 ) -> dict:
     """Post a comment on a project, or on one task when task_id is given, and return the created comment. The default is private: internal, emails nobody.
-    Side effects: anything but private on a task puts the task into a waiting-on-contact state, fires automation and emails recipients: a side_conversation comment emails that conversation's recipients, an approval comment the approvers. Tell the user who will be emailed before posting anything that is not private. A public comment is outward-facing and Gorelo does not document its recipients for projects or tasks, so confirm with the user first. If the result is {Id, warning} the comment exists: do not post it again.
+    Side effects: anything but private on a task puts the task into a waiting-on-contact state, fires automation and emails recipients: a side_conversation comment emails that conversation's recipients, an approval comment the approvers. Tell the user who will be emailed before posting anything that is not private. A task comment sent with created_on (a backdated import) sends no emails or notifications; Gorelo says so for task comments only, not for project comments. A public comment is outward-facing and Gorelo does not document its recipients for projects or tasks, so confirm with the user first. If the result is {Id, warning} the comment exists: do not post it again.
     """
     pid = guid("project_id", project_id)
     tid = _given(guid, "task_id", task_id)
