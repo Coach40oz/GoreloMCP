@@ -15,6 +15,9 @@ Modes:  "read"   only GET (and never the invoice PDF).
                  cleanup --void-approved set it) opens the two invoice rules named below, and nothing else.
                  `allow_custom_assets=True` (off by default; only write_matrix --with-custom-assets sets it) opens
                  the two custom asset rules named below, and nothing else.
+                 `allow_custom_properties=True` (off by default; only write_matrix --with-custom-properties sets it, and
+                 a cleanup of a manifest that holds a custom_property record) opens the one PATCH of the test client
+                 named below ("The custom properties"), and nothing else.
 
 How a request is read: method; URL (https, the Gorelo API host, no credentials, base path /v1 stripped);
 every path segment is checked (no empty, dot, percent-encoded or odd segment), then the request is matched
@@ -35,8 +38,10 @@ Allowlist (write mode). "Run-created" means the id is in the manifest of this ru
                DELETE /invoices/{invoiceId})
     POST /clients                 Name starts with MCPTEST-; Domain, if present, is example.invalid (a real domain
                                   would route that company's inbound email to the temporary client)
-    PATCH /clients/{clientId}     the path id is a run-created client; never the test client or the second client (no field of the test client is ever
-                                  changed); the body has no Id (the spec defines none, so it is refused as an unknown field)
+    PATCH /clients/{clientId}     the path id is a run-created client; never the second client; the test client only with
+                                  allow_custom_properties and only a body of CustomProperties and nothing else (see "The custom
+                                  properties" below; no other field of the test client is ever changed); CustomProperties never go to
+                                  a run-created client; the body has no Id (the spec defines none, so it is refused as an unknown field)
     POST /contacts                ClientId is the test client
     PATCH /contacts/{contactId}   the path id is a run-created contact; the body has no ContactId (refused as an unknown
                                   field); ClientId, if present, is the test client
@@ -132,6 +137,22 @@ voids the invoice: StatusId 4, still listed); an invoice recorded as Paid (3), V
 deletable, and the PDF export stays Draft-only. Without the option a StatusId of 5 and a DELETE of an invoice recorded
 as 5 are refused exactly as before.
 
+The custom properties (allow_custom_properties=True, set by write_matrix --with-custom-properties, and by a cleanup whose
+manifest holds a custom_property record): the one write the live tests make to the test client itself. PATCH
+/clients/{clientId} of the test client is allowed only when ALL of these hold: the body is CustomProperties and nothing else
+(no Name, StatusId, BillingName or AlternateName), a list with exactly ONE entry, an object with Id and Value and nothing
+else; Id is a JSON integer that names a custom field the manifest records as a custom_property record of the test client
+whose details say was_set is exactly false (the write matrix writes that record BEFORE its first write, so a field the run did
+not record can never be written: this holds for CUSTOM_PROPERTY_UNKNOWN_ID, the Id of the area's negative check, too, which
+update_client must refuse locally after its read of the client, so that no PATCH carrying it is ever sent); Value is null (a
+clear: how Gorelo removes a saved value) or text that starts with the run id, never an empty string, and for a recorded field
+exactly the text its record holds; once that record is cleaned (the area marks it cleaned after the clear), a guard that is not a
+cleanup guard takes NO further write to the field, a null included. A cleanup guard (cleanup=True) allows the null only. The
+second client is never changed, and a run-created client never takes CustomProperties. The granularity is the run, not the area: the option is on for the whole of a
+--with-custom-properties run, but the manifest record is what unlocks a field, and only the custom_properties area writes one.
+`writes_allowed` counts the requests the guard let through that are not a GET, so a harness can tell, by comparing it before and
+after a call, that the call sent no write (the negative check does).
+
 The tickets' contacts: the guard sees a create request but not its answer, so it cannot learn a new ticket's
 id or who is stored on it. The harness records `contact_id` (int or None) and `cc_contact_ids` in the details of
 the ticket: the write matrix writes the STORED values it read back (manifest.update_details), not the ones it
@@ -181,6 +202,10 @@ INVOICE_DRAFT, INVOICE_APPROVED = 1, 5  # Invoice StatusId: the harness creates 
 # allow_approved_invoice it also creates one Approved invoice and voids it (see "The approved invoice" above)
 APPROVED_INVOICE_LIMIT = 1.0  # the most the one Approved invoice's line may bill before tax: the $1 the harness allows (the
 # TaxId rule of the approved invoice keeps the tax at none, so before tax is also the total)
+# The Id the negative check of the custom_properties area names: no custom field of the service provider has it. The guard accepts
+# it nowhere (it is no recorded field, like any other Id the run did not record): update_client must refuse it locally, after its
+# read of the client, so no PATCH that carries it is ever sent.
+CUSTOM_PROPERTY_UNKNOWN_ID = 9_000_000_000_000
 
 _METHODS = ("GET", "POST", "PATCH", "DELETE")
 _METHOD_OVERRIDE_HEADERS = ("x-http-method-override", "x-http-method", "x-method-override")
@@ -209,6 +234,7 @@ _KIND_NAMES = {
     "project_comment": "project or task comment",
     "invoice": "test invoice",
     "custom_asset": "custom asset",
+    "custom_property": "custom property",
 }
 
 # The manifest kind a comment's ConversationTypeId 3 or 4 may post into, with the words for it: (one, many).
@@ -606,6 +632,11 @@ class LiveGuard:
     allow_custom_assets: write mode only, off by default: also allow POST /assets/custom and PATCH /assets/custom/{id}
                under the rules of the module docstring. Only write_matrix --with-custom-assets sets it. A custom asset
                cannot be deleted through the API, so the run that creates one leaves it on the test client.
+    allow_custom_properties: write mode only, off by default: also allow the one PATCH of the TEST CLIENT that sets or clears a
+               custom field the manifest records (module docstring, "The custom properties"). Only write_matrix
+               --with-custom-properties sets it, and cleanup.run_cleanup when the manifest holds a custom_property record
+               (with cleanup=True the guard allows the clear, the null Value, and nothing else).
+    Counters: allowed_count is every request let through, writes_allowed the ones among them that are not a GET.
     The other keyword arguments tune the constants of the allowlist (the defaults are the configured values);
     `allowed_hosts` and `spec` exist for tests. probe_domains: the domains an uptime check may target.
     require_intents: refuse a create unless the manifest holds an open intent of that kind (see the module docstring).
@@ -629,6 +660,7 @@ class LiveGuard:
         require_intents: bool = False,
         allow_approved_invoice: bool = False,
         allow_custom_assets: bool = False,
+        allow_custom_properties: bool = False,
         spec: SpecIndex | None = None,
     ) -> None:
         if mode not in ("read", "write"):
@@ -641,6 +673,8 @@ class LiveGuard:
             raise ValueError("allow_approved_invoice=True only makes sense in write mode")
         if allow_custom_assets and mode != "write":
             raise ValueError("allow_custom_assets=True only makes sense in write mode")
+        if allow_custom_properties and mode != "write":
+            raise ValueError("allow_custom_properties=True only makes sense in write mode")
         cfg = site()  # raises SiteConfigError (names the missing key and site.example.toml) when not configured
         if allowed_clients is None:
             allowed_clients = {cfg.test_client, cfg.second_client}
@@ -661,6 +695,7 @@ class LiveGuard:
         self.cleanup = cleanup
         self.allow_approved_invoice = allow_approved_invoice
         self.allow_custom_assets = allow_custom_assets
+        self.allow_custom_properties = allow_custom_properties
         self.allowed_clients = frozenset(allowed_clients)
         self.operator_contact = operator_contact
         self.operator_user = operator_user
@@ -677,6 +712,7 @@ class LiveGuard:
         self._approved_creates = 0  # Approved invoices this guard allowed (allow_approved_invoice permits one)
         self.violations: list[str] = []
         self.allowed_count = 0
+        self.writes_allowed = 0  # allowed requests that are not a GET: a harness compares it before and after a call
 
     # -- the hook ----------------------------------------------------------
 
@@ -706,6 +742,8 @@ class LiveGuard:
             self.violations.append(str(violation))
             raise violation from exc
         self.allowed_count += 1
+        if request.method.upper() != "GET":
+            self.writes_allowed += 1
 
     @property
     def tripped(self) -> bool:
@@ -1121,22 +1159,93 @@ class LiveGuard:
 
     @_rule(
         "PATCH /v1/clients/{clientId}",
-        "path id is a run-created client (never the test client or the second client); the body has no Id (the spec defines none)",
+        "path id is a run-created client (never the second client); the test client only with allow_custom_properties and "
+        "only a body of CustomProperties and nothing else: ONE entry for a custom field the manifest records as unset before "
+        "the run, its Value the run id or null (a cleanup sends the null only); once the record is cleaned the matrix takes no "
+        "further write to that field, a null included; CustomProperties never go to a run-created client; the body has no Id "
+        "(the spec defines none)",
     )
     def _patch_client(self, req: _Req) -> None:
         try:
             client = normalize_id("client", req.params["clientId"])
         except ValueError:
             raise req.block("the path id is not a valid client id") from None
-        if client in self.allowed_clients:  # also when a manifest wrongly lists one of them as run-created
-            raise req.block(
-                f"path id {client} is not allowed; client {client} is one of the records the live tests run on "
-                "and is never changed"
-            )
+        if client == self.test_client:  # also when a manifest wrongly lists it as run-created
+            self._patch_test_client(req, client)
+            return
+        if client in self.allowed_clients:  # the second client, also when a manifest wrongly lists it as run-created
+            raise req.block(self._never_changed(client))
         if client not in self._ids("client"):
             raise req.block(f"path id {client} is not allowed; only a client created by this run may be changed")
+        assert req.body is not None
+        if "CustomProperties" in req.body:
+            raise req.block(
+                f"CustomProperties may go only to the test client {self.test_client} (the custom_properties area): a client "
+                "the run created takes none"
+            )
         # the record is named by the path alone: UpdateClientCommand has no Id, so a body that carries one is
         # already refused above as a field the spec does not define
+
+    @staticmethod
+    def _never_changed(client: int) -> str:
+        return (
+            f"path id {client} is not allowed; client {client} is one of the records the live tests run on and is never changed"
+        )
+
+    def _patch_test_client(self, req: _Req, client: int) -> None:
+        """PATCH of the TEST CLIENT itself: never, except the one custom field write of the custom_properties area.
+
+        All of these must hold (module docstring, "The custom properties"): the option allow_custom_properties; a body of
+        CustomProperties and nothing else, with exactly one entry {Id, Value}; Id a JSON integer that the manifest records as
+        a custom_property of this client with was_set exactly false (any other Id, CUSTOM_PROPERTY_UNKNOWN_ID included, is an
+        Id the run did not record); Value null or text starting with the run id, and for a recorded field exactly the text the
+        record holds, and no write at all once the record is cleaned (a cleanup guard still takes the null); a cleanup guard
+        allows the null only. Anything else keeps the old message: the test client is never changed."""
+        if not self.allow_custom_properties:
+            raise req.block(self._never_changed(client))
+        assert req.body is not None and self.manifest is not None
+        body, run_id = req.body, self.manifest.run_id
+        if set(body) != {"CustomProperties"}:
+            raise req.block(
+                self._never_changed(client)
+                + ", except that a --with-custom-properties run may set or clear ONE custom field of it, with a body of "
+                "CustomProperties and nothing else"
+            )
+        entries = body["CustomProperties"]
+        if not isinstance(entries, list) or len(entries) != 1:
+            raise req.block("CustomProperties must be a list with exactly one entry: one custom field at a time")
+        entry = entries[0]
+        if not isinstance(entry, dict) or set(entry) != {"Id", "Value"}:
+            raise req.block("the CustomProperties entry must be an object with Id and Value and nothing else")
+        field = self._json_int(req, "CustomProperties[0].Id", entry["Id"])
+        value = entry["Value"]
+        if value is not None and (not isinstance(value, str) or not value.startswith(run_id)):
+            raise req.block(
+                f"CustomProperties[0].Value must be null (a clear) or text that starts with the run id {run_id}"
+            )
+        if self.cleanup and value is not None:
+            raise req.block("a cleanup only clears a custom field (Value null): it never saves a value")
+        if field not in self._ids("custom_property"):  # manifest.ids() holds the cleaned records too
+            raise req.block(
+                f"custom field {field} is not one the run recorded in the manifest: a custom_property record is written "
+                "before the first write, and only a recorded field may be written"
+            )
+        record = self.manifest.record("custom_property", field)
+        details = record.details
+        if details.get("was_set") is not False:
+            raise req.block(
+                f"custom field {field} is not recorded as unset before the run (the manifest details was_set is not "
+                "false), so the run may not write it"
+            )
+        if details.get("client_id") != client:
+            raise req.block(f"custom field {field} is recorded for another client than the test client {client}")
+        if value is not None and value != details.get("value"):
+            raise req.block(f"CustomProperties[0].Value must be the text the manifest records for custom field {field}")
+        if record.cleaned and not self.cleanup:  # the matrix is done with a field it cleared: no write at all, a null included
+            raise req.block(
+                f"custom field {field} was already cleared by this run (its record is cleaned): this guard takes no further "
+                "write to it, a clear included"
+            )
 
     @_rule("POST /v1/contacts", "ClientId is the test client")
     def _post_contact(self, req: _Req) -> None:

@@ -66,6 +66,29 @@ nothing for it and reports it as KNOWN UNDELETABLE, like the file and the voided
 negative check of the matrix moved the asset to the second client, or could not tell, the manifest details hold that client_id
 and the outcome names where the asset is (custom_asset_residue).
 
+A custom property (kind custom_property, made by write_matrix --with-custom-properties) is the one thing a cleanup writes to
+the test client itself: the custom field value that the run set and may not have cleared yet. It is a record only so that this
+cleanup knows what to undo (the id is the custom field's Id, the details name the client, the run's text, was_set and
+value_before). The cleanup touches it ONLY when the manifest says the field was unset before the run (was_set exactly false),
+and then it reads the client first (get_client). When the field still shows the run's text it sends the clear only if that read
+shows NO other custom field set: the area runs only while every field is unset, and a clear that Gorelo applied as a replace would
+wipe a value somebody put back since. While another field is set the cleanup sends nothing and leaves a LEFTOVER ("other custom
+fields of the test client are set, so the cleanup sends no write; clear custom property N in the Gorelo app"). Otherwise it
+sends the clear (update_client with clear_custom_property_ids, a null Value, the only write the cleanup guard allows there; the
+tool reads the client before it writes and again after the PATCH, to check the other fields) and the answer must show IsSet
+false, and the Value the field had before the run when the record holds it (value_before), and every other custom field exactly
+as the read made just before the clear showed it (IsSet, Value and presence). Other fields that read differently, in that answer
+or in update_client's alarm for custom fields that were not in its call (the ids then come from a fresh read), are a LEFTOVER
+whose outcome STARTS with their ids, says that the run's field was cleared or probably cleared and sends the operator to check
+those fields in the Gorelo app, not to re-run the cleanup: the ids are kept in the record's details (changed_fields), a re-run
+reports them again and never marks the record cleaned, until somebody acknowledges them by deleting that entry from the manifest.
+When the field is not set any more, or the client no longer lists it, there is nothing to clear; when it is set to anything else
+somebody changed it since and it is left alone. Whatever is not cleared is a LEFTOVER (not a known residue) that names the field
+Id and the client and says how to clear it by hand: the exit status is 1. A second cleanup of a cleaned one sends nothing. The
+guard of the cleanup gets allow_custom_properties only when the manifest holds a custom_property record that is not cleaned yet.
+The text of a tool error that goes into an outcome has its quoted strings cut out ("..."): the tool may quote the name or the
+value of another custom field there, and an outcome holds ids and kinds only.
+
 With --leftovers the leftovers listed in site.local.toml [leftovers] are handled FIRST: each is read (GET) and deleted only if its
 name matches (the optional name rules of [leftovers]: client_name_contains for clients, contact_first_name and
 contact_last_name_prefix for the contact; a rule left out does not apply); otherwise it is reported and skipped. Names are never printed.
@@ -94,7 +117,7 @@ import httpx
 from fastmcp import Client
 
 from gorelo_client import GORELO_BASE_URL
-from scripts.live._env import EnvError, Pacer, live_settings, scrub
+from scripts.live._env import EnvError, Pacer, live_settings, scrub, without_quotes
 from scripts.live.guard import GuardViolation, LiveGuard
 from scripts.live.manifest import Intent, Manifest, Record
 from scripts.live import guard as live_guard
@@ -130,6 +153,18 @@ def custom_asset_residue(client_id: Any = None) -> str:
         return f"may be on the test client or on the second client ({client_id}), and stays there {CUSTOM_ASSET_RESIDUE_TAIL}"
     return f"stays on client {client_id}, not on the test client {CUSTOM_ASSET_RESIDUE_TAIL}"
 UNDELETABLE_REASON = "the file itself cannot be deleted through the API"
+CUSTOM_PROPERTY_CLEARED = "cleared by the cleanup (update_client clear_custom_property_ids)"
+# The sentence of the leftover that a cleanup leaves, sending nothing, while another custom field of the test client is set: a
+# clear that Gorelo applied as a replace would wipe that value. The matrix summary tells this leftover from the others by it.
+CUSTOM_PROPERTY_OTHERS_SET = "other custom fields of the test client are set, so the cleanup sends no write"
+# The details key of a custom_property record in which a cleanup keeps the ids of the custom fields it saw change while it
+# cleared the run's field, until somebody acknowledges them by deleting the entry from the manifest: a re-run reports them
+# again and never marks the record cleaned meanwhile.
+CHANGED_FIELDS = "changed_fields"
+# The words of update_client's error for custom fields that changed although they were not in the call (the cleanup only sees
+# the text of a tool error). tests/test_live_custom_properties.py drives the real tool, so a rewording is caught there.
+COLLATERAL_ALARM = "custom fields that were not in this call"
+SHOWN_IDS = 8  # custom field ids named in an outcome; the details keep all of them
 _PARENT_KEYS = (("ticket_id", "ticket"), ("task_id", "task"), ("project_id", "project"))
 _RAW_PATHS = {"ticket": "/tickets/{}", "contact": "/contacts/{}", "client": "/clients/{}", "project": "/projects/{}"}
 # Not in _RAW_PATHS: an invoice is read first. A Draft is deleted; an Approved invoice recorded as 5 is voided (the raw
@@ -358,6 +393,9 @@ class _Cleaner:
             if not is_known_undeletable(record):
                 self.manifest.cleanup_failed(kind, ident, custom_asset_residue(record.details.get("client_id")))
             return
+        if kind == "custom_property":
+            await self._clean_custom_property(record)
+            return
         if kind in _RAW_PATHS:
             outcome = await self._raw("DELETE", _RAW_PATHS[kind].format(ident))
         elif kind == "time_entry":
@@ -374,6 +412,129 @@ class _Cleaner:
             self.manifest.cleaned(kind, ident, "already gone (HTTP 404)")
         else:
             self.manifest.cleanup_failed(kind, ident, self._safe(outcome.text))
+
+    # -- custom properties -------------------------------------------------------
+
+    async def _clean_custom_property(self, record: Record) -> None:
+        """Clear the custom field value the run set, but only while it is still the run's own (see the module docstring).
+
+        Nothing is sent unless the manifest says the field was unset before the run (was_set exactly false) and names the client
+        and the run's text. The client is read first; the clear is sent only for a field that still shows the run's text AND while
+        no other custom field of the client is set (a clear that Gorelo applied as a replace would wipe it), and the answer must
+        show IsSet false (and the Value of value_before, when the record has it) while every other custom field reads as in the
+        read just before the clear. Every outcome that leaves the value in place is a leftover that names the field Id and the
+        client (cleanup_failed), says what to do and puts the cause last (the outcome is cut at 500 characters); a value
+        somebody changed since is never touched. Other fields that read differently after the clear are a leftover whose outcome
+        STARTS with their ids; the ids are kept in the details (CHANGED_FIELDS) and keep the record a leftover, whatever a re-run
+        finds, until somebody deletes that entry. Texts hold ids and the run's own text, never another value."""
+        ident, details = record.id, record.details
+        client, text = details.get("client_id"), details.get("value")
+        where = f"custom property {ident} of client {client}"
+        again = f"clear it in the Gorelo app, or run this cleanup again: python -m scripts.live.cleanup {self.manifest.path}"
+        look = "check it in the Gorelo app"
+        pending = changed_fields_of(details)  # ids an earlier cleanup saw change; nobody has acknowledged them yet
+
+        def leftover(why: str, advice: str, cause: str = "") -> None:
+            tail = f" (the cause: {cause})" if cause else ""
+            known = (
+                f"custom field(s) {shown_ids(pending)} of client {client} changed during an earlier clear and are not "
+                f"acknowledged yet; "
+                if pending
+                else ""
+            )
+            self.manifest.cleanup_failed(record.kind, ident, self._safe(f"left over: {known}{where} {why}; {advice}{tail}"))
+
+        def changed_leftover(ids: list[Any], own: str) -> None:
+            """Other custom fields read differently: their ids come FIRST, and stay in the details until acknowledged."""
+            merged = merge_ids(pending, ids)
+            self.manifest.update_details(record.kind, ident, **{CHANGED_FIELDS: merged})
+            self.manifest.cleanup_failed(
+                record.kind,
+                ident,
+                self._safe(
+                    f"left over: custom field(s) {shown_ids(merged)} of client {client} read differently after the clear of "
+                    f"custom property {ident}, which {own}; check those fields in the Gorelo app (a re-run reports them again "
+                    f'until "{CHANGED_FIELDS}" is deleted from this record in {self.manifest.path})'
+                ),
+            )
+
+        def settle(how: str, own: str) -> None:
+            if pending:  # reported before and not acknowledged: the record stays a leftover, whatever the field reads now
+                changed_leftover([], own)
+            else:
+                self.manifest.cleaned(record.kind, ident, how)
+
+        usable = isinstance(client, int) and not isinstance(client, bool) and client >= 1 and isinstance(text, str) and bool(text)
+        if details.get("was_set") is not False or not usable:
+            leftover(
+                "is not recorded as unset before the run (or the record lacks the client or the run's text), so the cleanup "
+                "does not touch it",
+                look,
+            )
+            return
+        read = await self._tool("get_client", {"client_id": client})
+        fields = read.data.get("CustomProperties") if read.ok and isinstance(read.data, dict) else None
+        if not isinstance(fields, list) or not all(isinstance(entry, dict) for entry in fields):
+            if not read.ok:
+                cause = read.text
+            elif not isinstance(fields, list):
+                cause = "the client record has no CustomProperties list"
+            else:  # an entry that is no object could be a set field: the read proves nothing
+                cause = "an entry of the client's CustomProperties is not an object"
+            leftover(f"could not be read first, so it may still hold the run's text {text}", again, cause)
+            return
+        entry = _field_entry(fields, ident)
+        if entry is None:  # the field is not defined any more: no value of it can be left
+            settle("the client no longer lists this custom field (nothing to clear)", "is no longer listed")
+            return
+        if entry.get("Value") != text:
+            if entry.get("IsSet") is False:
+                settle("already unset (IsSet false), nothing to clear", "now reads unset")
+            elif entry.get("IsSet") is True:
+                leftover(
+                    f"is set to a value that is not the run's text {text} (somebody changed it since, or the field does not show "
+                    "what it holds), so it was not cleared",
+                    look,
+                )
+            else:
+                leftover(f"has an unreadable IsSet, so it was not cleared and may still hold the run's text {text}", again)
+            return
+        others_set = fields_set_besides(fields, ident)
+        if others_set:  # the area runs only while nothing is set: a replace would wipe what was put back since
+            leftover(
+                f"still holds the run's text {text}: {CUSTOM_PROPERTY_OTHERS_SET}",
+                f"clear custom property {ident} in the Gorelo app",
+                f"custom field(s) {shown_ids(others_set)} are set",
+            )
+            return
+        cleared = await self._tool("update_client", {"client_id": client, "clear_custom_property_ids": [ident]})
+        if not cleared.ok:
+            if COLLATERAL_ALARM in cleared.text:  # the tool saw other fields change: it sent the clear, so name them first
+                fresh = await self._tool("get_client", {"client_id": client})
+                rows = fresh.data.get("CustomProperties") if fresh.ok and isinstance(fresh.data, dict) else None
+                ids = _changed_fields(fields, rows, ident) if isinstance(rows, list) else []
+                ids = ids or alarm_ids(cleared.text)  # the change may have been undone since: the tool still named it
+                if ids:
+                    changed_leftover(ids, own_state(rows, ident, text))
+                    return
+            leftover(
+                f"may still hold the run's text {text}: update_client did not confirm the clear", again, without_quotes(cleared.text)
+            )
+            return
+        answer = cleared.data.get("CustomProperties") if isinstance(cleared.data, dict) else None
+        after = _field_entry(answer, ident)
+        if after is None or after.get("IsSet") is not False:
+            leftover(f"may still hold the run's text {text}: the answer to the clear does not show IsSet false", again)
+            return
+        own_value = "its Value is not the one it had before the run"
+        own_differs = "value_before" in details and after.get("Value") != details["value_before"]
+        others = _changed_fields(fields, answer, ident)
+        if others:  # the field itself is cleared; what else changed is for a person to look at
+            changed_leftover(others, "was cleared (IsSet false)" + (f", but {own_value}" if own_differs else ""))
+        elif own_differs:
+            leftover(f"was cleared (IsSet false), but {own_value}", look)
+        else:
+            settle(CUSTOM_PROPERTY_CLEARED, "was cleared (IsSet false)")
 
     # -- invoices ----------------------------------------------------------------
 
@@ -678,6 +839,99 @@ def _lookup_found_nothing(outcome: _Outcome) -> bool:
     return not outcome.ok and outcome.status is None and NO_SUCH_NUMBER in outcome.text
 
 
+def _field_entry(fields: Any, ident: Any) -> dict[str, Any] | None:
+    """The CustomProperties entry whose Id is `ident` (the first one), or None when `fields` is not a list or has none."""
+    for entry in fields if isinstance(fields, list) else []:
+        if isinstance(entry, dict) and entry.get("Id") == ident and not isinstance(entry.get("Id"), bool):
+            return entry
+    return None
+
+
+def _states(fields: Any) -> dict[Any, tuple[Any, Any]]:
+    """{Id: (IsSet, Value)} of the entries of a CustomProperties list (an entry that is no object with an Id is left out)."""
+    if not isinstance(fields, list):
+        return {}
+    return {
+        entry["Id"]: (entry.get("IsSet"), entry.get("Value"))
+        for entry in fields
+        if isinstance(entry, dict) and "Id" in entry and not isinstance(entry["Id"], bool)
+    }
+
+
+def _changed_fields(before: Any, after: Any, ident: Any) -> list[Any]:
+    """The Ids, other than `ident`, of the custom fields that the two lists show differently: another IsSet or Value, or listed
+    by one of them only. Numbers first, in order; ids only, never a name or a value."""
+    was, now = _states(before), _states(after)
+    return merge_ids(key for key in was.keys() | now.keys() if key != ident and was.get(key) != now.get(key))
+
+
+def _is_id(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _id_order(ident: Any) -> tuple[int, int, str]:
+    """Numbers first, in order, then anything else by its text: custom field Ids are whole numbers, an odd one still sorts."""
+    return (0, ident, "") if _is_id(ident) else (1, 0, str(ident))
+
+
+def merge_ids(*groups: Any) -> list[Any]:
+    """The distinct custom field ids of the groups in one sorted list (the details keep it as JSON)."""
+    return sorted({ident for group in groups for ident in group}, key=_id_order)
+
+
+def shown_ids(ids: Any, limit: int = SHOWN_IDS) -> str:
+    """Custom field ids for an outcome or a summary: the first `limit` of them, then how many more there are (ids only)."""
+    ordered = merge_ids(ids)
+    more = f" and {len(ordered) - limit} more" if len(ordered) > limit else ""
+    return ", ".join(str(ident) for ident in ordered[:limit]) + more
+
+
+def changed_fields_of(details: Any) -> list[Any]:
+    """The ids that an earlier cleanup kept in the details of a custom_property record (CHANGED_FIELDS), else an empty list."""
+    kept = details.get(CHANGED_FIELDS) if isinstance(details, dict) else None
+    return merge_ids([ident for ident in kept if _is_id(ident) or (isinstance(ident, str) and ident)]) if isinstance(kept, list) else []
+
+
+def fields_set_besides(fields: Any, ident: Any) -> list[Any]:
+    """The Ids of the custom fields, other than `ident`, that are not provably unset (IsSet is anything but exactly false)."""
+    return merge_ids(
+        [
+            entry.get("Id")
+            for entry in fields
+            if isinstance(entry, dict) and entry.get("Id") != ident and entry.get("IsSet") is not False
+        ]
+    )
+
+
+def alarm_ids(text: str) -> list[int]:
+    """The custom field ids that update_client's error for fields that changed without being sent names ("custom field 35 (...)
+    was unset, now reads set"): the fallback when a fresh read no longer shows the change."""
+    return merge_ids(int(found) for found in re.findall(r"custom field (\d+)\b", without_quotes(text)))
+
+
+def own_state(rows: Any, ident: Any, text: str) -> str:
+    """Words for the run's field in a fresh read after a clear whose check failed (kinds only, never a value)."""
+    if not isinstance(rows, list):
+        return "was probably cleared (the clear was sent)"
+    found = _field_entry(rows, ident)
+    if found is None:
+        return "is no longer listed"
+    if found.get("IsSet") is False:
+        return "now reads unset"
+    if found.get("Value") == text:
+        return "still holds the run's text (clear it in the Gorelo app too)"
+    return "now reads set to another value (check it in the Gorelo app too)"
+
+
+def custom_property_leftover_kind(record: Record) -> str:
+    """Which kind of leftover a custom_property record is, for the matrix summary: "changed" (other custom fields read
+    differently after a clear; their ids are in the details), "others_set" (the cleanup sent nothing because another custom field
+    of the test client is set) or "plain" (the field may still hold the run's text, or could not be checked)."""
+    if changed_fields_of(record.details):
+        return "changed"
+    return "others_set" if CUSTOM_PROPERTY_OTHERS_SET in (record.outcome or "") else "plain"
+
+
 def _recorded_status(record: Record) -> int | None:
     """The status_id the manifest recorded for an invoice (the status Gorelo stored), None when it is not an integer."""
     recorded = record.details.get("status_id")
@@ -751,6 +1005,8 @@ async def run_cleanup(
     guard_options: dict[str, Any] = {"cleanup": True}
     if void_approved:  # the one extra thing the guard learns: a run-created invoice recorded as Approved may be voided
         guard_options["allow_approved_invoice"] = True
+    if any(record.kind == "custom_property" and not record.cleaned for record in manifest.all_created()):
+        guard_options["allow_custom_properties"] = True  # the clear of the custom field value the run set (null Value only)
     guard = LiveGuard("write", manifest, **guard_options)
     pacer = Pacer(pace)
     hooks = {"request": [guard, pacer]}

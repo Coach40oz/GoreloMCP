@@ -31,7 +31,7 @@ from fastmcp.tools import Tool
 
 import tools.project_tasks as module
 from gorelo_client import is_forbidden_op
-from tools._common import REGISTRY
+from tools._common import MAX_ID, REGISTRY
 
 pytestmark = pytest.mark.anyio
 
@@ -246,6 +246,13 @@ def operation(method, path):
 
 def spec_text(method, path):
     return " ".join(operation(method, path)["description"].split())
+
+
+def spec_summary_and_text(method, path):
+    """An operation's summary and description as one text. Gorelo writes its wording in either one (the ticket approval
+    operation has all of its text in the summary and no description), so a check that a sentence is ABSENT must read both."""
+    op = operation(method, path)
+    return " ".join(f"{op.get('summary') or ''} {op.get('description') or ''}".split())
 
 
 def param_text(method, path, name):
@@ -625,7 +632,8 @@ async def test_list_project_tasks_an_empty_page_is_reported_as_zero_rows(server,
         ({"section_ids": ["nope"]}, "section_ids[0]: expected a GUID such as"),
         ({"section_ids": [SECTION, "12"]}, "section_ids[1]: expected a GUID such as"),
         ({"status_ids": []}, "status_ids: expected at least one id, got an empty list"),
-        ({"status_ids": [0]}, "status_ids[0]: expected a positive whole number such as 123, got zero or a negative number"),
+        # 0 is answered with the status scale, not with "a positive whole number such as 123" (123 is no status)
+        ({"status_ids": [0]}, "status_ids[0]: expected 1 NotStarted, 2 WorkingOnIt, 3 OnHold, 4 Done, got 0"),
         ({"assignee_ids": [-5]}, "assignee_ids[0]: expected a positive whole number"),
         ({"assignee_ids": [2**63]}, "assignee_ids[0]: expected a positive whole number such as 123, got a number above"),
         ({"assignee_ids": []}, "assignee_ids: expected at least one id, got an empty list"),
@@ -856,7 +864,7 @@ async def test_create_project_task_never_sends_a_priority_the_caller_did_not_giv
         ({"assisting_assignee_ids": [0]}, "assisting_assignee_ids[0]: expected a positive whole number"),
         ({"watcher_ids": []}, "watcher_ids: expected at least one id, got an empty list"),
         ({"watcher_ids": [9202, -1]}, "watcher_ids[1]: expected a positive whole number"),
-        ({"status_id": 0}, "status_id: expected a positive whole number"),
+        ({"status_id": 0}, "status_id: expected 1 NotStarted, 2 WorkingOnIt, 3 OnHold, 4 Done, got 0"),
         ({"due_date": "2026-11-30T17:00:00"}, "due_date: '2026-11-30T17:00:00' has no UTC offset"),
         ({"created_on": "2026-01-02"}, "created_on: '2026-01-02' has no UTC offset"),
         ({"updated_on": "tomorrow"}, "updated_on: 'tomorrow' is not an ISO 8601 datetime"),
@@ -1095,7 +1103,7 @@ async def test_update_project_task_false_for_clear_due_date_is_the_same_as_leavi
         ({"status_reason": ""}, "status_reason: must not be empty or whitespace only"),
         ({"title": "T", "updated_by_name": ""}, "updated_by_name: must not be empty or whitespace only"),
         ({"section_id": "backlog"}, "section_id: expected a GUID such as"),
-        ({"status_id": 0}, "status_id: expected a positive whole number"),
+        ({"status_id": 0}, "status_id: expected 1 NotStarted, 2 WorkingOnIt, 3 OnHold, 4 Done, got 0"),
         ({"watcher_ids": [0]}, "watcher_ids[0]: expected a positive whole number"),
         ({"blocked_by_task_ids": ["x"]}, "blocked_by_task_ids[0]: expected a GUID such as"),
         ({"agent_asset_ids": [ASSET, "y"]}, "agent_asset_ids[1]: expected a GUID such as"),
@@ -1255,7 +1263,8 @@ async def test_update_project_task_maps_gorelo_errors_to_the_param(server, mock_
             ],
         ),
     )
-    text = await call_tool_error(server, "update_project_task", {"project_id": PROJECT, "task_id": TASK, "status_id": 9})
+    # 3 OnHold is on the task scale, so it reaches Gorelo (the old 9 is refused locally, see the status section)
+    text = await call_tool_error(server, "update_project_task", {"project_id": PROJECT, "task_id": TASK, "status_id": 3})
     assert text == (
         "Gorelo rejected update_project_task (HTTP 400, code 070101): blocking_task_ids: A blocking task is in "
         f"another project.; agent_asset_ids: Unknown asset.; status_id: Unknown status. [trace {TEST_TRACE_ID}]"
@@ -1348,6 +1357,197 @@ async def test_a_task_update_sends_no_author_unless_the_caller_gave_one(server, 
     route_update_task(mock_gorelo)
     await call_tool(server, "update_project_task", {"project_id": PROJECT, "task_id": TASK, "title": "T"})
     assert mock_gorelo.requests[0].json == {"Title": "T"}
+
+
+# --------------------------------------------------------------------------
+# status ids: the task scale
+# --------------------------------------------------------------------------
+
+# A task has its own status scale. 5 is Closed on the PROJECT scale and nothing on this one, so a model that mixes the two
+# scales up could send a project status to a task. A status outside the task scale is refused locally, with zero HTTP calls,
+# by create_project_task, update_project_task and the status_ids filter of list_project_tasks, naming the param and listing
+# the accepted values with their labels the way priority_id does. That includes 0 and the negative numbers, which
+# are answered with the scale too ("expected a positive whole number such as 123" would suggest that 123 is a status); a
+# value that is not a whole number (a boolean, a decimal, text) keeps the id message of positive_id.
+TASK_SCALE = "1 NotStarted, 2 WorkingOnIt, 3 OnHold, 4 Done"
+TASK_EXPECTED = f"expected {TASK_SCALE}"
+ID_EXPECTED = "expected a positive whole number such as 123"
+
+
+def documented_scale(text):
+    """{id: label} of every "Label=N" pair of a spec text (spaces inside a label dropped: "Not Started" is NotStarted)."""
+    return {int(number): label.replace(" ", "") for label, number in re.findall(r"([A-Za-z][A-Za-z ]*)=(\d+)", text)}
+
+
+@needs_spec_text
+def test_the_task_status_scale_is_the_one_the_three_spec_texts_document():
+    texts = {
+        "StatusIds of the task list": param_text("get", "/v1/projects/{projectId}/tasks", "StatusIds"),
+        "CreateTaskCommand.StatusId": schema_fields("CreateTaskCommand")["StatusId"],
+        "UpdateTaskCommand.StatusId": schema_fields("UpdateTaskCommand")["StatusId"],
+    }
+    for where, text in texts.items():
+        assert documented_scale(text) == module.TASK_STATUS_LABELS, where
+    assert module.TASK_STATUS_LABELS == {1: "NotStarted", 2: "WorkingOnIt", 3: "OnHold", 4: "Done"}
+
+
+def test_the_task_status_text_the_model_reads_is_built_from_the_table_the_check_uses():
+    assert module.TASK_STATUS_SCALE == TASK_SCALE and module.TASK_STATUSES == f"{TASK_SCALE}."
+    for tool, param in (
+        ("list_project_tasks", "status_ids"), ("create_project_task", "status_id"), ("update_project_task", "status_id"),
+    ):
+        assert TASK_SCALE in param_description(tool, param), (tool, param)
+
+
+@pytest.mark.parametrize("status", [1, 2, 3, 4])
+async def test_every_status_of_the_task_scale_is_accepted_by_the_two_writes_and_the_list_filter(server, mock_gorelo, status):
+    route_create_task(mock_gorelo)
+    route_update_task(mock_gorelo)
+    mock_gorelo.on("GET", TASKS_URL, paged_envelope([]))
+    await call_tool(server, "create_project_task", {**VALID["create_project_task"], "status_id": status})
+    assert mock_gorelo.requests[0].json == {"Title": "Rack the switch", "SectionId": SECTION, "StatusId": status}
+    mock_gorelo.reset()
+    await call_tool(server, "update_project_task", {"project_id": PROJECT, "task_id": TASK, "status_id": status})
+    assert mock_gorelo.requests[0].json == {"StatusId": status}
+    mock_gorelo.reset()
+    result = await call_tool(server, "list_project_tasks", {"project_id": PROJECT, "status_ids": [status]})
+    assert mock_gorelo.last.query == {"StatusIds": str(status), "PageSize": "50"}
+    assert result["filters"] == {"project_id": PROJECT, "status_ids": [status]}
+
+
+async def test_the_task_list_accepts_the_whole_scale_in_one_filter(server, mock_gorelo):
+    mock_gorelo.on("GET", TASKS_URL, paged_envelope([]))
+    result = await call_tool(server, "list_project_tasks", {"project_id": PROJECT, "status_ids": [1, 2, 3, 4]})
+    assert mock_gorelo.last.query == {"StatusIds": "1,2,3,4", "PageSize": "50"}
+    assert result["filters"]["status_ids"] == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize("bad", [0, -1, -7, 5, 6, 7, 9, 99, 100000])
+@pytest.mark.parametrize(
+    "tool, arguments",
+    [
+        ("create_project_task", {"project_id": PROJECT, "title": "T", "section_id": SECTION}),
+        ("update_project_task", {"project_id": PROJECT, "task_id": TASK}),
+        ("update_project_task", {"project_id": PROJECT, "task_id": TASK, "status_reason": "Closing it", "title": "T"}),
+    ],
+)
+async def test_a_status_id_outside_the_task_scale_is_refused_before_any_request(server, mock_gorelo, tool, arguments, bad):
+    # 5 is Closed on the project scale, which is how a project status reaches a task; a task stops at 4 Done. 0 and the
+    # negative numbers are answered with the scale as well, never with "a positive whole number such as 123".
+    text = await call_tool_error(server, tool, {**arguments, "status_id": bad})
+    assert text == f"status_id: {TASK_EXPECTED}, got {bad}"
+    assert ID_EXPECTED not in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    "statuses, index",
+    [
+        ([5], 0), ([6, 1], 0), ([1, 5], 1), ([1, 2, 3, 4, 5], 4), ([4, 9, 5], 1), ([3, 3, 3, 8], 3),
+        # 0 and the negative numbers are answered with the scale, each item named by its index
+        ([0], 0), ([1, 0], 1), ([2, -3, 9], 1), ([-1], 0),
+    ],
+)
+async def test_a_status_ids_filter_with_a_value_outside_the_task_scale_is_refused_before_any_request(
+    server, mock_gorelo, statuses, index
+):
+    text = await call_tool_error(server, "list_project_tasks", {"project_id": PROJECT, "status_ids": statuses})
+    assert text == f"status_ids[{index}]: {TASK_EXPECTED}, got {statuses[index]}"
+    assert ID_EXPECTED not in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    "bad, kind",
+    [
+        (True, "a boolean"), (False, "a boolean"), (4.0, "a decimal number"), (0.0, "a decimal number"),
+        ("4", "a string"), ([4], "a list of 1 item"),
+    ],
+)
+async def test_calling_the_task_tools_directly_refuses_a_status_that_is_not_a_whole_number(
+    client_factory, mock_gorelo, bad, kind
+):
+    # StrictId refuses these in the schema and a direct call skips it. True == 1, False == 0 and 4.0 == 4 in Python, so a
+    # bare membership test on the scale (or the whole-number branch for 0) would have let them through or called them a
+    # status: what is not a whole number keeps the id message of positive_id.
+    calls = (
+        (module.create_project_task, {"project_id": PROJECT, "title": "T", "section_id": SECTION, "status_id": bad}, "status_id"),
+        (module.update_project_task, {"project_id": PROJECT, "task_id": TASK, "status_id": bad}, "status_id"),
+        (module.list_project_tasks, {"project_id": PROJECT, "status_ids": [bad]}, "status_ids[0]"),
+    )
+    for tool, kwargs, where in calls:
+        with pytest.raises(ToolError) as caught:
+            await call_directly(client_factory, tool, **kwargs)
+        assert str(caught.value) == f"{where}: {ID_EXPECTED}, got {kind}"
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    "bad, message",
+    [
+        pytest.param(0, f"{TASK_EXPECTED}, got 0", id="zero"),
+        pytest.param(-1, f"{TASK_EXPECTED}, got -1", id="minus one"),
+        pytest.param(-MAX_ID, f"{TASK_EXPECTED}, got {-MAX_ID}", id="the smallest int64 that is quoted"),
+        pytest.param(MAX_ID, f"{TASK_EXPECTED}, got {MAX_ID}", id="the largest int64"),
+        # beyond int64 a number is no Gorelo id at all, and positive_id's text never quotes it
+        pytest.param(MAX_ID + 1, f"{ID_EXPECTED}, got a number above {MAX_ID}, the largest Gorelo id", id="above int64"),
+        pytest.param(-MAX_ID - 1, f"{ID_EXPECTED}, got zero or a negative number", id="below int64"),
+        pytest.param(10**5000, f"{ID_EXPECTED}, got a number above {MAX_ID}, the largest Gorelo id", id="5000 digits up"),
+        pytest.param(-(10**5000), f"{ID_EXPECTED}, got zero or a negative number", id="5000 digits down"),
+    ],
+)
+async def test_calling_the_task_tools_directly_answers_a_whole_number_outside_the_scale_with_the_scale_up_to_int64(
+    client_factory, mock_gorelo, bad, message
+):
+    # Its edge: a whole number is quoted back only while it is a plausible number (Python refuses to turn a
+    # number of more than 4300 digits into text, and nothing here should depend on that)
+    calls = (
+        (module.create_project_task, {"project_id": PROJECT, "title": "T", "section_id": SECTION, "status_id": bad}, "status_id"),
+        (module.update_project_task, {"project_id": PROJECT, "task_id": TASK, "status_id": bad}, "status_id"),
+        (module.list_project_tasks, {"project_id": PROJECT, "status_ids": [1, bad]}, "status_ids[1]"),
+    )
+    for tool, kwargs, where in calls:
+        with pytest.raises(ToolError) as caught:
+            await call_directly(client_factory, tool, **kwargs)
+        assert str(caught.value) == f"{where}: {message}"
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    "statuses, message",
+    [
+        ("1,2", "status_ids: expected a list of ids such as [123, 456], got a string"),
+        (4, "status_ids: expected a list of ids such as [123, 456], got a number"),
+        ({"a": 1}, "status_ids: expected a list of ids such as [123, 456], got an object"),
+        ([], "status_ids: expected at least one id, got an empty list (omit status_ids if you have no ids to give)"),
+        ([None], f"status_ids[0]: {ID_EXPECTED}, got null"),
+        ([2, None], f"status_ids[1]: {ID_EXPECTED}, got null"),
+    ],
+)
+async def test_calling_the_task_list_directly_keeps_the_list_messages_of_positive_ids(
+    client_factory, mock_gorelo, statuses, message
+):
+    # None is "not given" only for a single status_id: as an item of the list (or as the list shape) it is refused
+    with pytest.raises(ToolError) as caught:
+        await call_directly(client_factory, module.list_project_tasks, project_id=PROJECT, status_ids=statuses)
+    assert str(caught.value) == message
+    assert mock_gorelo.requests == []
+
+
+async def test_calling_the_task_tools_directly_still_accepts_the_whole_scale(client_factory, mock_gorelo):
+    # the direct path is not stricter than the schema path: every status of the scale goes through
+    route_create_task(mock_gorelo)
+    route_update_task(mock_gorelo)
+    mock_gorelo.on("GET", TASKS_URL, paged_envelope([]))
+    for status in (1, 2, 3, 4):
+        await call_directly(
+            client_factory, module.create_project_task, project_id=PROJECT, title="T", section_id=SECTION, status_id=status
+        )
+        await call_directly(client_factory, module.update_project_task, project_id=PROJECT, task_id=TASK, status_id=status)
+    await call_directly(client_factory, module.list_project_tasks, project_id=PROJECT, status_ids=[1, 2, 3, 4])
+    bodies = [r.json for r in mock_gorelo.requests if r.method in ("POST", "PATCH")]
+    assert [body["StatusId"] for body in bodies] == [1, 1, 2, 2, 3, 3, 4, 4]
+    assert mock_gorelo.requests[-1].query["StatusIds"] == "1,2,3,4"
 
 
 # --------------------------------------------------------------------------
@@ -1679,10 +1879,58 @@ def test_create_task_approval_docstring_states_who_may_approve_and_what_it_trigg
     for fragment in (
         "active contact of the task's client AND carry an approver contact tag",
         "tags are set in the Gorelo UI (the API cannot set them)", "rejected before anything is written",
-        "waiting-on-contact state", "Nothing is emailed until a comment is posted into the approval",
-        'conversation_type="approval"', "Approvers start Pending", "get_task_approval", "do not create it again",
+        "waiting-on-contact state",
+        # The task operation never says whether creating the approval notifies anyone, so the text says that
+        # Gorelo does not say, has the model tell the user first, and points to the approval comment
+        "Gorelo does not say whether creating it notifies the approvers",
+        "tell the user they may be notified before you create one",
+        'create_project_comment (task_id, conversation_type="approval", conversation_id = this Id), which emails the approvers',
+        "Approvers start Pending", "get_task_approval", "do not create it again",
     ):
         assert fragment in doc, fragment
+    # and it no longer promises silence: "created empty, post into it to email" is the TICKET approval's text
+    for stale in ("Nothing is emailed", "nothing is emailed", "emails nobody", "until a comment is posted"):
+        assert stale not in doc, stale
+
+
+# The wording that would say what creating an approval sends (or that it is created empty and posted into afterwards).
+APPROVAL_SENDING_WORDS = re.compile(r"e-?mail|notif|empty|post(?:ed|ing)? into|afterwards", re.IGNORECASE)
+
+
+@needs_spec_text
+def test_the_task_approval_text_never_says_creating_it_is_silent_unlike_the_ticket_approval_text():
+    # "The approval is created empty ... post into it afterwards ... which is also what sends the approvers their
+    # confirmation email" is the text of the TICKET approval operation. The task operation says who may approve, that an
+    # ineligible contact is rejected before anything is written and that creating an approval puts the task in a
+    # waiting-on-the-contact state. It says nothing about email or about an empty approval, so the docstring must not
+    # claim either (if Gorelo adds such a sentence, this fails and the docstring is read against it again).
+    # Gorelo writes this kind of wording in the summary as well (the ticket operation has nothing else), so the
+    # tripwire reads the summary and the description.
+    task = spec_summary_and_text("post", "/v1/projects/{projectId}/tasks/{taskId}/conversations/approval")
+    assert not APPROVAL_SENDING_WORDS.search(task), task
+    ticket_text = spec_summary_and_text("post", "/v1/tickets/{ticketId}/conversations/approval")
+    assert "created empty" in ticket_text and "sends the approvers their confirmation email" in ticket_text
+
+
+def test_the_approval_tripwire_reads_the_summary_as_well_as_the_description(monkeypatch):
+    # spec_text() reads only the description, so a sentence that Gorelo adds to the SUMMARY of the task approval
+    # operation would pass the tripwire above unseen. spec_summary_and_text() reads both, and survives a missing or null
+    # field (the ticket approval operation has no description at all).
+    operations = {
+        "summary only": {"summary": "Asks contacts to approve something on a task. The approval is created empty."},
+        "description only": {"description": "Creating an approval puts the task in a waiting-on-the-contact state."},
+        "null summary": {"summary": None, "description": "Each contact must be an active contact of the task's client."},
+        "both": {"summary": "Asks contacts to approve.", "description": "Each contact\r\nmust be an approver."},
+        "email in the summary": {"summary": "Asks contacts to approve and emails them.", "description": "Each contact must approve."},
+    }
+    monkeypatch.setitem(globals(), "operation", lambda method, path: operations[path])
+    assert spec_summary_and_text("post", "both") == "Asks contacts to approve. Each contact must be an approver."
+    assert spec_summary_and_text("post", "null summary") == "Each contact must be an active contact of the task's client."
+    assert spec_summary_and_text("post", "description only") == operations["description only"]["description"]
+    assert APPROVAL_SENDING_WORDS.search(spec_summary_and_text("post", "summary only"))
+    assert APPROVAL_SENDING_WORDS.search(spec_summary_and_text("post", "email in the summary"))
+    assert not APPROVAL_SENDING_WORDS.search(spec_summary_and_text("post", "description only"))
+    assert not APPROVAL_SENDING_WORDS.search(spec_summary_and_text("post", "both"))
 
 
 async def test_get_task_approval_returns_the_record_unchanged(server, mock_gorelo):

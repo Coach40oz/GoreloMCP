@@ -130,17 +130,39 @@ SAMPLE_IDS = {
     "approval": "approval-1",
     "invoice": uid(11),
     "custom_asset": uid(12),
+    "custom_property": 17,
 }
 
 
-def test_the_kinds_are_the_sixteen_the_harness_creates():
+def test_the_kinds_are_the_seventeen_the_harness_records():
     assert KINDS == (
         "client", "contact", "ticket", "comment", "time_entry", "item", "uptime", "project", "section", "task",
-        "project_comment", "attachment", "side_conversation", "approval", "invoice", "custom_asset",
+        "project_comment", "attachment", "side_conversation", "approval", "invoice", "custom_asset", "custom_property",
     )
     assert set(ID_TYPES) == set(KINDS) and set(SAMPLE_IDS) == set(KINDS)
     assert ID_TYPES["invoice"] == "uuid"  # an invoice is named by a GUID, never by a number
     assert ID_TYPES["custom_asset"] == "uuid"  # so is a custom asset (customAssetId is a uuid)
+    assert ID_TYPES["custom_property"] == "int"  # a custom field is named by its Id, a whole number (int64 in the spec)
+
+
+def test_a_custom_property_is_recorded_by_the_id_of_its_custom_field_with_the_details_the_guard_and_cleanup_read(manifest):
+    details = {"client_id": 9501, "name": "Support tier", "type": "Text", "was_set": False, "value": RUN}
+    record = manifest.created("custom_property", "17", manifest.label("custom property 17"), details)
+    assert record.id == 17 and record.details == details and manifest.ids("custom_property") == {17}
+    assert Manifest.load(manifest.path).details("custom_property", 17) == details  # survives a reload exactly
+    for bad in (0, -3, True, 1.0, uid(1), "abc", None):
+        with pytest.raises(ValueError, match="a custom_property id must be a positive integer"):
+            normalize_id("custom_property", bad)
+    text = " ".join(manifest_module.__doc__.split())
+    for said in (
+        "custom_property the custom field value that the write matrix's custom_properties area sets on the test client and "
+        "clears again",
+        "so it is written BEFORE the first write",
+        "was_set (exactly the JSON false: the field was NOT set before the run; the guard refuses every write to a field whose "
+        "record does not say so, and the cleanup touches only such a field)",
+        "`id` is an int for client, contact, time_entry and custom_property",
+    ):
+        assert said in text, said
 
 
 def test_an_invoice_is_recorded_with_its_status_number_and_display_number(manifest):

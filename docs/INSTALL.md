@@ -14,7 +14,7 @@ Conventions:
 
 | You need | Notes |
 |---|---|
-| A Gorelo API key | Create it in Gorelo (Settings, API keys). Give it read and write scopes for the areas you want Claude to use: clients, contacts, tickets, assets (the `Assets` scope also covers custom assets, including creating and updating them), time, billing (invoices, items, taxes, contracts), alerts and uptime. Only add the `Project` and `Forms` scopes if you will switch those toolsets on (step 8). Start with fewer scopes: you can add more later. The key is shown once, so copy it somewhere safe. |
+| A Gorelo API key | Create it in Gorelo (Settings, API keys). Give it read and write scopes for the areas you want Claude to use: clients (the write scope on clients is expected to cover setting and clearing a client's custom fields too, because they are part of the same update; this has not been tested against a live account yet), contacts, tickets, assets (the `Assets` scope also covers custom assets, including creating and updating them), time, billing (invoices, items, taxes, contracts), alerts and uptime. Only add the `Project` and `Forms` scopes if you will switch those toolsets on (step 8). Start with fewer scopes: you can add more later. The key is shown once, so copy it somewhere safe. |
 | A Debian 13 server | A VM, an LXC container or a cloud VPS. 1 CPU, 1 GB of RAM and 5 GB of disk are plenty. Root access and outbound internet. |
 | A domain on Cloudflare | The domain's DNS must be managed by Cloudflare (a free account is fine). You will create a tunnel and a hostname such as `mcp.example.com`. |
 | A claude.ai plan with custom connectors | Check Settings, Connectors in claude.ai. On team and enterprise plans an owner may need to allow custom connectors. |

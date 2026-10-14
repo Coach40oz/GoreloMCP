@@ -19,9 +19,13 @@ never raises after a confirmed write: when the row is not found or the scan fail
 
 Agents carry LocationId (renamed from ClientLocationId on 2026-08-21) and WarrantyStartDate /
 WarrantyEndDate (replaced WarrantyExpiryDate the same day). The agent list rows are DeviceListItemResponse
-records and the single agent is a DeviceResponse; the published spec gives both the same fields. The agent
-list takes StatusIds; the custom asset list has no StatusIds, so list_custom_assets does not offer it
-(Gorelo rejects names an op does not declare).
+records and the single agent is a DeviceResponse. Since contract 1b1c0cec0e9a (2026-10-14) the single agent is
+the list row's fields plus CustomProperties, which the list deliberately leaves out: one entry (Id, Variable,
+Name, Type, Value, IsSet) for every custom field defined for devices. Value is the effective value (the saved
+one, else the field's default, else null), always text, and IsSet is true when a value is saved on the device.
+get_agent passes CustomProperties through unchanged; nothing writes them, because Gorelo has no operation that
+updates a device. The agent list takes StatusIds; the custom asset list has no StatusIds, so list_custom_assets
+does not offer it (Gorelo rejects names an op does not declare).
 
 There are no delete tools: DELETE /v1/assets/agents/{deviceId} uninstalls the RMM agent from the host and
 DELETE /v1/assets/custom/{customAssetId} is not allowed; both are in FORBIDDEN_OPS.
@@ -155,7 +159,7 @@ async def list_agents(
     cursor: Annotated[str | None, Field(description="next_cursor from the previous call.")] = None,
 ) -> dict:
     """List agents (managed devices) one page per call; returns {items, has_more, next_cursor, total_count, ...}.
-    Rows carry LocationId and WarrantyStartDate/WarrantyEndDate (renamed 2026-08-21). Deleted and client-inactivated devices are never listed. This server cannot delete or uninstall agents. Paging: pass next_cursor as cursor, same filters, until has_more is false.
+    Rows carry LocationId and WarrantyStartDate/WarrantyEndDate (renamed 2026-08-21). Rows omit custom fields: get_agent has them. Deleted and client-inactivated devices are never listed. This server cannot delete or uninstall agents. Paging: pass next_cursor as cursor, same filters, until has_more is false.
     """
     params, shown = _shared_filters(client_ids, query, created_since, created_before, updated_since, updated_before)
     params["StatusIds"] = csv_ids("status_ids", positive_ids("status_ids", status_ids))
@@ -173,7 +177,7 @@ async def get_agent(
     ctx: Context,
     agent_id: Annotated[str, Field(description="Agent UUID: the Id of a list_agents row.")],
 ) -> dict:
-    """Get one agent (managed device) by UUID; returns Gorelo's full device record."""
+    """Get one agent (managed device) by UUID; returns Gorelo's full device record, including CustomProperties."""
     aid = guid("agent_id", agent_id)
     record = await client_of(ctx).get_one(GET_AGENT_OP, path_params={"deviceId": aid}, tool="get_agent")
     return expect_object(record, GET_AGENT_OP, tool="get_agent")

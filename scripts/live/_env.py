@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -79,6 +80,18 @@ def scrub(text: str, secret: str | None) -> str:
     if not secret:
         return text
     return text.replace(secret, "***")
+
+
+_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def without_quotes(text: str) -> str:
+    """`text` with every double-quoted string cut out ("..."), escapes inside a string included.
+
+    update_client quotes the name and the previous value of a custom field in the error it raises for fields that changed
+    without being sent (the user's own data, which it shows to the model on purpose). The live harness prints and records ids
+    and Gorelo's messages only, so it applies this to every update_client error text it prints or records."""
+    return _QUOTED.sub('"..."', text)
 
 
 class Pacer:

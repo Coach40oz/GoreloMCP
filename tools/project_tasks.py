@@ -19,9 +19,13 @@ The same contract documents every request field for the first time, and the tool
 
 * update_project_task removes a value only through clear_fields, the explicit opt-in: the lists (Gorelo: send an
   empty array), the banner (Gorelo: send an empty string) and the lead (Gorelo: send 0). A bare blank value, an
-  empty list or a bare 0 is refused and points to clear_fields. Gorelo documents the lead removal, but it cannot be
-  probed because the key has no Project scope. A task's due date is removed with clear_due_date, never by omission.
+  empty list or a bare 0 is refused and points to clear_fields. Gorelo documents the lead removal; it has not been
+  probed live. A task's due date is removed with clear_due_date, never by omission.
 * status_reason is read by Gorelo only when status_id is sent, so it is refused without status_id.
+* status_id and the status_ids filter are checked against the task scale (1 NotStarted to 4 Done) before any request. The
+  project scale is another one (it adds InProgress, Completed and Closed), so a project status such as 5 Closed is
+  refused here instead of being sent to a task. The scale is the one CreateTaskCommand.StatusId, UpdateTaskCommand.StatusId
+  and the StatusIds filter of the task list document.
 * section_id of an update must be an active section of the same project (text only: it needs a read to check).
 * the CreatedOn and UpdatedOn of a new task state no rule (UpdatedOn only "Defaults to CreatedOn"), so none is
   checked: each needs an offset, and nothing is compared with the local clock or with the other one.
@@ -52,6 +56,7 @@ from fastmcp import Context
 from pydantic import Field
 
 from tools._common import (
+    MAX_ID,
     StrictBool,
     StrictId,
     build_body,
@@ -168,7 +173,11 @@ TASK_CLEAR_VALUES: dict[str, Any] = {
 SIDE_CONVERSATION_MAP = {"name": "Name", "email": "Email", "cc_emails": "CcEmails"}
 APPROVAL_MAP = {"name": "Name", "contact_ids": "ContactIds"}
 
-TASK_STATUSES = "1 NotStarted, 2 WorkingOnIt, 3 OnHold, 4 Done."
+# The task status scale ("NotStarted=1, WorkingOnIt=2, OnHold=3, Done=4"): StatusId of a task create and update, and the
+# StatusIds filter of the task list. A project has its own scale (see tools/projects.py), which a task never takes.
+TASK_STATUS_LABELS = {1: "NotStarted", 2: "WorkingOnIt", 3: "OnHold", 4: "Done"}
+TASK_STATUS_SCALE = ", ".join(f"{status} {label}" for status, label in TASK_STATUS_LABELS.items())
+TASK_STATUSES = f"{TASK_STATUS_SCALE}."
 SIDE_CONVERSATION_NOTE = (
     "Gorelo answers with the conversation Id only and has no single-conversation read. Nothing is sent until "
     "you post a comment into it: create_project_comment with task_id, conversation_type=\"side_conversation\" "
@@ -199,6 +208,32 @@ def _priority(value: Any) -> int | None:
         shown = value if isinstance(value, int) and not isinstance(value, bool) else describe_value(value)
         raise ValueError(f"priority_id: expected {PRIORITIES}, got {shown}")
     return value
+
+
+def _status(param: str, value: Any) -> int:
+    """One status of a task: 1 NotStarted to 4 Done. A caller's None means "not given", so wrap it with _given.
+
+    The project scale is another one (it adds InProgress, Completed and Closed), so a project status such as 5 is refused
+    here, with zero HTTP calls, instead of being sent to a task. Every whole number outside the scale is answered with the
+    scale and quoted back (it is not caller data worth hiding), 0 and the negative numbers included: positive_id's
+    "expected a positive whole number such as 123" would suggest that any id will do. Whatever else is not an id (a
+    boolean, a decimal, text, a list, or a number beyond int64, which is never quoted) keeps the message of positive_id."""
+    if isinstance(value, int) and not isinstance(value, bool) and -MAX_ID <= value < 1:
+        status = int(value)
+    else:
+        status = positive_id(param, value)
+    if status not in TASK_STATUS_LABELS:
+        raise ValueError(f"{param}: expected {TASK_STATUS_SCALE}, got {status}")
+    return status
+
+
+def _statuses(param: str, values: Any) -> list[int] | None:
+    """The status_ids filter of the task list: every item on the task scale, a bad one named by its index.
+
+    None, an empty list and a value that is not a list keep the messages of positive_ids."""
+    if isinstance(values, (list, tuple)) and values:
+        return [_status(f"{param}[{index}]", item) for index, item in enumerate(values)]
+    return positive_ids(param, values)
 
 
 def _email(param: str, value: Any) -> str:
@@ -316,7 +351,7 @@ async def list_project_tasks(
     filters = {
         "project_id": pid,
         "section_ids": guids("section_ids", section_ids),
-        "status_ids": positive_ids("status_ids", status_ids),
+        "status_ids": _statuses("status_ids", status_ids),
         "assignee_ids": positive_ids("assignee_ids", assignee_ids),
         "lead_assignee_ids": positive_ids("lead_assignee_ids", lead_assignee_ids),
         "incomplete_only": incomplete_only,
@@ -400,7 +435,7 @@ async def create_project_task(
         "assisting_assignee_ids": positive_ids("assisting_assignee_ids", assisting_assignee_ids),
         "watcher_ids": positive_ids("watcher_ids", watcher_ids),
         "priority_id": _priority(priority_id),
-        "status_id": _given(positive_id, "status_id", status_id),
+        "status_id": _given(_status, "status_id", status_id),
         "due_date": utc_iso("due_date", due_date),
         "created_by_name": created_by_name,
         "created_on": utc_iso("created_on", created_on),
@@ -508,7 +543,7 @@ async def update_project_task(
     values = {
         "title": title,
         "section_id": _given(guid, "section_id", section_id),
-        "status_id": _given(positive_id, "status_id", status_id),
+        "status_id": _given(_status, "status_id", status_id),
         "status_reason": non_empty("status_reason", status_reason),
         "priority_id": _priority(priority_id),
         "due_date": utc_iso("due_date", due_date),
@@ -632,7 +667,7 @@ async def create_task_approval(
     ],
 ) -> dict:
     """Ask contacts to approve something on a task and return the approval. Each contact must be an active contact of the task's client AND carry an approver contact tag; tags are set in the Gorelo UI (the API cannot set them), and an ineligible contact is rejected before anything is written. Approvers start Pending: get_task_approval has the status.
-    Side effects: creates the approval and puts the task into a waiting-on-contact state. Nothing is emailed until a comment is posted into the approval (create_project_comment with conversation_type="approval" and this conversation_id). If the result is {Id, warning} the approval exists: do not create it again.
+    Side effects: creates the approval and puts the task into a waiting-on-contact state. Gorelo does not say whether creating it notifies the approvers, so tell the user they may be notified before you create one. The request text is posted with create_project_comment (task_id, conversation_type="approval", conversation_id = this Id), which emails the approvers. If the result is {Id, warning} the approval exists: do not create it again.
     """
     ids = _task_ids(project_id, task_id)
     non_empty("name", name)

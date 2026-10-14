@@ -15,13 +15,16 @@ This module also holds the log filter main.py installs (install_log_value_filter
 rejected tool call with `logger.exception`, and a pydantic ValidationError prints every offending
 argument value (`input_value=...`). The filter removes those values from the records, keeping only
 the error locations and types, so client data never reaches the journal through FastMCP's own logging.
+It does the same for an exception that says it holds values the journal must not keep (see
+PRIVATE_LOG_ATTRIBUTE): FastMCP logs a failed tool call at ERROR with the whole exception chain, and the text
+of such an error (a custom field's previous value can be a password or a licence key) is for the model only.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from collections.abc import AsyncIterator, Iterable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -95,6 +98,10 @@ _INPUT_VALUE_REST = re.compile(r"input_value=(?!<omitted>)[^\]\r\n]*")
 _OMITTED = "input_value=<omitted>"
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SUMMARY_LIMIT = 20
+# An exception that holds values the journal must not keep says so with this attribute, whose value is its text for the
+# log (what happened, the operation and ids, no value). tools/clients.py sets it on the error it raises when custom
+# fields changed that were not in a call, and repeats the name there; tests/test_log_filter.py pins that they agree.
+PRIVATE_LOG_ATTRIBUTE = "log_summary"
 # The logger trees whose records are sanitized. FastMCP's own logger does not propagate to the root
 # logger (it has its own handlers), so a filter on the root handlers would never see its records.
 FILTERED_LOGGERS = ("fastmcp", "mcp")
@@ -106,8 +113,8 @@ def redact_input_values(text: str) -> str:
     return _INPUT_VALUE_REST.sub(_OMITTED, _INPUT_VALUE.sub(_OMITTED, text))
 
 
-def _find_validation_error(exc_info: Any) -> BaseException | None:
-    """The first pydantic ValidationError in the exception of a log record, following __cause__,
+def _find_in_chain(exc_info: Any, wanted: Callable[[BaseException], bool]) -> BaseException | None:
+    """The first exception that `wanted` accepts in the exception of a log record, following __cause__,
     __context__ and exception groups (FastMCP chains errors, and a tool may raise one)."""
     if not isinstance(exc_info, tuple) or len(exc_info) < 2:
         return None
@@ -118,12 +125,23 @@ def _find_validation_error(exc_info: Any) -> BaseException | None:
         if not isinstance(error, BaseException) or id(error) in seen:
             continue
         seen.add(id(error))
-        if isinstance(error, PydanticValidationError):
+        if wanted(error):
             return error
         pending.extend((error.__cause__, error.__context__))
         if isinstance(error, BaseExceptionGroup):
             pending.extend(error.exceptions)
     return None
+
+
+def _find_validation_error(exc_info: Any) -> BaseException | None:
+    """The first pydantic ValidationError in the exception of a log record (see _find_in_chain)."""
+    return _find_in_chain(exc_info, lambda error: isinstance(error, PydanticValidationError))
+
+
+def _find_private_error(exc_info: Any) -> BaseException | None:
+    """The first exception in the exception of a log record that carries PRIVATE_LOG_ATTRIBUTE as a text (see
+    _find_in_chain). Its attribute is what may be logged instead of the exception."""
+    return _find_in_chain(exc_info, lambda error: isinstance(getattr(error, PRIVATE_LOG_ATTRIBUTE, None), str))
 
 
 def validation_summary(error: BaseException) -> str:
@@ -151,6 +169,10 @@ class LogValueFilter(logging.Filter):
 
     * A record whose exception (or one of its causes) is a pydantic ValidationError loses its exc_info
       and cached traceback text, and gets a summary of error locations and types appended to its message.
+    * A record whose exception, or any exception in its cause or context chain, carries PRIVATE_LOG_ATTRIBUTE
+      (an error whose text holds values the journal must not keep) loses its exc_info and cached traceback text
+      in the same way, and gets that attribute, a text with no value in it, appended to its message. The
+      full text still reaches the model: only the log is cut.
     * Any `input_value=...` fragment left in a message is redacted.
     The filter never drops a record and never raises: a record it cannot read is replaced by a
     placeholder rather than logged as it is.
@@ -168,17 +190,22 @@ class LogValueFilter(logging.Filter):
 
     @staticmethod
     def _sanitize(record: logging.LogRecord) -> None:
-        error = _find_validation_error(record.exc_info)
+        private = _find_private_error(record.exc_info)
+        error = None if private is not None else _find_validation_error(record.exc_info)
         try:
             message = record.getMessage()
         except Exception:
             message = str(record.msg)
         redacted = redact_input_values(message)
-        if error is None:
+        if private is None and error is None:
             if redacted != message:
                 record.msg, record.args = redacted, None
             return
-        record.msg = f"{redacted} [{validation_summary(error)}]"
+        if private is not None:
+            summary = getattr(private, PRIVATE_LOG_ATTRIBUTE) or "details withheld from the log"
+        else:
+            summary = validation_summary(error)  # type: ignore[arg-type]
+        record.msg = f"{redacted} [{summary}]"
         record.args = None
         record.exc_info = None
         record.exc_text = None

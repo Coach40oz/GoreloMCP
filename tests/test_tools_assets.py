@@ -152,15 +152,24 @@ def test_the_field_map_of_get_agent_names_the_path_placeholder(spec_index):
     assert set(spec.field_map.values()) == set(spec_index.op("GET /v1/assets/agents/{deviceId}").path_placeholders)
 
 
-def test_the_agent_list_rows_and_the_single_agent_are_the_same_fields_in_the_spec(spec_index):
-    """The tool text says a list row (DeviceListItemResponse) has the fields of the single record (DeviceResponse)."""
+def test_the_single_agent_is_the_list_row_fields_plus_custom_properties_in_the_spec(spec_index):
+    """The module text says the single record (DeviceResponse) is a list row (DeviceListItemResponse) plus CustomProperties,
+    which the list deliberately leaves out. The two had exactly the same fields until contract 1b1c0cec0e9a (2026-10-14)."""
     assert spec_index.op("GET /v1/assets/agents").response["data"] == "[DeviceListItemResponse]"
     assert spec_index.op("GET /v1/assets/agents/{deviceId}").response["data"] == "DeviceResponse"
     row, record = spec_index.schema("DeviceListItemResponse")["fields"], spec_index.schema("DeviceResponse")["fields"]
-    assert row == record
+    assert row != record and set(record) - set(row) == {"CustomProperties"} and set(row) < set(record)
+    assert {name: entry for name, entry in record.items() if name != "CustomProperties"} == row  # nothing else differs
     assert {"LocationId", "WarrantyStartDate", "WarrantyEndDate"} <= set(row) and "ClientLocationId" not in row
+    custom = record["CustomProperties"]
+    assert (custom["type"], custom["items"]["ref"], custom["nullable"]) == ("array", "CustomPropertyValue", False)
+    assert set(spec_index.schema("CustomPropertyValue")["fields"]) == {"Id", "Variable", "Name", "Type", "Value", "IsSet"}
+    # no operation updates a device, so nothing in this module could write a custom property of one
+    assert {op.method for op in spec_index.ops.values() if op.path == "/v1/assets/agents/{deviceId}"} == {"GET", "DELETE"}
     doc = flat(assets_module.__doc__)
-    assert "DeviceListItemResponse" in doc and "DeviceResponse" in doc and "the same fields" in doc
+    assert "DeviceListItemResponse" in doc and "DeviceResponse" in doc and "the same fields" not in doc
+    assert "the list row's fields plus CustomProperties" in doc and "which the list deliberately leaves out" in doc
+    assert "Gorelo has no operation that updates a device" in doc
 
 
 LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
@@ -212,6 +221,13 @@ def test_the_agent_list_docstring_names_the_renamed_fields():
     text = flat(assets_module.list_agents.__doc__)
     assert "LocationId" in text and "WarrantyStartDate" in text and "WarrantyEndDate" in text
     assert "2026-08-21" in text
+
+
+def test_the_agent_docstrings_send_the_model_from_the_list_to_the_single_record_for_custom_fields():
+    # the list rows leave CustomProperties out and get_agent has it (contract 1b1c0cec0e9a); each pointer is a few words, because
+    # the default tools/list is at its byte budget (tests/test_integration.py)
+    assert "Rows omit custom fields: get_agent has them." in flat(assets_module.list_agents.__doc__)
+    assert flat(assets_module.get_agent.__doc__).endswith("returns Gorelo's full device record, including CustomProperties.")
 
 
 def test_the_asset_docstrings_say_this_server_cannot_delete():
@@ -351,6 +367,47 @@ async def test_get_agent_reads_one_agent_and_returns_the_record_unchanged(server
     request = mock_gorelo.last
     assert (request.method, request.path, request.query, request.content) == ("GET", f"/v1/assets/agents/{uid(7)}", {}, b"")
     assert len(mock_gorelo.requests) == 1
+
+
+# The shape is CustomPropertyValue (contract 1b1c0cec0e9a); the values are invented, because the field types Gorelo uses
+# (Type is {Id, Name}) and the formats of their values were not probed. Value is the effective value (the saved one, else the
+# field's default, else null) and is always text; IsSet says whether a value is saved on the device.
+CUSTOM_PROPERTIES = [
+    {"Id": 41, "Variable": "warranty_vendor", "Name": "Warranty vendor", "Type": {"Id": 1, "Name": "Text"}, "Value": "Dell", "IsSet": True},
+    {"Id": 42, "Variable": "asset_tag", "Name": "Asset tag", "Type": {"Id": 1, "Name": "Text"}, "Value": None, "IsSet": False},
+    {"Id": 43, "Variable": "seats", "Name": "Seats", "Type": {"Id": 2, "Name": "Number"}, "Value": "5", "IsSet": False},
+]
+
+
+async def test_get_agent_passes_custom_properties_through_unchanged(server, mock_gorelo):
+    """The single record carries every device custom field. The tool neither reads nor reshapes them: the order, the Type
+    object, a null Value and a default shown with IsSet false all come back as Gorelo sent them."""
+    record = agent_record(7, CustomProperties=CUSTOM_PROPERTIES)
+    mock_gorelo.on("GET", f"/v1/assets/agents/{uid(7)}", envelope(record))
+    result = await call_tool(server, "get_agent", {"agent_id": uid(7)})
+    assert result == record
+    assert result["CustomProperties"] == CUSTOM_PROPERTIES
+    assert [entry["Id"] for entry in result["CustomProperties"]] == [41, 42, 43]
+    assert [entry["Value"] for entry in result["CustomProperties"]] == ["Dell", None, "5"]
+    assert [entry["IsSet"] for entry in result["CustomProperties"]] == [True, False, False]
+    assert len(mock_gorelo.requests) == 1  # one GET: the custom fields are part of the single record
+
+
+async def test_get_agent_keeps_an_empty_custom_properties_list(server, mock_gorelo):
+    # "Empty only when no custom fields are defined": that is an answer, not a reason to drop the key or to refuse the record
+    record = agent_record(7, CustomProperties=[])
+    mock_gorelo.on("GET", f"/v1/assets/agents/{uid(7)}", envelope(record))
+    result = await call_tool(server, "get_agent", {"agent_id": uid(7)})
+    assert result == record and result["CustomProperties"] == []
+
+
+async def test_list_agents_rows_have_no_custom_properties_and_the_tool_fetches_none(server, mock_gorelo):
+    rows = [agent_record(1), agent_record(2)]
+    assert all("CustomProperties" not in row for row in rows)  # the list shape leaves them out
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows, total_count=2))
+    result = await call_tool(server, "list_agents")
+    assert result["items"] == rows and all("CustomProperties" not in row for row in result["items"])
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", AGENTS)]  # no get_agent call per row
 
 
 @pytest.mark.parametrize(

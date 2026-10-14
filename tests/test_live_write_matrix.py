@@ -1189,6 +1189,34 @@ GOLDEN_CUSTOM_ASSETS = [
     "GET /v1/assets/custom",
     "PATCH /v1/assets/custom/{customAssetId}",
 ]
+# The custom_properties area (--with-custom-properties) in the happy path: update_client reads the client before every write of a
+# custom field, sends the PATCH and reads the client again (a GET, the PATCH, a GET), and checks the fields on that second read;
+# the area reads the client itself too (the fields, then a fresh read after each change). The negative check is the first GET
+# alone: the tool refuses an Id the client does not list before it sends any PATCH, and reads nothing again.
+GOLDEN_CUSTOM_PROPERTIES = [
+    "GET /v1/clients/{clientId}",  # the area: get_client of the test client
+    "GET /v1/clients/{clientId}",  # update_client custom_properties: the read before the write
+    "PATCH /v1/clients/{clientId}",
+    "GET /v1/clients/{clientId}",  # and the read after it
+    "GET /v1/clients/{clientId}",  # the area: fresh get_client
+    "GET /v1/clients/{clientId}",  # update_client clear_custom_property_ids: the read before the write
+    "PATCH /v1/clients/{clientId}",
+    "GET /v1/clients/{clientId}",  # and the read after it
+    "GET /v1/clients/{clientId}",  # the area: fresh get_client
+    "GET /v1/clients/{clientId}",  # the negative check: update_client reads the client and refuses the Id, nothing else
+    "GET /v1/clients/{clientId}",  # the area: the last get_client
+]
+# The projects area when it runs ALONE (--only projects): nothing is cached, so it reads the test client's location and the
+# three ticket lookups itself, right after its two scope probes. In a full run an earlier area has read them already
+# (GOLDEN["projects"] is that run's list, which is the same list without these four requests).
+GOLDEN_PROJECTS_ALONE = [
+    *GOLDEN["projects"][:2],
+    "GET /v1/clients/{clientId}/locations",
+    "GET /v1/tickets/statuses",
+    "GET /v1/tickets/types",
+    "GET /v1/organization/groups",
+    *GOLDEN["projects"][2:],
+]
 GOLDEN_APPROVED = [
     "GET /v1/contacts",
     "GET /v1/clients/{clientId}/locations",
@@ -1213,10 +1241,10 @@ async def test_a_full_run_passes_and_leaves_nothing_behind(run, lines):
     report = await run(fake, with_items=True, with_invoices=True)
     assert report.ok and report.exit_code == 0, "\n".join(lines)
     assert [r.area for r in report.results] == [a.key for a in write_matrix.AREAS]
-    assert [r.area for r in report.results][6:10] == ["items", "custom_assets", "invoices", "approved_invoice"]
-    # every area passes but the custom assets (--with-custom-assets) and the approved invoice, which only its own flag (and
-    # then it runs alone) opens
-    assert all(r.status == "pass" for r in report.results if r.area not in ("approved_invoice", "custom_assets")), [
+    assert [r.area for r in report.results][6:11] == ["items", "custom_assets", "custom_properties", "invoices", "approved_invoice"]
+    # every area passes but the custom assets (--with-custom-assets), the custom properties (--with-custom-properties) and the
+    # approved invoice, which only its own flag (and then it runs alone) opens
+    assert all(r.status == "pass" for r in report.results if r.area not in ("approved_invoice", "custom_assets", "custom_properties")), [
         (r.area, r.status, r.detail) for r in report.results
     ]
     assert results(report)["approved_invoice"].status == "skipped" and results(report)["approved_invoice"].requests == 0
@@ -1232,7 +1260,7 @@ async def test_the_requests_of_every_area_are_exactly_the_documented_ones(run):
     fake = FakeGorelo()
     report = await run(fake, with_items=True, with_invoices=True)
     assert report.ok
-    assert area_ops(fake, report) == {**GOLDEN, "approved_invoice": [], "custom_assets": []}  # skipped: not a request
+    assert area_ops(fake, report) == {**GOLDEN, "approved_invoice": [], "custom_assets": [], "custom_properties": []}  # skipped: not a request
 
 
 async def test_the_module_docstring_lists_exactly_these_requests():
@@ -1248,7 +1276,15 @@ async def test_the_module_docstring_lists_exactly_these_requests():
             listed[current] = []
         elif step and current:
             listed[current].append(step.group(1))
-    assert listed == {**GOLDEN, "approved_invoice": GOLDEN_APPROVED, "custom_assets": GOLDEN_CUSTOM_ASSETS}
+    # the projects list names the test client's location and the three ticket lookups too, with the note that an earlier area
+    # of a full run has read them already: it is the list of `--only projects`
+    assert listed == {
+        **GOLDEN,
+        "projects": GOLDEN_PROJECTS_ALONE,
+        "approved_invoice": GOLDEN_APPROVED,
+        "custom_assets": GOLDEN_CUSTOM_ASSETS,
+        "custom_properties": GOLDEN_CUSTOM_PROPERTIES,
+    }
 
 
 async def test_the_docstring_says_the_uptime_location_read_is_cached():
@@ -1443,8 +1479,8 @@ async def test_a_failing_area_fails_alone_the_rest_runs_and_the_cleanup_still_ha
     found = results(report)
     assert found["tickets"].status == "FAIL" and "update_ticket" in found["tickets"].detail
     others = [r for r in report.results if r.area != "tickets"]
-    assert [r.status for r in others] == ["pass"] * 6 + ["skipped", "pass", "skipped"] + ["pass"] * 2  # custom assets, approved invoice off
-    assert [r.area for r in others if r.status == "skipped"] == ["custom_assets", "approved_invoice"]
+    assert [r.status for r in others] == ["pass"] * 6 + ["skipped", "skipped", "pass", "skipped"] + ["pass"] * 2  # custom assets, custom properties, approved invoice off
+    assert [r.area for r in others if r.status == "skipped"] == ["custom_assets", "custom_properties", "approved_invoice"]
     assert not report.ok and report.exit_code == 1
     assert fake.leftovers() == [] and report.cleanup.ok  # everything it had created is gone
     assert lines[-1] == "result: FAILED"
@@ -1556,7 +1592,7 @@ async def test_skip_email_leaves_the_email_area_out_and_never_touches_second(run
     fake = FakeGorelo()
     report = await run(fake, skip_email=True)
     assert report.ok and "email" not in results(report)
-    assert len(report.results) == 11  # items, custom_assets, invoices and approved_invoice are skipped by default, and email is left out
+    assert len(report.results) == 12  # items, custom_assets, custom_properties, invoices and approved_invoice are skipped by default, and email is left out
     for request in fake.mock.requests:
         body = request.json or {}
         assert body.get("ClientId") != SECOND and body.get("ContactId") != OPERATOR_CONTACT
@@ -1590,14 +1626,20 @@ def test_unknown_areas_and_empty_selections_are_usage_errors():
     assert [a.key for a in write_matrix.select_areas(["invoices", "Custom_Assets", "items"], False)] == [
         "items", "custom_assets", "invoices",
     ]  # and the custom assets between the two
+    assert [a.key for a in write_matrix.select_areas(["invoices", "Custom_Properties", "custom_assets"], False)] == [
+        "custom_assets", "custom_properties", "invoices",
+    ]  # and the custom properties right after the custom assets
     assert [a.key for a in write_matrix.select_areas(["uptime", "approved_invoice", "invoices"], False)] == [
         "invoices", "approved_invoice", "uptime",
     ]  # and the approved invoice right after the invoices
     assert [a.key for a in write_matrix.AREAS] == [
-        "clients", "contacts", "tickets", "comments", "email", "time", "items", "custom_assets", "invoices",
-        "approved_invoice", "uptime", "projects",
+        "clients", "contacts", "tickets", "comments", "email", "time", "items", "custom_assets", "custom_properties",
+        "invoices", "approved_invoice", "uptime", "projects",
     ]
-    areas = "clients, contacts, tickets, comments, email, time, items, custom_assets, invoices, approved_invoice, uptime, projects"
+    areas = (
+        "clients, contacts, tickets, comments, email, time, items, custom_assets, custom_properties, invoices, approved_invoice, "
+        "uptime, projects"
+    )
     with pytest.raises(write_matrix.UsageError, match=f"the areas are {areas}"):
         write_matrix.select_areas(["bogus"], False)
 
@@ -1668,7 +1710,7 @@ async def test_a_leftover_fails_the_run_even_when_every_area_passed(run, lines):
     fake = FakeGorelo()
     fake.fail("DELETE /v1/contacts/{contactId}", error_envelope(409, [("070901", "The contact has open tickets.")]))
     report = await run(fake, with_items=True, with_invoices=True)
-    assert all(r.status == "pass" for r in report.results if r.area not in ("approved_invoice", "custom_assets"))
+    assert all(r.status == "pass" for r in report.results if r.area not in ("approved_invoice", "custom_assets", "custom_properties"))
     assert not report.ok and report.exit_code == 1 and report.summary["leftovers"] == 1
     assert any("LEFTOVER   contact" in line for line in lines) and lines[-1] == "result: FAILED"
     assert not any(line.startswith("an Approved invoice is left over") for line in lines)  # only for an Approved invoice
@@ -2462,7 +2504,7 @@ async def test_items_are_skipped_by_default_with_the_reason_and_nothing_is_sent_
     assert "result: PASSED" in lines[-1]
 
 
-async def test_a_default_full_run_skips_only_the_items_custom_assets_invoices_and_approved_invoice_areas_and_never_touches_them(run):
+async def test_a_default_full_run_skips_only_the_items_custom_assets_custom_properties_invoices_and_approved_invoice_areas_and_never_touches_them(run):
     fake = FakeGorelo()
     report = await run(fake)
     found = results(report)
@@ -2471,16 +2513,21 @@ async def test_a_default_full_run_skips_only_the_items_custom_assets_invoices_an
     assert found["approved_invoice"].status == "skipped"
     assert found["approved_invoice"].detail == write_matrix.APPROVED_INVOICE_SKIP_REASON
     assert found["custom_assets"].status == "skipped" and found["custom_assets"].detail == write_matrix.CUSTOM_ASSETS_SKIP_REASON
+    assert found["custom_properties"].status == "skipped" and found["custom_properties"].requests == 0
+    assert found["custom_properties"].detail == write_matrix.CUSTOM_PROPERTIES_SKIP_REASON
     assert all(
         result.status == "pass"
         for area, result in found.items()
-        if area not in ("items", "custom_assets", "invoices", "approved_invoice")
+        if area not in ("items", "custom_assets", "custom_properties", "invoices", "approved_invoice")
     )
     assert not any("/assets/custom" in r.path for r in fake.mock.requests)
     assert report.ok and fake.items == {} and fake.invoices == {}
     assert not any("/items" in r.path or "/invoices" in r.path for r in fake.mock.requests)
     assert not any(r.method == "GET" and r.path == "/v1/contacts" for r in fake.mock.requests)  # not the precondition read
-    assert area_ops(fake, report) == {**GOLDEN, "items": [], "custom_assets": [], "invoices": [], "approved_invoice": []}
+    assert area_ops(fake, report) == {
+        **GOLDEN, "items": [], "custom_assets": [], "custom_properties": [], "invoices": [], "approved_invoice": []
+    }
+    assert not any(r.method == "PATCH" and r.path == f"/v1/clients/{TEST_CLIENT}" for r in fake.mock.requests)  # never written
     assert report.summary["created"] == 19  # the 21 records of a run with both flags, less the product and the invoice
 
 
@@ -3361,6 +3408,7 @@ def test_approved_invoice_the_command_line_runs_the_area_alone_with_its_flag(tmp
         ({"with_items": True}, "--with-items"),
         ({"with_invoices": True}, "--with-invoices"),
         ({"with_custom_assets": True}, "--with-custom-assets"),
+        ({"with_custom_properties": True}, "--with-custom-properties"),
         ({"leftovers": True}, "--leftovers"),
         ({"skip_email": True}, "--skip-email"),
         ({"with_items": True, "with_invoices": True, "leftovers": True}, "--with-items, --with-invoices, --leftovers"),
@@ -5300,16 +5348,7 @@ async def test_projects_create_project_gets_the_first_project_type_and_the_every
     report = await run(fake, areas=["projects"])
     assert report.ok, results(report)["projects"].detail
     # run alone, the area needs the test client's location and the ticket lookups (the Everyone group) first, after its scope probes
-    assert area_ops(fake, report)["projects"] == [
-        "GET /v1/projects",
-        "GET /v1/forms",
-        "GET /v1/clients/{clientId}/locations",
-        "GET /v1/tickets/statuses",
-        "GET /v1/tickets/types",
-        "GET /v1/organization/groups",
-        "GET /v1/projects/types",
-        *GOLDEN["projects"][3:],
-    ]
+    assert area_ops(fake, report)["projects"] == GOLDEN_PROJECTS_ALONE
     post = next(r.json for r in fake.mock.requests if r.method == "POST" and r.path == "/v1/projects")
     assert post == {
         "Title": f"{RUN} project", "ClientId": TEST_CLIENT, "LocationId": 9001,
@@ -5319,12 +5358,175 @@ async def test_projects_create_project_gets_the_first_project_type_and_the_every
     assert fake.leftovers() == []
 
 
+# The request list of the projects area names what `--only projects` sends, the cached requests included
+
+CACHED_IN_A_FULL_RUN = [
+    "GET /v1/clients/{clientId}/locations",
+    "GET /v1/tickets/statuses",
+    "GET /v1/tickets/types",
+    "GET /v1/organization/groups",
+]
+
+
+def listed_requests(area: str) -> list[tuple[str, str]]:
+    """(the request, its comment) of every line the module docstring lists for `area`."""
+    doc = write_matrix.__doc__.splitlines()
+    start = doc.index(f"    {area}:") + 1
+    found = []
+    for line in doc[start:]:
+        step = re.fullmatch(r"        ((?:GET|POST|PATCH|DELETE) /v1/\S+)(?:  # (.*))?", line)
+        if not step:
+            break
+        found.append((step.group(1), step.group(2) or ""))
+    return found
+
+
+def test_the_projects_list_of_the_docstring_is_what_only_projects_sends_with_the_cached_requests_marked():
+    """The list used to leave out the test client's location (and the three ticket lookups), which a run of `--only
+    projects` sends right after its two scope probes: a dry listing of the area was short of them."""
+    listed = listed_requests("projects")
+    assert [request for request, _ in listed] == GOLDEN_PROJECTS_ALONE and len(listed) == 16
+    marked = [request for request, comment in listed if "cached" in comment]
+    assert marked == CACHED_IN_A_FULL_RUN[:2]  # the note of the three lookups sits on the first of them
+    assert "an earlier area of the run" in dict(listed)["GET /v1/clients/{clientId}/locations"]
+    assert "the tickets area ran first" in dict(listed)["GET /v1/tickets/statuses"]
+    # a full run sends the same list without those four requests
+    without = list(GOLDEN_PROJECTS_ALONE)
+    for request in CACHED_IN_A_FULL_RUN:
+        without.remove(request)
+    assert without == GOLDEN["projects"] and len(without) == 12
+    doc = " ".join(write_matrix.__doc__.split())
+    assert (
+        "--only projects sends them, and the test client's location, right after its two scope probes, which is why the projects "
+        "list above names them with the note that an earlier area of the same run has read them already, and a full run sends "
+        "the other twelve requests of that area only"
+    ) in doc
+
+
+async def test_projects_run_alone_sends_exactly_the_sixteen_requests_the_list_names(run):
+    fake = FakeGorelo()
+    report = await run(fake, areas=["projects"])
+    assert report.ok and results(report)["projects"].requests == 16
+    assert area_ops(fake, report)["projects"] == GOLDEN_PROJECTS_ALONE
+
+
+@pytest.mark.parametrize(
+    "earlier, skipped",
+    [
+        (["uptime"], ["GET /v1/clients/{clientId}/locations"]),  # the uptime area reads the location, nothing reads the lookups
+        (["tickets"], CACHED_IN_A_FULL_RUN[1:]),  # the tickets area resolves the lookups, nothing reads the location
+        (["tickets", "uptime"], CACHED_IN_A_FULL_RUN),  # a full run
+    ],
+)
+async def test_projects_after_an_earlier_area_does_not_ask_again_for_what_that_area_read(run, earlier, skipped):
+    fake = FakeGorelo()
+    report = await run(fake, areas=[*earlier, "projects"])
+    assert report.ok
+    wanted = list(GOLDEN_PROJECTS_ALONE)
+    for request in skipped:
+        wanted.remove(request)
+    assert area_ops(fake, report)["projects"] == wanted
+
+
 async def test_projects_in_a_full_run_the_lookups_are_reused_not_asked_again(run):
     fake = FakeGorelo()
     report = await run(fake, areas=["tickets", "uptime", "projects"])
     assert report.ok
     assert area_ops(fake, report)["projects"] == GOLDEN["projects"]  # the location and the three lookups are cached already
     assert len([r for r in fake.mock.requests if r.path == "/v1/organization/groups"]) == 1
+
+
+# The projects and forms parts with the Project and Forms scopes granted: these tests pin what the area writes and says, so the
+# module docstring and the code cannot drift apart.
+
+PROJECT_WRITES = [
+    ("POST", "/v1/projects"),
+    ("POST", "/v1/projects/{id}/sections"),
+    ("POST", "/v1/projects/{id}/tasks"),
+    ("POST", "/v1/projects/{id}/tasks/{id}/comments"),
+    ("DELETE", "/v1/projects/{id}/tasks/{id}/comments/{id}"),
+    ("DELETE", "/v1/projects/{id}/tasks/{id}"),
+    ("DELETE", "/v1/projects/{id}"),  # the cleanup
+]
+
+
+def shaped(path: str) -> str:
+    return re.sub(r"/[0-9a-f]{8}-[0-9a-f-]{27}", "/{id}", path)
+
+
+async def test_projects_the_writes_of_the_area_are_exactly_these_seven_all_for_test_client_and_none_names_a_person_or_an_address(run):
+    fake = FakeGorelo()
+    report = await run(fake, areas=["projects"])
+    assert report.ok, results(report)["projects"].detail
+    writes = [r for r in fake.mock.requests if r.method != "GET"]
+    assert [(r.method, shaped(r.path)) for r in writes] == PROJECT_WRITES
+    project, section, task, comment = (r.json for r in writes[:4])
+    # the one project belongs to the test client; section, task and comment hang off it by path
+    assert project["ClientId"] == TEST_CLIENT and set(project) == {"Title", "ClientId", "LocationId", "TypeId", "GroupId"}
+    assert set(section) == {"Title"} and set(task) == {"Title", "SectionId"} and comment["ConversationTypeId"] == 2
+    assert set(comment) == {"Body", "ConversationTypeId"}  # private, no conversation, no attachment
+    # no lead, watcher, assignee, shared contact, email address, backdating or target date: nothing that names a person
+    for body in (project, section, task, comment):
+        assert not {"LeadAssigneeId", "WatcherIds", "AssistingAssigneeIds", "SharedWithContactIds", "CreatedOn", "UpdatedOn", "TargetDate", "DueDate"} & set(body)
+        assert "@" not in json.dumps(body)
+    assert report.summary == {"created": 4, "cleaned": 4, "leftovers": 0, "undeletable": 0, "unresolved_intents": 0}
+
+
+async def test_forms_the_matrix_has_no_forms_write_it_reads_the_scope_and_never_issues_a_submission_link(run):
+    fake = FakeGorelo()
+    report = await run(fake, areas=["forms"], with_items=True, with_invoices=True)  # `forms` is another name of the projects area
+    assert [r.area for r in report.results] == ["projects"] and report.ok
+    forms = [r for r in fake.mock.requests if "/v1/forms" in r.path]
+    assert [(r.method, r.path) for r in forms] == [("GET", "/v1/forms")]  # the scope probe, nothing else
+    assert "create_form_submission_link" not in write_matrix.MATRIX_TOOLS
+    assert not any("create_form_submission_link" in tools for tools in (write_matrix.tools_for(True, True, False, True), write_matrix.APPROVED_INVOICE_TOOLS))
+    assert any("forms scope is available; the matrix has no forms write step" in note for note in results(report)["projects"].notes)
+
+
+async def test_projects_the_summary_says_what_a_plain_create_can_set_off_and_that_the_comment_emails_nobody(run):
+    fake = FakeGorelo()
+    report = await run(fake, areas=["projects"])
+    notes = " | ".join(results(report)["projects"].notes)
+    assert (
+        "create_project sends no created_on, so the project-created notification of the app fires (Gorelo does not say who "
+        "receives it) and creating the task fires the app's automation triggers; the comment is private and emails nobody"
+    ) in notes
+    # without the scope nothing is created, so nothing is said about a notification
+    quiet = await run(FakeGorelo(project_scope=False), areas=["projects"], started=datetime(2099, 10, 2, 10, 16, 0, tzinfo=timezone.utc))
+    assert not any("project-created notification" in note for note in results(quiet)["projects"].notes)
+
+
+async def test_projects_the_area_stops_cleanly_when_it_may_not_write_the_project(run):
+    """The scope probes read, so a key with the read verb but not the write verb passes them and fails the create: the area
+    FAILS (it is not a skip: the tools do not work), the intent is settled as failed and nothing is left over."""
+    fake = FakeGorelo()
+    fake.fail("POST /v1/projects", error_envelope(403, [("080203", "API key does not have 'Project' scope")]))
+    report = await run(fake, areas=["projects"])
+    found = results(report)["projects"]
+    assert found.status == "FAIL" and "create_project" in found.detail and "the API key does not have the 'Project' scope" in found.detail
+    assert report.summary["created"] == 0 and report.summary["unresolved_intents"] == 0 and fake.projects == {}
+    assert not report.ok and report.cleanup.ok
+
+
+async def test_projects_a_project_whose_create_answer_was_lost_is_reported_not_searched(run, lines):
+    """A create that timed out may have made the project; the cleanup searches by label for invoices only, so a project stays
+    'announced without an id' (exit status 1) and the operator searches Gorelo for the label."""
+    fake = FakeGorelo()
+    fake.fail("POST /v1/projects", error_envelope(500, [("070500", "boom")]))
+    report = await run(fake, areas=["projects"])
+    assert results(report)["projects"].status == "FAIL"
+    assert report.summary["unresolved_intents"] == 1 and not report.cleanup.ok
+    assert any(line.startswith(f"  UNRESOLVED project {RUN} project: the create was announced but never recorded") for line in lines)
+
+
+async def test_projects_a_task_left_by_a_stopped_area_is_deleted_by_the_cleanup_before_its_project(run):
+    fake = FakeGorelo()
+    fake.fail("POST /v1/projects/{projectId}/tasks/{taskId}/comments", error_envelope(400, [("070101", "Body is required", "Body")]))
+    report = await run(fake, areas=["projects"])
+    assert results(report)["projects"].status == "FAIL"
+    ops = area_ops(fake, report)["cleanup"]
+    assert ops == ["DELETE /v1/projects/{projectId}/tasks/{taskId}", "DELETE /v1/projects/{projectId}"]  # task by tool, project raw
+    assert fake.leftovers() == [] and report.cleanup.ok
 
 
 async def test_projects_a_tenant_without_project_types_skips_the_area_before_creating_anything(run):
@@ -5484,7 +5686,11 @@ def test_the_command_line_passes_its_flags_and_turns_the_report_into_an_exit_sta
     assert write_matrix.main([]) == 1
     assert write_matrix.main(["--with-approved-invoice", "--only", "approved_invoice"]) == 1
     assert write_matrix.main(["--with-custom-assets", "--only", "custom_assets"]) == 1
-    flags = {"with_items": False, "with_invoices": False, "with_approved_invoice": False, "with_custom_assets": False}
+    assert write_matrix.main(["--with-custom-properties", "--only", "custom_properties"]) == 1
+    flags = {
+        "with_items": False, "with_invoices": False, "with_approved_invoice": False, "with_custom_assets": False,
+        "with_custom_properties": False,
+    }
     assert calls == [
         {"areas": ["items", " uptime"], "skip_email": True, "leftovers": True, **flags},
         {"areas": None, "skip_email": False, "leftovers": False, **{**flags, "with_items": True}},
@@ -5493,6 +5699,7 @@ def test_the_command_line_passes_its_flags_and_turns_the_report_into_an_exit_sta
         {"areas": None, "skip_email": False, "leftovers": False, **flags},
         {"areas": ["approved_invoice"], "skip_email": False, "leftovers": False, **{**flags, "with_approved_invoice": True}},
         {"areas": ["custom_assets"], "skip_email": False, "leftovers": False, **{**flags, "with_custom_assets": True}},
+        {"areas": ["custom_properties"], "skip_email": False, "leftovers": False, **{**flags, "with_custom_properties": True}},
     ]
 
     async def passed(**options):
@@ -5545,8 +5752,13 @@ def test_the_help_names_the_flags_and_the_areas(capsys):
                  "product on the test client", "--with-invoices", "uses up one invoice number", "also under --only invoices",
                  "--with-approved-invoice", "ALONE (needs --only approved_invoice and no other flag)", "approves a $1 invoice on the test client, "
                  "which pushes it to the connected accounting system, then voids it", "also under --only approved_invoice",
-                 "clients, contacts, tickets, comments, email, time, items, custom_assets, invoices, approved_invoice, uptime, projects",
-                 "--with-custom-assets", "CANNOT be deleted through the API", "also under --only custom_assets"):
+                 "clients, contacts, tickets, comments, email, time, items, custom_assets, custom_properties, invoices, "
+                 "approved_invoice, uptime, projects",
+                 "--with-custom-assets", "CANNOT be deleted through the API", "also under --only custom_assets",
+                 "--with-custom-properties", "the test client ITSELF", "the one write the live guard allows on that client",
+                 "also under --only custom_properties",
+                 "'forms' is another name for 'projects': the Forms scope is only probed there, and the area WRITES a project, a section, "
+                 "a task and a private task comment on the test client"):
         assert text in out
     assert "may sync" not in out  # the spec does not say that a catalog product syncs to the accounting system
 
@@ -5612,6 +5824,7 @@ async def test_the_run_is_paced_and_cleaned_up_at_the_same_pace(run, monkeypatch
     assert sig["with_invoices"] is False  # and no invoice is ever created unless asked for
     assert sig["with_approved_invoice"] is False  # and no invoice is ever approved unless asked for, in a run of its own
     assert sig["with_custom_assets"] is False  # and no custom asset (which cannot be deleted) is ever created unless asked for
+    assert sig["with_custom_properties"] is False  # and the test client itself is never written unless asked for
     assert sig["sync_interval"] == write_matrix.SYNC_INTERVAL == 5.0 and sig["sync_polls"] == write_matrix.SYNC_POLLS == 24
     assert write_matrix.SYNC_INTERVAL * write_matrix.SYNC_POLLS == 120.0  # polled every 5 s for at most 120 s
 

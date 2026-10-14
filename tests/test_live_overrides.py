@@ -168,12 +168,14 @@ def test_the_description_says_what_the_file_is_for_how_to_drop_an_entry_and_what
     assert "move it to retired with the five keys listed above" in text
 
 
-def test_the_raw_index_is_the_spec_of_2026_10_12_and_still_mirrors_the_published_spec():
+def test_the_raw_index_is_the_spec_of_2026_10_14_and_still_mirrors_the_published_spec():
     raw = raw_index()
     # 96 on 2026-10-02, plus the two payments operations of 2026-10-08, plus the five of 2026-10-12 (api keys list and revoke,
-    # custom asset create and update, custom asset hardware types)
+    # custom asset create and update, custom asset hardware types); the 2026-10-14 spec (contract 1b1c0cec0e9a) added no
+    # operation and two schemas (CustomPropertyUpdate, CustomPropertyValue: 286 before)
     assert len(raw["ops"]) == 103 and raw["op_count"] == 103
-    assert raw["contract_sha256"].startswith("bce2fad59937") and raw["sha256"] != PREVIOUS_SPEC_SHA256
+    assert len(raw["schemas"]) == 288
+    assert raw["contract_sha256"].startswith("1b1c0cec0e9a") and raw["sha256"] != PREVIOUS_SPEC_SHA256
     for collection, published_as in PUBLISHED_AS.items():
         assert published_as in raw["ops"] and collection not in raw["ops"]
         name = RETIRED[collection][1]
@@ -302,6 +304,36 @@ def test_the_client_body_has_no_id():
     with pytest.raises(SpecViolation, match="does not take a list") as info:
         validate_body(op, {"StatusId": [2]})
     assert info.value.field == "StatusId"
+
+
+def test_the_client_body_takes_custom_properties_as_a_list_of_id_and_value_objects():
+    """Contract 1b1c0cec0e9a (2026-10-14): UpdateClientCommand gained CustomProperties, a nullable array of CustomPropertyUpdate
+    {Id, Value}. The body check follows the nested shape; the client itself still has no Id in the body."""
+    op = load_spec_index().op("PATCH /v1/clients/{clientId}")
+    assert validate_body(op, {"CustomProperties": [{"Id": 5, "Value": "text"}]}) == frozenset(
+        {"CustomProperties", "CustomProperties.Id", "CustomProperties.Value"}
+    )
+    validate_body(op, {"CustomProperties": [{"Id": 5, "Value": None}, {"Id": 6}]})  # a null Value clears; neither key is required
+    validate_body(op, {"Name": "n", "CustomProperties": []})  # the check is about shape; whether [] is useful is the tool's call
+    validate_body(op, {"AlternateName": "a", "CustomProperties": None})  # the field is nullable
+    with pytest.raises(SpecViolation, match="takes a list") as info:
+        validate_body(op, {"CustomProperties": {"Id": 5, "Value": "x"}})
+    assert info.value.field == "CustomProperties"
+    with pytest.raises(SpecViolation, match="takes a list") as info:
+        validate_body(op, {"CustomProperties": "x"})
+    assert info.value.field == "CustomProperties"
+    with pytest.raises(SpecViolation, match="must be an object") as info:
+        validate_body(op, {"CustomProperties": [{"Id": 5, "Value": "x"}, 7]})
+    assert info.value.field == "CustomProperties[1]"
+    with pytest.raises(SpecViolation, match="unknown body field") as info:
+        validate_body(op, {"CustomProperties": [{"Id": 5, "value": "x"}]})  # exact case
+    assert info.value.field == "CustomProperties[0].value" and "did you mean 'Value'" in str(info.value)
+    with pytest.raises(SpecViolation, match="unknown body field") as info:
+        validate_body(op, {"CustomProperties": [{"Id": 5, "Name": "x"}]})  # an entry is only Id and Value
+    assert info.value.field == "CustomProperties[0].Name" and "Allowed in 'CustomProperties[0]': Id, Value" in str(info.value)
+    with pytest.raises(SpecViolation) as info:
+        validate_body(op, {"Id": 9501, "CustomProperties": [{"Id": 5, "Value": "x"}]})  # still no Id for the client itself
+    assert info.value.field == "Id" and "unknown body field 'Id'" in str(info.value)
 
 
 def test_the_contact_body_has_no_contact_id_and_still_wants_the_four_required_fields():

@@ -27,13 +27,17 @@ The same contract documents every request field for the first time, and the tool
 * update_project removes a value only through clear_fields, the explicit opt-in: the three lists Gorelo says an
   empty array clears (shared_with_contact_ids, tag_ids, watcher_ids), the description (Gorelo: send an empty string)
   and the lead (Gorelo: send 0). A bare blank value, an empty list or a bare 0 is refused and points to clear_fields.
-  Gorelo documents the lead removal, but it cannot be probed because the key has no Project scope.
+  Gorelo documents the lead removal; it has not been probed live.
 * group_ids replaces the technician groups and cannot be emptied: its field text has no "empty array clears them"
   sentence (the three lists that do say so are the ones clear_fields offers; the operation text's general "Lists
   replace outright: send an empty array to clear one" is read with that in mind), and CreateProjectCommand requires
   a group. The tool therefore never sends an empty GroupIds, whichever way the call is made (a direct call that names
   group_ids in clear_fields is refused too, not only the schema).
 * status_reason is read by Gorelo only when status_id is sent, so it is refused without status_id.
+* status_id and the status_ids filter are checked against the project scale (1 NotStarted to 5 Closed) before any
+  request. The task scale is another one (WorkingOnIt and Done, and it stops at 4), so a value outside the project scale
+  is refused here instead of being sent to Gorelo. The scale is the one UpdateProjectCommand.StatusId and the StatusIds
+  filter of GET /v1/projects document (CreateProjectCommand has no status: a new project is NotStarted).
 * client_id needs location_id in the same call (a location belongs to a client), and the move clears the shared
   contacts.
 * closed_on is for a Closed project (status_id 5, already or in this call). On create, updated_on must not be earlier
@@ -90,6 +94,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from gorelo_client import GoreloAPIError
 from tools._common import (
+    MAX_ID,
     StrictBool,
     StrictId,
     build_body,
@@ -229,7 +234,11 @@ CREATE_COMMENT_MAP = {
     "created_on": "CreatedOn",
 }
 
-PROJECT_STATUSES = "1 NotStarted, 2 InProgress, 3 OnHold, 4 Completed, 5 Closed."
+# The project status scale ("NotStarted=1, InProgress=2, OnHold=3, Completed=4, Closed=5"): StatusId of a project update
+# and the StatusIds filter of the project list. A task has its own scale (see tools/project_tasks.py).
+PROJECT_STATUS_LABELS = {1: "NotStarted", 2: "InProgress", 3: "OnHold", 4: "Completed", 5: "Closed"}
+PROJECT_STATUS_SCALE = ", ".join(f"{status} {label}" for status, label in PROJECT_STATUS_LABELS.items())
+PROJECT_STATUSES = f"{PROJECT_STATUS_SCALE}."
 PROJECT_CLOSED = 5  # the one status a ClosedOn date belongs to
 
 SECTION_NOTE = (
@@ -248,6 +257,31 @@ _COLOR = re.compile(r"#[0-9A-Fa-f]{6}")
 def _given(check: Callable[[str, Any], Any], param: str, value: Any) -> Any:
     """check(param, value) for a value the caller gave; None (not given) stays None."""
     return None if value is None else check(param, value)
+
+
+def _status(param: str, value: Any) -> int:
+    """One status of a project: 1 NotStarted to 5 Closed. A caller's None means "not given", so wrap it with _given.
+
+    Every whole number outside the scale is refused here, with zero HTTP calls, and answered with the scale and quoted
+    back (it is not caller data worth hiding), 0 and the negative numbers included: positive_id's "expected a positive
+    whole number such as 123" would suggest that any id will do. Whatever else is not an id (a boolean, a decimal, text,
+    a list, or a number beyond int64, which is never quoted) keeps the message of positive_id."""
+    if isinstance(value, int) and not isinstance(value, bool) and -MAX_ID <= value < 1:
+        status = int(value)
+    else:
+        status = positive_id(param, value)
+    if status not in PROJECT_STATUS_LABELS:
+        raise ValueError(f"{param}: expected {PROJECT_STATUS_SCALE}, got {status}")
+    return status
+
+
+def _statuses(param: str, values: Any) -> list[int] | None:
+    """The status_ids filter of the project list: every item on the project scale, a bad one named by its index.
+
+    None, an empty list and a value that is not a list keep the messages of positive_ids."""
+    if isinstance(values, (list, tuple)) and values:
+        return [_status(f"{param}[{index}]", item) for index, item in enumerate(values)]
+    return positive_ids(param, values)
 
 
 def _color(param: str, value: Any) -> str | None:
@@ -468,7 +502,7 @@ async def list_projects(
     Paging: pass next_cursor back as cursor with the SAME filters until has_more is false.
     """
     filters = {
-        "status_ids": positive_ids("status_ids", status_ids),
+        "status_ids": _statuses("status_ids", status_ids),
         "client_ids": positive_ids("client_ids", client_ids),
         "type_ids": guids("type_ids", type_ids),
         "lead_assignee_ids": positive_ids("lead_assignee_ids", lead_assignee_ids),
@@ -690,7 +724,7 @@ async def update_project(
         "group_ids": positive_ids("group_ids", group_ids),
         "target_date": utc_iso("target_date", target_date),
         "clear_target_date": True if clear_target_date is True else None,
-        "status_id": _given(positive_id, "status_id", status_id),
+        "status_id": _given(_status, "status_id", status_id),
         "status_reason": non_empty("status_reason", status_reason),
         "closed_on": closed_text,
         "updated_by_name": updated_by_name,

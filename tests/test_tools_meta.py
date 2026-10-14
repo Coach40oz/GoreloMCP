@@ -183,7 +183,7 @@ def test_the_core_modules_use_the_shared_helpers_for_ids_and_write_answers():
 ID_PARAMS = {
     "list_clients": ["status_ids"],
     "get_client": ["client_id"],
-    "update_client": ["client_id", "status_id"],
+    "update_client": ["client_id", "status_id", "clear_custom_property_ids"],
     "list_client_locations": ["client_id"],
     "list_contacts": ["client_id", "client_ids", "status_ids"],
     "get_contact": ["contact_id"],

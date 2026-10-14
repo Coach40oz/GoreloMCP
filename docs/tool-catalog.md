@@ -43,7 +43,7 @@ In the default set.
 | `create_client` | write | `POST /v1/clients` | `name`, `location_name` | Create a client together with its default location; returns the created client record. |
 | `create_contact` | write | `POST /v1/contacts` | `client_id`, `first_name`, `last_name`, `primary_email` | Create a contact under a client; returns the created contact record. |
 | `create_custom_asset` | write | `POST /v1/assets/custom`, `GET /v1/assets/custom` | `name`, `client_id`, `location_id`, `hardware_type_id` | Create a custom (non-agent) asset at a location of a client; returns the new row (read back from the client's list), or {Id, warning} if the read-back fails: then do not repeat the create. |
-| `get_agent` | read | `GET /v1/assets/agents/{deviceId}` | `agent_id` | Get one agent (managed device) by UUID; returns Gorelo's full device record. |
+| `get_agent` | read | `GET /v1/assets/agents/{deviceId}` | `agent_id` | Get one agent (managed device) by UUID; returns Gorelo's full device record, including CustomProperties. |
 | `get_client` | read | `GET /v1/clients/{clientId}` | `client_id` | Get one client by id; returns Gorelo's client record. |
 | `get_contact` | read | `GET /v1/contacts/{contactId}` | `contact_id` | Get one contact by id; returns Gorelo's contact record (SecondaryEmail is never included). |
 | `health_check` | read | `GET /v1/clients` | none | Check the Gorelo API answers and this server understands it; returns {ok, api, total_clients, toolsets, destructive, spec_sha256}. |
@@ -57,7 +57,7 @@ In the default set.
 | `list_org_groups` | read | `GET /v1/organization/groups` | none | List every technician group (not paged); returns {items, count}. |
 | `list_org_users` | read | `GET /v1/organization/users` | none | List every user (technician); all pages are read for you. |
 | `post_alert` | write | `POST /v1/alerts` | `name`, `client_id`, `resource`, `severity` | Post an external alert for a client's resource; returns {"ok": true} when Gorelo accepts it. |
-| `update_client` | write (overwrites data) | `PATCH /v1/clients/{clientId}` | `client_id` | Update a client's name, status, billing name or alternate name; returns the updated client record. |
+| `update_client` | write (overwrites data) | `GET /v1/clients/{clientId}`, `PATCH /v1/clients/{clientId}` | `client_id` | Update a client's name, status, billing name, alternate name or custom fields; returns the updated client record. |
 | `update_contact` | write (overwrites data) | `GET /v1/contacts/{contactId}`, `PATCH /v1/contacts/{contactId}` | `contact_id` | Update a contact; returns the updated contact record. |
 | `update_custom_asset` | write (overwrites data) | `PATCH /v1/assets/custom/{customAssetId}`, `GET /v1/assets/custom` | `custom_asset_id`, `client_id` | Change fields of one custom asset; returns the updated row (read back from the client's list), or {Id, warning} if the read-back fails. |
 

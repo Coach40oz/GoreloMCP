@@ -11,7 +11,8 @@ What it calls: every tool whose registry kind is "read", with arguments discover
 (the first client for get_client, the first ticket of list_tickets for get_ticket, preferring one whose last update
 was a comment, then that ticket's comments and conversations, and the first time entry, contract, item, uptime
 check, agent, invoice, project, task and form). get_ticket is
-called three times, once per way to name a ticket: its GUID, its number and its display number. A get whose list
+called three times, once per way to name a ticket: its GUID, its number and its display number, and get_client twice: the
+first listed client and the test client of the site config (the one client whose custom fields the write matrix may set). A get whose list
 came back empty is skipped, and the row says which list. export_invoice_pdf (a write: it records an export
 event) and every other non-read tool are never called: the plan is checked against the registry first, and
 a read tool the plan does not know is reported as FAILED so a new tool cannot go untested unnoticed.
@@ -23,6 +24,12 @@ What it checks (shapes only, never values):
     unpaged list   items is a list and count == len(items)
     auto-paged     list_org_users and search_tickets: items, count, truncated and complete_scan flags
     single record  a dict with an Id (the one that was asked for)
+    custom fields  (contract 1b1c0cec0e9a) get_client of the first listed client AND of the test client, and get_agent, must
+                   carry CustomProperties: a list whose entries have Id, Name, Type {Id, Name}, Value (text or null) and
+                   IsSet (a boolean); a wrong shape is API drift and FAILS the row. The note holds counts only (how many fields,
+                   how many set, and for the test client how many unset text fields: the custom_properties write area runs only
+                   while none is set and needs one unset text field). A list_clients or list_agents ROW that carries CustomProperties is only a note (the spec leaves
+                   them out of the list rows), never a failure
 
 Outcomes per row: ok, scope missing (a 403 with Notification code 080203 from a Projects or Forms tool: the API key
 simply does not have that scope yet), skipped, FAILED. Each row is printed as soon as its call is done. The notes hold
@@ -307,6 +314,86 @@ def check_health(result: Mapping[str, Any]) -> str:
     return f"total_clients={total}"
 
 
+TEXT_TYPE_WORD = "text"  # a custom field whose Type.Name contains this (case-insensitive) takes plain text
+
+
+def _is_text(value: Any) -> bool:
+    return isinstance(value, str)
+
+
+def custom_properties_of(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The CustomProperties of a single client or device record, checked entry by entry.
+
+    The published CustomPropertyValue (contract 1b1c0cec0e9a) has Id (a whole number), Variable, Name (text), Type {Id, Name},
+    Value (text or null: the effective value, a string whatever the Type) and IsSet (a boolean). The list is "every custom
+    field the service provider has defined" and is empty only when none is defined, so a record without the key, with a
+    value that is not a list, or with an entry of another shape is API drift: ShapeError names the first thing that is wrong
+    and the entry (counted from 1), never a value. Variable is not a promise of the tools' texts, so it is checked only when
+    it is there (it must be text). Ids must be distinct."""
+    if "CustomProperties" not in record:
+        raise ShapeError("CustomProperties is missing (the single record carries every custom field; empty only when none is defined)")
+    fields = record["CustomProperties"]
+    if not isinstance(fields, list):
+        raise ShapeError(f"CustomProperties is not a list ({type(fields).__name__})")
+    seen: set[int] = set()
+    for position, entry in enumerate(fields, start=1):
+        where = f"CustomProperties item {position}"
+        if not isinstance(entry, dict):
+            raise ShapeError(f"{where} is not an object")
+        identifier = entry.get("Id")
+        if not _is_int(identifier) or identifier < 1:
+            raise ShapeError(f"{where}: Id is not a whole number of 1 or more")
+        if identifier in seen:
+            raise ShapeError(f"{where}: Id repeats an earlier custom field")
+        seen.add(identifier)
+        if not _is_text(entry.get("Name")):
+            raise ShapeError(f"{where}: Name is not text")
+        kind = entry.get("Type")
+        if not isinstance(kind, dict) or not _is_int(kind.get("Id")) or not _is_text(kind.get("Name")):
+            raise ShapeError(f"{where}: Type is not an object with a whole-number Id and a text Name")
+        if "Value" not in entry or not (entry["Value"] is None or _is_text(entry["Value"])):
+            raise ShapeError(f"{where}: Value is not text or null")
+        if not isinstance(entry.get("IsSet"), bool):
+            raise ShapeError(f"{where}: IsSet is not a boolean")
+        if "Variable" in entry and not _is_text(entry["Variable"]):
+            raise ShapeError(f"{where}: Variable is not text")
+    return fields
+
+
+def is_text_field(field: Mapping[str, Any]) -> bool:
+    """A custom field whose Type.Name contains TEXT_TYPE_WORD, ignoring case ("Text", "Large text", ...)."""
+    kind = field.get("Type")
+    name = kind.get("Name") if isinstance(kind, dict) else None
+    return isinstance(name, str) and TEXT_TYPE_WORD in name.casefold()
+
+
+def custom_properties_note(result: Mapping[str, Any]) -> str:
+    """The extra check of get_client and get_agent: the shape of CustomProperties. Counts only."""
+    fields = custom_properties_of(result)
+    return f"{len(fields)} custom properties ({sum(1 for field in fields if field['IsSet'])} set)"
+
+
+def custom_properties_of_test_client_note(result: Mapping[str, Any]) -> str:
+    """The same for the test client's record, with how many unset text fields the custom_properties write area could use (it
+    runs only while no custom field is set)."""
+    fields = custom_properties_of(result)
+    unset_text = sum(1 for field in fields if not field["IsSet"] and is_text_field(field))
+    return (
+        f"{len(fields)} custom properties ({sum(1 for field in fields if field['IsSet'])} set, {unset_text} unset text; "
+        "the custom_properties write area needs none set and one unset text)"
+    )
+
+
+def rows_without_custom_properties_note(result: Mapping[str, Any]) -> str:
+    """The extra check of list_clients and list_agents: the spec leaves CustomProperties out of the list rows on purpose, so a
+    row that carries them is news (the spec or the service moved), noted and never a failure. Empty when no row does."""
+    rows = result.get("items")
+    carrying = sum(1 for row in rows if isinstance(row, dict) and "CustomProperties" in row) if isinstance(rows, list) else 0
+    if not carrying:
+        return ""
+    return f"note: {carrying} of {len(rows)} rows carry CustomProperties, which the spec leaves out of the list rows"
+
+
 # --------------------------------------------------------------------------
 # The plan: one Case per call, in dependency order
 # --------------------------------------------------------------------------
@@ -400,6 +487,7 @@ class Case:
     label     the row name when it is not the tool name (get_ticket is called three times)
     provides  the Found keys this case teaches; pick(result) returns the value (None: the list was empty)
     same_id   for a record: the Found key whose value the record's Id must equal ("ticket" compares ticket["Id"])
+    extra     a further check of the answer: it returns text for the end of the row's note ("" for none) or raises ShapeError
     """
 
     tool: str
@@ -411,6 +499,7 @@ class Case:
     same_id: str | None = None
     nonempty: bool = False
     complete: bool = False
+    extra: Callable[[Mapping[str, Any]], str] | None = None
 
     @property
     def row(self) -> str:
@@ -428,15 +517,29 @@ def _project_task(found: Found) -> dict[str, Any]:
 CASES: tuple[Case, ...] = (
     # core
     Case("health_check", "health"),
-    Case("list_clients", "paged", nonempty=True, provides="client"),
-    Case("get_client", "record", args=_by("client", "a client", "client_id"), same_id="client"),
+    Case("list_clients", "paged", nonempty=True, provides="client", extra=rows_without_custom_properties_note),
+    Case("get_client", "record", args=_by("client", "a client", "client_id"), same_id="client", extra=custom_properties_note),
+    Case(
+        "get_client",
+        "record",
+        label="get_client (test client)",
+        args=_by("test_client", "the test client", "client_id"),
+        same_id="test_client",
+        extra=custom_properties_of_test_client_note,
+    ),
     Case("list_client_locations", "list", args=_by("client", "a client", "client_id"), nonempty=True),
     Case("list_contacts", "paged", args=lambda found: {"page_size": 20}, provides="contact"),
     Case("get_contact", "record", args=_by("contact", "a contact", "contact_id"), same_id="contact"),
     Case("list_org_groups", "list", nonempty=True),
     Case("list_org_users", "all", nonempty=True, complete=True),
-    Case("list_agents", "paged", args=lambda found: {"page_size": 10}, provides="agent"),
-    Case("get_agent", "record", args=_by("agent", "an agent", "agent_id"), same_id="agent"),
+    Case(
+        "list_agents",
+        "paged",
+        args=lambda found: {"page_size": 10},
+        provides="agent",
+        extra=rows_without_custom_properties_note,
+    ),
+    Case("get_agent", "record", args=_by("agent", "an agent", "agent_id"), same_id="agent", extra=custom_properties_note),
     Case("list_custom_assets", "paged", args=lambda found: {"page_size": 10}),
     Case("list_custom_asset_hardware_types", "list"),
     Case("list_alerts", "paged", args=lambda found: {"page_size": 20}),
@@ -534,6 +637,12 @@ CASES: tuple[Case, ...] = (
 
 def _validate(case: Case, found: Found, result: Mapping[str, Any]) -> str:
     """The note of a good answer; ShapeError when the answer is not in the promised shape."""
+    note = _validate_shape(case, found, result)
+    more = case.extra(result) if case.extra is not None else ""
+    return f"{note}; {more}" if more else note
+
+
+def _validate_shape(case: Case, found: Found, result: Mapping[str, Any]) -> str:
     shape = case.shape
     if shape == "health":
         return check_health(result)
@@ -618,12 +727,14 @@ class _Smoke:
         plan: Sequence[Case],
         reads: Mapping[str, str],
         on_row: Callable[[Row], None] | None = None,
+        known: Mapping[str, Any] | None = None,
     ) -> None:
         self.session = session
         self.plan = plan
         self.reads = reads
         self.on_row = on_row
         self.found = Found()
+        self.found.values.update(known or {})  # ids that need no list to be discovered (the test client)
         self.rows: list[Row] = []
 
     def add(self, row: Row) -> None:
@@ -713,7 +824,7 @@ async def run_smoke(
     foreign, uncovered = plan_problems(plan, reads)
     if foreign:
         raise PlanError("the smoke plan names tools that are not registered read tools: " + ", ".join(foreign))
-    site()  # no site config, no run: refuse before the API key is read or anything is sent
+    cfg = site()  # no site config, no run: refuse before the API key is read or anything is sent
     chosen = settings if settings is not None else live_settings()
     await live_guard.verify_site_clients(chosen.api_key, transport=transport)  # read-only, but the ids must be the named clients
     width = max([len("tool"), *(len(case.row) for case in plan)]) + 2
@@ -726,7 +837,7 @@ async def run_smoke(
 
     say(format_row("tool", "outcome", "note", width))
     async with open_session(chosen, transport=transport, pace=pace) as session:
-        smoke = _Smoke(session, plan, reads, on_row=show)
+        smoke = _Smoke(session, plan, reads, on_row=show, known={"test_client": cfg.test_client})
         await smoke.run()
         for tool in uncovered:
             smoke.add(Row(tool, FAILED, "a read tool with no smoke case: add one to scripts/live/smoke.py"))

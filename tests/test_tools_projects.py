@@ -32,7 +32,7 @@ from fastmcp.tools import Tool
 
 import tools.projects as module
 from gorelo_client import is_forbidden_op
-from tools._common import REGISTRY
+from tools._common import MAX_ID, REGISTRY
 
 pytestmark = pytest.mark.anyio
 
@@ -340,6 +340,13 @@ def spec_text(method, path):
     return " ".join(operation(method, path)["description"].split())
 
 
+def spec_summary_and_text(method, path):
+    """An operation's summary and description as one text. Gorelo writes its wording in either one (the ticket approval
+    operation has all of its text in the summary and no description), so a check that a sentence is ABSENT must read both."""
+    op = operation(method, path)
+    return " ".join(f"{op.get('summary') or ''} {op.get('description') or ''}".split())
+
+
 def param_text(method, path, name):
     return " ".join(next(p["description"] for p in operation(method, path)["parameters"] if p["name"] == name).split())
 
@@ -445,13 +452,55 @@ def test_the_backdating_rules_are_the_schema_texts_and_the_tool_checks_only_the_
         assert "future" not in text and "earlier" not in text, (name, field)
 
 
+# What the operation text of POST /v1/projects said about groups until the 2026-10-14 snapshot ("Groups are given as
+# `GroupId` **or** `GroupIds` ...") and must not say again: CreateProjectCommand has only GroupId, and no text of the
+# operation mentions a group any more.
+GROUP_SENTENCE = re.compile(r"GroupIds?|Groups are given as")
+
+
+def test_the_group_sentence_tripwire_reads_the_summary_as_well_as_the_description(monkeypatch):
+    # spec_text() reads only the description, so a group sentence that Gorelo (re)writes into the SUMMARY of the
+    # operation would pass the tripwire below unseen. spec_summary_and_text() reads both and survives a missing or null field.
+    operations = {
+        "in the summary": {
+            "summary": "Creates a project. Groups are given as GroupId or GroupIds.",
+            "description": "The project is created in the `NotStarted` status.",
+        },
+        "in the description": {
+            "summary": "Creates a project.",
+            "description": "Groups are given as `GroupId` **or** `GroupIds` - exactly one of the two.",
+        },
+        "summary only": {"summary": "Creates a project in this GroupId."},
+        "clean": {
+            "summary": "Creates a project for the authenticated service provider.",
+            "description": "The project is created in the `NotStarted` status.\r\nIt is numbered like the app does.",
+        },
+        "no summary": {"summary": None, "description": "The project is created in the `NotStarted` status."},
+    }
+    monkeypatch.setitem(globals(), "operation", lambda method, path: operations[path])
+    assert GROUP_SENTENCE.search(spec_summary_and_text("post", "in the summary"))
+    assert GROUP_SENTENCE.search(spec_summary_and_text("post", "in the description"))
+    assert GROUP_SENTENCE.search(spec_summary_and_text("post", "summary only"))
+    assert not GROUP_SENTENCE.search(spec_summary_and_text("post", "clean"))
+    assert spec_summary_and_text("post", "clean") == (
+        "Creates a project for the authenticated service provider. The project is created in the `NotStarted` status. "
+        "It is numbered like the app does."
+    )
+    assert spec_summary_and_text("post", "no summary") == "The project is created in the `NotStarted` status."
+
+
 @needs_spec_text
 def test_the_documented_rules_the_docstrings_repeat_are_in_the_spec_text():
     create = spec_text("post", "/v1/projects")
     assert "created in the `NotStarted` status" in create and "numbered from the same sequence the app uses" in create
     assert "same project-created notification" in create
-    # The operation text still talks about GroupId or GroupIds (stale since 2026-10-02): CreateProjectCommand has no
-    # GroupIds any more (see test_the_group_of_a_new_project_is_the_one_group_id), so the tool repeats none of it.
+    # The 2026-10-14 snapshot dropped the sentence about GroupId or GroupIds from this operation text (it had stayed there,
+    # stale, since 2026-10-02: CreateProjectCommand has had only GroupId since then, see
+    # test_the_group_of_a_new_project_is_the_one_group_id). The text no longer mentions a group at all, and the tool
+    # repeats none of it; if the sentence comes back, this fails and the text is read against the schema again.
+    # The check reads the summary as well as the description, because Gorelo puts wording in either one.
+    whole = spec_summary_and_text("post", "/v1/projects")
+    assert not GROUP_SENTENCE.search(whole), whole
     update = spec_text("patch", "/v1/projects/{projectId}")
     assert "needs a `LocationId` in that client" in update and "clears the shared contacts" in update
     assert "a technician cannot be both the lead and a watcher" in update
@@ -724,6 +773,8 @@ async def test_list_projects_an_empty_page_is_reported_as_zero_rows(server, mock
     "arguments, fragment",
     [
         ({"status_ids": []}, "status_ids: expected at least one id, got an empty list"),
+        # 0 is answered with the status scale, not with "a positive whole number such as 123" (123 is no status)
+        ({"status_ids": [0]}, "status_ids[0]: expected 1 NotStarted, 2 InProgress, 3 OnHold, 4 Completed, 5 Closed, got 0"),
         ({"client_ids": [0]}, "client_ids[0]: expected a positive whole number such as 123, got zero or a negative number"),
         ({"lead_assignee_ids": [9201, -1]}, "lead_assignee_ids[1]: expected a positive whole number"),
         ({"client_ids": [2**63]}, "client_ids[0]: expected a positive whole number such as 123, got a number above"),
@@ -1426,7 +1477,7 @@ async def test_update_project_false_for_clear_target_date_is_the_same_as_leaving
         ({"updated_by_name": "", "title": "T"}, "updated_by_name: must not be empty or whitespace only"),
         ({"client_id": 0}, "client_id: expected a positive whole number"),
         ({"location_id": 0}, "location_id: expected a positive whole number"),
-        ({"status_id": 0}, "status_id: expected a positive whole number"),
+        ({"status_id": 0}, "status_id: expected 1 NotStarted, 2 InProgress, 3 OnHold, 4 Completed, 5 Closed, got 0"),
         ({"type_id": "migration"}, "type_id: expected a GUID such as"),
         ({"tag_ids": ["x"]}, "tag_ids[0]: expected a GUID such as"),
         ({"watcher_ids": [0]}, "watcher_ids[0]: expected a positive whole number"),
@@ -1777,6 +1828,186 @@ def test_the_project_parameters_that_hold_a_date_are_the_target_date_ones():
     for tool in ("list_projects", "create_project", "update_project"):
         names |= {p for p in accepted_params(tool) if re.search(r"(^|_)(due|target)(_|$)", p)}
     assert names == {"target_date_after", "target_date_before", "target_date", "clear_target_date"}
+
+
+# --------------------------------------------------------------------------
+# status ids: the project scale
+# --------------------------------------------------------------------------
+
+# A project has its own status scale, which is not the task scale (a task has WorkingOnIt and Done and stops at 4). A
+# status outside the project scale is refused locally, with zero HTTP calls, by update_project and by the status_ids
+# filter of list_projects, naming the param and listing the accepted values with their labels the way priority_id does.
+# That includes 0 and the negative numbers, which are answered with the scale too ("expected a positive whole
+# number such as 123" would suggest that 123 is a status); a value that is not a whole number (a boolean, a decimal,
+# text) keeps the id message of positive_id.
+PROJECT_SCALE = "1 NotStarted, 2 InProgress, 3 OnHold, 4 Completed, 5 Closed"
+PROJECT_EXPECTED = f"expected {PROJECT_SCALE}"
+ID_EXPECTED = "expected a positive whole number such as 123"
+
+
+def documented_scale(text):
+    """{id: label} of every "Label=N" pair of a spec text (spaces inside a label dropped: "Not Started" is NotStarted)."""
+    return {int(number): label.replace(" ", "") for label, number in re.findall(r"([A-Za-z][A-Za-z ]*)=(\d+)", text)}
+
+
+@needs_spec_text
+def test_the_project_status_scale_is_the_one_the_two_spec_texts_document():
+    texts = {
+        "StatusIds of the project list": param_text("get", "/v1/projects", "StatusIds"),
+        "UpdateProjectCommand.StatusId": schema_fields("UpdateProjectCommand")["StatusId"],
+    }
+    for where, text in texts.items():
+        assert documented_scale(text) == module.PROJECT_STATUS_LABELS, where
+    assert module.PROJECT_STATUS_LABELS == {1: "NotStarted", 2: "InProgress", 3: "OnHold", 4: "Completed", 5: "Closed"}
+    # the one status a ClosedOn date belongs to is the last of the scale, and a new project has no status to choose
+    assert module.PROJECT_STATUS_LABELS[module.PROJECT_CLOSED] == "Closed"
+    assert "StatusId" not in schema_fields("CreateProjectCommand") and "status_id" not in accepted_params("create_project")
+
+
+def test_the_project_status_text_the_model_reads_is_built_from_the_table_the_check_uses():
+    assert module.PROJECT_STATUS_SCALE == PROJECT_SCALE and module.PROJECT_STATUSES == f"{PROJECT_SCALE}."
+    for tool, param in (("list_projects", "status_ids"), ("update_project", "status_id")):
+        assert PROJECT_SCALE in param_description(tool, param), (tool, param)
+
+
+@pytest.mark.parametrize("status", [1, 2, 3, 4, 5])
+async def test_every_status_of_the_project_scale_is_accepted_by_the_update_and_the_list_filter(server, mock_gorelo, status):
+    route_update_project(mock_gorelo)
+    mock_gorelo.on("GET", "/v1/projects", paged_envelope([]))
+    await call_tool(server, "update_project", {"project_id": PROJECT, "status_id": status})
+    assert mock_gorelo.requests[0].json == {"StatusId": status}
+    mock_gorelo.reset()
+    result = await call_tool(server, "list_projects", {"status_ids": [status]})
+    assert mock_gorelo.last.query == {"StatusIds": str(status), "PageSize": "50"}
+    assert result["filters"] == {"status_ids": [status]}
+
+
+async def test_the_project_list_accepts_the_whole_scale_in_one_filter(server, mock_gorelo):
+    mock_gorelo.on("GET", "/v1/projects", paged_envelope([]))
+    result = await call_tool(server, "list_projects", {"status_ids": [1, 2, 3, 4, 5]})
+    assert mock_gorelo.last.query == {"StatusIds": "1,2,3,4,5", "PageSize": "50"}
+    assert result["filters"] == {"status_ids": [1, 2, 3, 4, 5]}
+
+
+@pytest.mark.parametrize("bad", [0, -1, -7, 6, 7, 9, 10, 99, 100000])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"project_id": PROJECT},
+        {"project_id": PROJECT, "status_reason": "Signed off", "title": "T"},
+        # the scale is checked before the pairing with closed_on, so the caller is told the accepted values first
+        {"project_id": PROJECT, "closed_on": "2026-09-30T17:00:00Z"},
+    ],
+)
+async def test_a_status_id_outside_the_project_scale_is_refused_before_any_request(server, mock_gorelo, arguments, bad):
+    # 0 and the negative numbers are answered with the scale as well, never with "a positive whole number such as 123"
+    text = await call_tool_error(server, "update_project", {**arguments, "status_id": bad})
+    assert text == f"status_id: {PROJECT_EXPECTED}, got {bad}"
+    assert ID_EXPECTED not in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    "statuses, index",
+    [
+        ([6], 0), ([7, 1], 0), ([1, 6], 1), ([1, 2, 3, 4, 5, 6], 5), ([5, 9, 6], 1), ([2, 2, 2, 8], 3),
+        # 0 and the negative numbers are answered with the scale, each item named by its index
+        ([0], 0), ([1, 0], 1), ([2, -3, 9], 1), ([-1], 0),
+    ],
+)
+async def test_a_status_ids_filter_with_a_value_outside_the_project_scale_is_refused_before_any_request(
+    server, mock_gorelo, statuses, index
+):
+    text = await call_tool_error(server, "list_projects", {"status_ids": statuses})
+    assert text == f"status_ids[{index}]: {PROJECT_EXPECTED}, got {statuses[index]}"
+    assert ID_EXPECTED not in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    "bad, kind",
+    [
+        (True, "a boolean"), (False, "a boolean"), (5.0, "a decimal number"), (0.0, "a decimal number"),
+        ("5", "a string"), ([5], "a list of 1 item"),
+    ],
+)
+async def test_calling_the_project_tools_directly_refuses_a_status_that_is_not_a_whole_number(
+    client_factory, mock_gorelo, bad, kind
+):
+    # StrictId refuses these in the schema and a direct call skips it. True == 1, False == 0 and 5.0 == 5 in Python, so a
+    # bare membership test on the scale (or the whole-number branch for 0) would have let them through or called them a
+    # status: what is not a whole number keeps the id message of positive_id.
+    calls = (
+        (module.update_project, {"project_id": PROJECT, "status_id": bad}, "status_id"),
+        (module.list_projects, {"status_ids": [bad]}, "status_ids[0]"),
+    )
+    for tool, kwargs, where in calls:
+        with pytest.raises(ToolError) as caught:
+            await call_directly(client_factory, tool, **kwargs)
+        assert str(caught.value) == f"{where}: {ID_EXPECTED}, got {kind}"
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    "bad, message",
+    [
+        pytest.param(0, f"{PROJECT_EXPECTED}, got 0", id="zero"),
+        pytest.param(-1, f"{PROJECT_EXPECTED}, got -1", id="minus one"),
+        pytest.param(-MAX_ID, f"{PROJECT_EXPECTED}, got {-MAX_ID}", id="the smallest int64 that is quoted"),
+        pytest.param(MAX_ID, f"{PROJECT_EXPECTED}, got {MAX_ID}", id="the largest int64"),
+        # beyond int64 a number is no Gorelo id at all, and positive_id's text never quotes it
+        pytest.param(MAX_ID + 1, f"{ID_EXPECTED}, got a number above {MAX_ID}, the largest Gorelo id", id="above int64"),
+        pytest.param(-MAX_ID - 1, f"{ID_EXPECTED}, got zero or a negative number", id="below int64"),
+        pytest.param(10**5000, f"{ID_EXPECTED}, got a number above {MAX_ID}, the largest Gorelo id", id="5000 digits up"),
+        pytest.param(-(10**5000), f"{ID_EXPECTED}, got zero or a negative number", id="5000 digits down"),
+    ],
+)
+async def test_calling_the_project_tools_directly_answers_a_whole_number_outside_the_scale_with_the_scale_up_to_int64(
+    client_factory, mock_gorelo, bad, message
+):
+    # Its edge: a whole number is quoted back only while it is a plausible number (Python refuses to turn a
+    # number of more than 4300 digits into text, and nothing here should depend on that)
+    calls = (
+        (module.update_project, {"project_id": PROJECT, "status_id": bad}, "status_id"),
+        (module.list_projects, {"status_ids": [1, bad]}, "status_ids[1]"),
+    )
+    for tool, kwargs, where in calls:
+        with pytest.raises(ToolError) as caught:
+            await call_directly(client_factory, tool, **kwargs)
+        assert str(caught.value) == f"{where}: {message}"
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    "statuses, message",
+    [
+        ("1,2", "status_ids: expected a list of ids such as [123, 456], got a string"),
+        (4, "status_ids: expected a list of ids such as [123, 456], got a number"),
+        ({"a": 1}, "status_ids: expected a list of ids such as [123, 456], got an object"),
+        ([], "status_ids: expected at least one id, got an empty list (omit status_ids if you have no ids to give)"),
+        ([None], f"status_ids[0]: {ID_EXPECTED}, got null"),
+        ([2, None], f"status_ids[1]: {ID_EXPECTED}, got null"),
+    ],
+)
+async def test_calling_the_project_list_directly_keeps_the_list_messages_of_positive_ids(
+    client_factory, mock_gorelo, statuses, message
+):
+    # None is "not given" only for a single status_id: as an item of the list (or as the list shape) it is refused
+    with pytest.raises(ToolError) as caught:
+        await call_directly(client_factory, module.list_projects, status_ids=statuses)
+    assert str(caught.value) == message
+    assert mock_gorelo.requests == []
+
+
+async def test_calling_the_project_tools_directly_still_accepts_the_whole_scale(client_factory, mock_gorelo):
+    # the direct path is not stricter than the schema path: every status of the scale goes through
+    route_update_project(mock_gorelo)
+    mock_gorelo.on("GET", "/v1/projects", paged_envelope([]))
+    for status in (1, 2, 3, 4, 5):
+        await call_directly(client_factory, module.update_project, project_id=PROJECT, status_id=status)
+    await call_directly(client_factory, module.list_projects, status_ids=[1, 2, 3, 4, 5])
+    assert [r.json["StatusId"] for r in mock_gorelo.requests if r.method == "PATCH"] == [1, 2, 3, 4, 5]
+    assert mock_gorelo.requests[-1].query["StatusIds"] == "1,2,3,4,5"
 
 
 # --------------------------------------------------------------------------

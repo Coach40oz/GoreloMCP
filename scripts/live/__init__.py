@@ -8,7 +8,9 @@ Safety infrastructure, built first and reviewed before anything runs live:
     cleanup.py   deletes what a manifest says a run created (also the leftovers listed in site.local.toml [leftovers], with --leftovers;
                  with --void-approved it also voids an Approved invoice the run recorded as Approved: without that
                  flag a cleanup never voids, and only the write matrix's approved_invoice area voids the one invoice it
-                 approved itself)
+                 approved itself); it also clears the custom field value that the custom_properties area (--with-custom-properties)
+                 set on the test client, but only while the field still shows the run's text and no other custom field of
+                 that client is set
 
 How a harness wires them together (the same guard goes on every client of the run):
 

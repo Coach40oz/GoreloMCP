@@ -21,6 +21,7 @@ from tools._common import REGISTRY
 pytestmark = pytest.mark.anyio
 
 SECRET = "SECRET-CUSTOMER-DATA"  # sits in every row the fake serves: it must never reach the printed table
+DROP = object()  # a key a record does not have
 CLIENT_ID = 101
 TICKET_QUIET, TICKET_COMMENTED = uid(1), uid(2)
 TICKETS = [
@@ -30,6 +31,14 @@ TICKETS = [
      "LastUpdate": {"On": "2026-10-01T09:00:00Z", "Summary": SECRET, "UpdateType": "NewComment"}},
 ]
 COMMENT_ID, APPROVAL_ID, PROJECT_ID, TASK_ID = uid(11), uid(12), uid(21), uid(22)
+TEST_CLIENT_ID = 9501  # [clients] test_client of the invented site config (tests/site_helper.py)
+# CustomProperties as the single client and device records carry them (contract 1b1c0cec0e9a): one set text field, one unset
+# text field, one unset number field. The values are the invented "SECRET" text: they must never reach the printed table.
+FIELDS = [
+    {"Id": 11, "Variable": "tier", "Name": "Support tier", "Type": {"Id": 1, "Name": "Text"}, "Value": SECRET, "IsSet": True},
+    {"Id": 12, "Variable": "notes", "Name": "Notes", "Type": {"Id": 1, "Name": "Large Text"}, "Value": None, "IsSet": False},
+    {"Id": 13, "Variable": "seats", "Name": "Seats", "Type": {"Id": 2, "Name": "Number"}, "Value": "5", "IsSet": False},
+]
 
 
 @pytest.fixture(autouse=True)
@@ -62,16 +71,21 @@ class ReadFake:
         self.mock = MockGorelo()
         self.scopes = {"Project": project_scope, "Forms": forms_scope}
         self.empty, self.fail = set(empty), dict(fail or {})
+        # the CustomProperties each single record carries: a test may change them for all clients, one client or the agent
+        self.client_fields: dict[int | None, object] = {None: [dict(f) for f in FIELDS]}
+        self.agent_fields: object = [dict(f) for f in FIELDS]
+        self.list_row_extra: dict[str, dict] = {}  # extra keys on the rows of a list route ("/v1/clients": {...})
+        self.wrong_client_id: dict[int, int] = {}  # a client whose record comes back with another Id
         on = self._on
         on("/v1/clients", Pages([row(CLIENT_ID), row(102)]))
-        on("/v1/clients/{clientId}", lambda q: envelope(row(int(last(q, 3)))))
+        on("/v1/clients/{clientId}", self.get_client)
         on("/v1/clients/{clientId}/locations", Items([row(901, ClientId=CLIENT_ID)]))
         on("/v1/contacts", self.list_contacts)
         on("/v1/contacts/{contactId}", lambda q: envelope(row(int(last(q, 3)))))
         on("/v1/organization/groups", Items([row(7201)]))
         on("/v1/organization/users", Pages([row(9700), row(9202)]))
         on("/v1/assets/agents", Pages([row(uid(31))]))
-        on("/v1/assets/agents/{deviceId}", lambda q: envelope(row(last(q, 4))))
+        on("/v1/assets/agents/{deviceId}", self.get_agent)
         on("/v1/assets/custom", Pages([row(uid(32))]))
         on("/v1/assets/custom/hardware-types", Items([row(42)]))
         on("/v1/alerts", Pages([row(uid(33))]))
@@ -132,12 +146,26 @@ class ReadFake:
             if scope is not None and not self.scopes[scope]:
                 return error_envelope(403, [("080203", f"API key does not have '{scope}' scope")])
             if isinstance(data, Pages):
-                return paged_envelope([] if template in self.empty else list(data))
+                return paged_envelope([] if template in self.empty else [{**r, **self.list_row_extra.get(template, {})} for r in data])
             if isinstance(data, Items):
                 return envelope([] if template in self.empty else list(data))
             return data(request)
 
         self.mock.on("GET", template, serve)
+
+    def get_client(self, q):
+        client = int(last(q, 3))
+        fields = self.client_fields[client] if client in self.client_fields else self.client_fields[None]
+        record = row(self.wrong_client_id.get(client, client))
+        if fields is not DROP:  # DROP: the record has no CustomProperties key at all
+            record["CustomProperties"] = fields
+        return envelope(record)
+
+    def get_agent(self, q):
+        record = row(last(q, 4))
+        if self.agent_fields is not DROP:
+            record["CustomProperties"] = self.agent_fields
+        return envelope(record)
 
     def list_contacts(self, q):
         if "/v1/contacts" in self.empty:
@@ -177,19 +205,20 @@ def outcomes(report) -> dict[str, smoke.Row]:
 # --------------------------------------------------------------------------
 
 
-def test_the_plan_covers_exactly_the_registered_read_tools_once_and_get_ticket_three_times():
+def test_the_plan_covers_exactly_the_registered_read_tools_once_get_ticket_three_times_and_get_client_twice():
     reads = smoke.read_tools()
     assert len(reads) == 52 and "export_invoice_pdf" not in reads
     assert {"list_alerts", "get_invoice"} <= set(reads)
     assert {spec.name for spec in REGISTRY.specs if spec.kind == "read"} == set(reads)
     assert smoke.plan_problems(smoke.CASES, reads) == ([], [])
     tools = [case.tool for case in smoke.CASES]
-    assert {name: count for name, count in collections.Counter(tools).items() if count > 1} == {"get_ticket": 3}
+    assert {name: count for name, count in collections.Counter(tools).items() if count > 1} == {"get_ticket": 3, "get_client": 2}
     labels = [case.row for case in smoke.CASES]
-    assert len(labels) == len(set(labels)) == 54
+    assert len(labels) == len(set(labels)) == 55
     assert [case.row for case in smoke.CASES if case.tool == "get_ticket"] == [
         "get_ticket (guid)", "get_ticket (number)", "get_ticket (display number)",
     ]
+    assert [case.row for case in smoke.CASES if case.tool == "get_client"] == ["get_client", "get_client (test client)"]
 
 
 def test_no_write_or_destructive_tool_is_in_the_plan():
@@ -212,14 +241,15 @@ async def test_a_full_run_calls_every_read_tool_once_sends_only_gets_and_passes(
     fake = ReadFake()
     report = await run(fake)
     assert report.ok, "\n".join(lines)
-    assert len(report.rows) == 54 and all(r.outcome == smoke.OK for r in report.rows), [
+    assert len(report.rows) == 55 and all(r.outcome == smoke.OK for r in report.rows), [
         (r.label, r.outcome, r.note) for r in report.rows if r.outcome != smoke.OK
     ]
     assert {r.method for r in fake.mock.requests} == {"GET"}
-    # 52 calls with HTTP (two local tables make none) plus the search behind get_ticket by number and by display number
-    assert report.requests == len(fake.mock.requests) == 54 and report.refused == 0
-    assert report.counts() == {smoke.OK: 54, smoke.SCOPE_MISSING: 0, smoke.SKIPPED: 0, smoke.FAILED: 0}
-    assert lines[-1] == "result: PASSED" and "54 checks: 54 ok, 0 scope missing, 0 skipped, 0 FAILED; 54 requests sent" in lines[-2]
+    # 52 calls with HTTP (two local tables make none) plus the search behind get_ticket by number and by display number, and
+    # the second get_client (the test client)
+    assert report.requests == len(fake.mock.requests) == 55 and report.refused == 0
+    assert report.counts() == {smoke.OK: 55, smoke.SCOPE_MISSING: 0, smoke.SKIPPED: 0, smoke.FAILED: 0}
+    assert lines[-1] == "result: PASSED" and "55 checks: 55 ok, 0 scope missing, 0 skipped, 0 FAILED; 55 requests sent" in lines[-2]
     assert not fake.mock.unmatched
 
 
@@ -231,7 +261,7 @@ async def test_the_rows_are_printed_as_they_complete_and_make_up_the_rendered_ta
     by_start = {line.split()[0]: made for line, made in seen if line.split()[0] in ("tool", "health_check", "list_clients", "list_form_responses")}
     assert by_start["tool"] == 0  # the header is out before the first request
     assert by_start["health_check"] == 1 and by_start["list_clients"] == 2  # each row appears when its call is done
-    assert by_start["list_form_responses"] == 54  # the last row only after the last request
+    assert by_start["list_form_responses"] == 55  # the last row only after the last request
 
 
 async def test_get_ticket_is_called_with_the_guid_the_number_and_the_display_number_of_a_listed_ticket(run):
@@ -254,7 +284,8 @@ async def test_ids_are_discovered_from_the_lists_and_used_by_the_gets(run):
     assert report.ok
     sent = {r.path for r in fake.mock.requests}
     for path in (
-        f"/v1/clients/{CLIENT_ID}", f"/v1/clients/{CLIENT_ID}/locations", "/v1/contacts/201", f"/v1/assets/agents/{uid(31)}",
+        f"/v1/clients/{CLIENT_ID}", f"/v1/clients/{CLIENT_ID}/locations", f"/v1/clients/{TEST_CLIENT_ID}", "/v1/contacts/201",
+        f"/v1/assets/agents/{uid(31)}",
         f"/v1/tickets/{TICKET_COMMENTED}/comments/{COMMENT_ID}", f"/v1/tickets/{TICKET_COMMENTED}/approvals/{APPROVAL_ID}",
         "/v1/time-entries/5001", "/v1/contracts/61", f"/v1/invoices/{uid(41)}", f"/v1/items/{uid(42)}", f"/v1/uptime/{uid(43)}",
         f"/v1/projects/{PROJECT_ID}", f"/v1/projects/{PROJECT_ID}/tasks/{TASK_ID}",
@@ -284,6 +315,156 @@ async def test_list_alerts_is_read_as_a_paged_list_of_20_and_get_invoice_reads_t
     names = [row_.label for row_ in report.rows]
     assert names.index("list_invoices") < names.index("get_invoice") < names.index("list_items")
     assert names.index("list_custom_assets") < names.index("list_custom_asset_hardware_types") < names.index("list_alerts") < names.index("list_ticket_statuses")
+
+
+# --------------------------------------------------------------------------
+# Custom properties (contract 1b1c0cec0e9a): the single client and device records carry them, the list rows do not
+# --------------------------------------------------------------------------
+
+
+async def test_get_client_is_read_for_the_first_listed_client_and_for_the_test_client_with_their_custom_fields_counted(run, lines):
+    fake = ReadFake()
+    report = await run(fake)
+    assert report.ok, "\n".join(lines)
+    found = outcomes(report)
+    assert found["get_client"].note == "Id matches; 3 custom properties (1 set)"
+    assert found["get_client (test client)"].note == (
+        "Id matches; 3 custom properties (1 set, 1 unset text; the custom_properties write area needs none set and one unset text)"
+    )
+    assert found["get_agent"].note == "Id matches; 3 custom properties (1 set)"
+    names = [row_.label for row_ in report.rows]
+    assert names.index("get_client") + 1 == names.index("get_client (test client)")  # the test client's read follows the first
+    reads = [r.path for r in fake.mock.requests if r.path.startswith("/v1/clients/") and r.path.count("/") == 3]
+    assert reads == [f"/v1/clients/{CLIENT_ID}", f"/v1/clients/{TEST_CLIENT_ID}"]
+    assert all(r.method == "GET" for r in fake.mock.requests)
+    assert SECRET not in "\n".join(lines).replace(f"{SECRET} broke", "")  # counts only: no custom field value is ever printed
+
+
+async def test_the_test_client_read_names_the_id_of_the_site_config_and_checks_it_is_the_record_that_came_back(run):
+    fake = ReadFake()
+    fake.wrong_client_id[TEST_CLIENT_ID] = 77  # Gorelo answers another client's record
+    report = await run(fake)
+    found = outcomes(report)
+    assert not report.ok
+    assert found["get_client (test client)"].outcome == smoke.FAILED
+    assert found["get_client (test client)"].note == "the record's Id is not the one that was asked for"
+    assert found["get_client"].outcome == smoke.OK
+
+
+@pytest.mark.parametrize(
+    "fields, problem",
+    [
+        pytest.param(DROP, "CustomProperties is missing", id="no-key"),
+        pytest.param(None, "CustomProperties is not a list (NoneType)", id="null"),
+        pytest.param({"Id": 11}, "CustomProperties is not a list (dict)", id="an-object"),
+        pytest.param("none", "CustomProperties is not a list (str)", id="text"),
+        pytest.param(["x"], "CustomProperties item 1 is not an object", id="entry-not-an-object"),
+        pytest.param([{**FIELDS[0], "Id": True}], "item 1: Id is not a whole number of 1 or more", id="id-bool"),
+        pytest.param([{**FIELDS[0], "Id": 0}], "item 1: Id is not a whole number of 1 or more", id="id-zero"),
+        pytest.param([{**FIELDS[0], "Id": "11"}], "item 1: Id is not a whole number of 1 or more", id="id-text"),
+        pytest.param([{k: v for k, v in FIELDS[0].items() if k != "Id"}], "item 1: Id is not a whole number", id="no-id"),
+        pytest.param([FIELDS[0], {**FIELDS[1], "Id": 11}], "item 2: Id repeats an earlier custom field", id="duplicate-id"),
+        pytest.param([{**FIELDS[0], "Name": None}], "item 1: Name is not text", id="name-null"),
+        pytest.param([{**FIELDS[0], "Name": 5}], "item 1: Name is not text", id="name-number"),
+        pytest.param([{**FIELDS[0], "Type": "Text"}], "item 1: Type is not an object with a whole-number Id and a text Name", id="type-text"),
+        pytest.param([{**FIELDS[0], "Type": {"Name": "Text"}}], "item 1: Type is not an object", id="type-no-id"),
+        pytest.param([{**FIELDS[0], "Type": {"Id": 1}}], "item 1: Type is not an object", id="type-no-name"),
+        pytest.param([{**FIELDS[0], "Type": {"Id": "1", "Name": "Text"}}], "item 1: Type is not an object", id="type-id-text"),
+        pytest.param([{**FIELDS[0], "Value": 5}], "item 1: Value is not text or null", id="value-number"),
+        pytest.param([{**FIELDS[0], "Value": ["x"]}], "item 1: Value is not text or null", id="value-list"),
+        pytest.param([{k: v for k, v in FIELDS[0].items() if k != "Value"}], "item 1: Value is not text or null", id="no-value"),
+        pytest.param([{**FIELDS[0], "IsSet": "true"}], "item 1: IsSet is not a boolean", id="isset-text"),
+        pytest.param([{**FIELDS[0], "IsSet": 1}], "item 1: IsSet is not a boolean", id="isset-number"),
+        pytest.param([{**FIELDS[0], "IsSet": None}], "item 1: IsSet is not a boolean", id="isset-null"),
+        pytest.param([{k: v for k, v in FIELDS[0].items() if k != "IsSet"}], "item 1: IsSet is not a boolean", id="no-isset"),
+        pytest.param([{**FIELDS[0], "Variable": 3}], "item 1: Variable is not text", id="variable-number"),
+    ],
+)
+async def test_a_wrong_custom_properties_shape_on_the_test_client_or_an_agent_fails_the_row_and_the_run(run, fields, problem):
+    fake = ReadFake()
+    fake.client_fields[TEST_CLIENT_ID] = fields
+    fake.agent_fields = fields
+    report = await run(fake)
+    found = outcomes(report)
+    assert not report.ok
+    assert found["get_client (test client)"].outcome == smoke.FAILED and problem in found["get_client (test client)"].note
+    assert found["get_agent"].outcome == smoke.FAILED and problem in found["get_agent"].note
+    assert found["get_client"].outcome == smoke.OK  # the first listed client was not damaged in this test
+    assert SECRET not in found["get_client (test client)"].note and SECRET not in found["get_agent"].note  # never a value
+    assert report.counts()[smoke.FAILED] == 2
+
+
+async def test_the_variable_is_checked_only_when_it_is_there_and_an_empty_list_is_a_good_answer(run):
+    fake = ReadFake()
+    fake.client_fields[None] = [{k: v for k, v in f.items() if k != "Variable"} for f in FIELDS]  # no Variable key: fine
+    fake.agent_fields = []  # no custom field defined: an empty list is the contract's answer
+    report = await run(fake)
+    assert report.ok
+    assert outcomes(report)["get_agent"].note == "Id matches; 0 custom properties (0 set)"
+    assert outcomes(report)["get_client (test client)"].note.startswith("Id matches; 3 custom properties (1 set, 1 unset text")
+
+
+async def test_the_first_listed_client_is_checked_too(run):
+    fake = ReadFake()
+    fake.client_fields[CLIENT_ID] = DROP
+    report = await run(fake)
+    found = outcomes(report)
+    assert found["get_client"].outcome == smoke.FAILED and "CustomProperties is missing" in found["get_client"].note
+    assert found["get_client (test client)"].outcome == smoke.OK
+    assert found["list_client_locations"].outcome == smoke.OK  # the dependents of the list are not affected
+
+
+async def test_a_list_row_that_carries_custom_properties_is_a_note_never_a_failure(run):
+    fake = ReadFake()
+    fake.list_row_extra["/v1/clients"] = {"CustomProperties": []}
+    fake.list_row_extra["/v1/assets/agents"] = {"CustomProperties": [dict(f) for f in FIELDS]}
+    report = await run(fake)
+    found = outcomes(report)
+    assert report.ok and found["list_clients"].outcome == smoke.OK and found["list_agents"].outcome == smoke.OK
+    assert found["list_clients"].note == (
+        "count=2 total_count=2; note: 2 of 2 rows carry CustomProperties, which the spec leaves out of the list rows"
+    )
+    assert found["list_agents"].note == (
+        "count=1 total_count=1; note: 1 of 1 rows carry CustomProperties, which the spec leaves out of the list rows"
+    )
+    assert found["list_contacts"].note == "count=2 total_count=5 (more pages)"  # a list that never had the key is untouched
+
+
+async def test_list_rows_without_custom_properties_keep_their_plain_notes(run):
+    report = await run(ReadFake())
+    found = outcomes(report)
+    assert found["list_clients"].note == "count=2 total_count=2"
+    assert found["list_agents"].note == "count=1 total_count=1"
+
+
+def test_the_shape_check_returns_the_fields_and_names_the_first_problem():
+    good = {"CustomProperties": [dict(f) for f in FIELDS]}
+    assert smoke.custom_properties_of(good) == good["CustomProperties"]
+    assert smoke.custom_properties_of({"CustomProperties": []}) == []
+    with pytest.raises(ShapeError, match="item 2: Name is not text"):  # the first problem, entries counted from 1
+        smoke.custom_properties_of({"CustomProperties": [FIELDS[0], {**FIELDS[1], "Name": None}, {**FIELDS[2], "IsSet": 1}]})
+    assert smoke.custom_properties_note(good) == "3 custom properties (1 set)"
+    assert smoke.custom_properties_of_test_client_note(good) == (
+        "3 custom properties (1 set, 1 unset text; the custom_properties write area needs none set and one unset text)"
+    )
+
+
+@pytest.mark.parametrize(
+    "type_name, wanted",
+    [("Text", True), ("text", True), ("TEXT AREA", True), ("Large Text", True), ("Multi-line text", True), ("Number", False),
+     ("Date", False), ("Checkbox", False), ("", False), (None, False), (5, False)],
+)
+def test_a_text_field_is_one_whose_type_name_contains_text_in_any_case(type_name, wanted):
+    assert smoke.is_text_field({"Type": {"Id": 1, "Name": type_name}}) is wanted
+    assert smoke.is_text_field({"Type": None}) is False and smoke.is_text_field({}) is False
+
+
+def test_the_list_rows_note_counts_only_the_rows_that_carry_the_key():
+    note = smoke.rows_without_custom_properties_note
+    assert note({"items": [{"Id": 1}, {"Id": 2}]}) == "" and note({"items": []}) == "" and note({}) == ""
+    assert note({"items": [{"Id": 1, "CustomProperties": []}, {"Id": 2}, "x"]}) == (
+        "note: 1 of 3 rows carry CustomProperties, which the spec leaves out of the list rows"
+    )
 
 
 async def test_the_smoke_stays_read_only_it_never_exports_an_invoice_pdf(run):
@@ -367,6 +548,40 @@ async def test_a_get_whose_list_is_empty_is_skipped_and_says_which_list(run):
         assert found[get].outcome == smoke.SKIPPED and found[get].note == f"needs {what}: {parent} returned no rows", get
     assert not any(r.path in ("/v1/contacts/201", "/v1/contracts/61") for r in fake.mock.requests)
     assert not any(r.path.startswith("/v1/invoices/") for r in fake.mock.requests)  # no invoice to read: no get_invoice request
+
+
+async def test_projects_and_forms_with_the_scopes_granted_run_and_a_project_without_tasks_or_a_tenant_without_forms_only_skips(run):
+    """With the Project and Forms scopes (200s from every projects and forms list) the thirteen projects and forms cases run.
+    A first project that has no task, no task conversation or no comment, and a tenant without forms, skip the gets behind
+    those lists (with the reason) and fail nothing."""
+    full = await run(ReadFake())
+    found = outcomes(full)
+    projects_and_forms = [
+        "list_projects", "get_project", "list_project_tags", "list_project_types", "list_project_sections", "list_project_tasks",
+        "get_project_task", "list_task_conversations", "get_task_approval", "list_project_comments", "get_project_comment",
+        "list_forms", "list_form_responses",
+    ]
+    assert full.ok and all(found[name].outcome == smoke.OK for name in projects_and_forms), [
+        (name, found[name].outcome, found[name].note) for name in projects_and_forms if found[name].outcome != smoke.OK
+    ]
+    assert full.counts()[smoke.SCOPE_MISSING] == 0
+    empty = {
+        "/v1/projects/{projectId}/tasks", "/v1/projects/{projectId}/tasks/{taskId}/conversations", "/v1/projects/{projectId}/comments",
+        "/v1/forms",
+    }
+    report = await run(ReadFake(empty=empty))
+    skipped = outcomes(report)
+    assert report.ok and report.counts()[smoke.FAILED] == 0
+    for name, why in (
+        ("get_project_task", "needs a project task: list_project_tasks returned no rows"),
+        ("list_task_conversations", "needs a project task: list_project_tasks returned no rows"),
+        ("get_task_approval", "needs a project task: list_project_tasks returned no rows"),
+        ("get_project_comment", "needs a project comment: list_project_comments returned no rows"),
+        ("list_form_responses", "needs a form: list_forms returned no rows"),
+    ):
+        assert skipped[name].outcome == smoke.SKIPPED and skipped[name].note == why, (name, skipped[name])
+    for name in ("list_project_tasks", "list_project_comments", "list_forms", "get_project", "list_project_sections"):
+        assert skipped[name].outcome == smoke.OK
 
 
 async def test_a_list_that_is_never_empty_in_a_working_tenant_fails_when_it_is(run):
@@ -494,8 +709,8 @@ async def test_the_requests_are_paced_one_second_apart(run, monkeypatch):
     monkeypatch.setattr(smoke, "Pacer", lambda interval: _env.Pacer(interval, clock=time.clock, sleep=time.sleep))
     assert smoke.PACE_SECONDS == 1.0
     report = await run(ReadFake(), pace=smoke.PACE_SECONDS)
-    assert report.ok and report.requests == 54
-    assert time.sleeps == [1.0] * 53  # one second between two requests, none before the first
+    assert report.ok and report.requests == 55
+    assert time.sleeps == [1.0] * 54  # one second between two requests, none before the first
 
 
 # --------------------------------------------------------------------------

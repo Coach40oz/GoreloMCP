@@ -2990,7 +2990,11 @@ def test_the_rule_table_names_a_rule_for_every_operation_of_the_spec(guard):
     assert table["DELETE /v1/contacts/{contactId}"].startswith("run-created contact (never the operator contact); with cleanup=True")
     assert table["PATCH /v1/tickets/{ticketId}"].startswith("path ids run-created: ticketId; ClientId")
     assert table["PATCH /v1/clients/{clientId}"] == (
-        "path id is a run-created client (never the test client or the second client); the body has no Id (the spec defines none)"
+        "path id is a run-created client (never the second client); the test client only with allow_custom_properties and "
+        "only a body of CustomProperties and nothing else: ONE entry for a custom field the manifest records as unset before "
+        "the run, its Value the run id or null (a cleanup sends the null only); once the record is cleaned the matrix takes no "
+        "further write to that field, a null included; CustomProperties never go to a run-created client; the body has no Id "
+        "(the spec defines none)"
     )
     assert table["PATCH /v1/contacts/{contactId}"] == (
         "path ids run-created: contactId; the body has no ContactId (the spec defines none); ClientId, if present, is the test client"
@@ -3201,7 +3205,7 @@ def test_a_guard_refuses_to_be_built_when_a_key_is_missing_and_names_it(manifest
 
 
 # --------------------------------------------------------------------------
-# API keys and custom assets (r6)
+# API keys and custom assets
 # --------------------------------------------------------------------------
 
 CUSTOM_ASSET = uid(61)  # a custom asset the run created
@@ -3322,3 +3326,310 @@ def test_the_custom_asset_rules_are_in_the_rule_table(guard):
 def test_a_custom_asset_id_must_be_a_uuid_in_the_manifest(assets_manifest):
     with pytest.raises(ValueError):
         assets_manifest.created("custom_asset", 5, assets_manifest.label("bad"))
+
+
+# --------------------------------------------------------------------------
+# Custom properties: the one write the live tests make to the TEST CLIENT itself
+# --------------------------------------------------------------------------
+
+FIELD = 17  # a client custom field the run recorded before its first write: unset before the run
+SET_BEFORE = 18  # recorded, but the manifest says it WAS set before the run
+OTHER_CLIENT_FIELD = 19  # recorded for the second client
+NO_FLAG = 20  # recorded without was_set
+UNKNOWN = guard_module.CUSTOM_PROPERTY_UNKNOWN_ID
+TEST_CLIENT_PATH = f"/clients/{TEST_CLIENT}"
+
+
+def property_body(value=RUN, field=FIELD, **entry):
+    """The body update_client sends for one custom field: {"CustomProperties": [{"Id": field, "Value": value}]}."""
+    return {"CustomProperties": [{"Id": field, "Value": value, **entry}]}
+
+
+@pytest.fixture
+def properties_manifest(manifest) -> Manifest:
+    """The manifest of a --with-custom-properties run that recorded its field (and three others, wrongly) before any write."""
+    label = manifest.label
+    base = {"name": "Support tier", "type": "Text", "value": RUN}
+    manifest.created("custom_property", FIELD, label("custom property 17"), {**base, "client_id": TEST_CLIENT, "was_set": False})
+    manifest.created("custom_property", SET_BEFORE, label("custom property 18"), {**base, "client_id": TEST_CLIENT, "was_set": True})
+    manifest.created("custom_property", OTHER_CLIENT_FIELD, label("custom property 19"), {**base, "client_id": SECOND, "was_set": False})
+    manifest.created("custom_property", NO_FLAG, label("custom property 20"), {**base, "client_id": TEST_CLIENT})
+    return manifest
+
+
+@pytest.fixture
+def properties_guard(properties_manifest) -> LiveGuard:
+    return LiveGuard("write", properties_manifest, allow_custom_properties=True)
+
+
+@pytest.fixture
+def properties_cleanup_guard(properties_manifest) -> LiveGuard:
+    """What run_cleanup builds for a manifest that holds a custom_property record."""
+    return LiveGuard("write", properties_manifest, cleanup=True, allow_custom_properties=True)
+
+
+def test_the_test_client_is_still_never_changed_without_the_option_not_even_by_a_custom_field_body(guard, cleanup_guard, properties_manifest):
+    plain = LiveGuard("write", properties_manifest)
+    assert plain.allow_custom_properties is False and cleanup_guard.allow_custom_properties is False  # opt-in, never a default
+    for subject in (plain, guard, cleanup_guard):
+        for body in (property_body(), property_body(None), property_body(field=UNKNOWN), {"AlternateName": "x"}, {}):
+            refused(
+                subject,
+                build("PATCH", TEST_CLIENT_PATH, body),
+                f"path id {TEST_CLIENT} is not allowed; client {TEST_CLIENT} is one of the records the live tests run on and is never changed",
+            )
+
+
+def test_the_option_needs_write_mode_and_is_off_unless_given():
+    with pytest.raises(ValueError, match="allow_custom_properties=True only makes sense in write mode"):
+        LiveGuard("read", None, allow_custom_properties=True)
+    assert LiveGuard("read", None).allow_custom_properties is False
+
+
+def test_a_recorded_unset_field_may_be_set_to_the_run_text_and_cleared_again(properties_guard):
+    properties_guard.check(build("GET", TEST_CLIENT_PATH))  # update_client reads the client first
+    properties_guard.check(build("PATCH", TEST_CLIENT_PATH, property_body()))  # update_client custom_properties
+    properties_guard.check(build("GET", TEST_CLIENT_PATH))  # and again after the PATCH
+    properties_guard.check(build("GET", TEST_CLIENT_PATH))
+    properties_guard.check(build("PATCH", TEST_CLIENT_PATH, property_body(None)))  # update_client clear_custom_property_ids
+    properties_guard.check(build("GET", TEST_CLIENT_PATH))
+    assert properties_guard.allowed_count == 6 and properties_guard.writes_allowed == 2 and not properties_guard.violations
+
+
+def test_writes_allowed_counts_the_requests_that_are_not_a_get_and_only_the_allowed_ones(guard, properties_guard):
+    """A harness proves that a call sent no write by comparing the counter before and after it."""
+    assert guard.writes_allowed == 0 and guard.allowed_count == 0
+    guard.check(build("GET", TEST_CLIENT_PATH))
+    assert (guard.allowed_count, guard.writes_allowed) == (1, 0)
+    guard.check(build("POST", "/clients", {"Name": f"{RUN} client"}))
+    guard.check(build("PATCH", RUN_CLIENT_PATH, {"AlternateName": "MCPTEST alt"}))
+    guard.check(build("DELETE", RUN_CLIENT_PATH))
+    assert (guard.allowed_count, guard.writes_allowed) == (4, 3)
+    refused(guard, build("PATCH", TEST_CLIENT_PATH, {"AlternateName": "x"}), "is one of the records the live tests run on and is never changed")
+    refused(guard, build("POST", "/clients", {"Name": "Acme"}), "Name must start with MCPTEST-")
+    assert (guard.allowed_count, guard.writes_allowed) == (4, 3) and len(guard.violations) == 2  # a refusal counts as neither
+    refused(properties_guard, build("PATCH", TEST_CLIENT_PATH, property_body(field=UNKNOWN)), "is not one the run recorded in the manifest")
+    assert properties_guard.writes_allowed == 0
+
+
+def test_the_set_must_carry_exactly_the_text_the_manifest_records_for_that_field(properties_guard, properties_manifest):
+    refused(properties_guard, build("PATCH", TEST_CLIENT_PATH, property_body(f"{RUN} and more")), "must be the text the manifest records for custom field 17")
+    properties_manifest.update_details("custom_property", FIELD, value=f"{RUN} other")
+    refused(properties_guard, build("PATCH", TEST_CLIENT_PATH, property_body()), "must be the text the manifest records for custom field 17")
+    properties_guard.check(build("PATCH", TEST_CLIENT_PATH, property_body(f"{RUN} other")))
+    properties_guard.check(build("PATCH", TEST_CLIENT_PATH, property_body(None)))  # a clear never carries a text
+
+
+@pytest.mark.parametrize(
+    "body, match",
+    [
+        pytest.param({"CustomProperties": [{"Id": FIELD, "Value": RUN}], "AlternateName": "x"}, "except that a --with-custom-properties run may set or clear ONE custom field", id="and-an-alternate-name"),
+        pytest.param({"CustomProperties": [{"Id": FIELD, "Value": RUN}], "Name": "x"}, "never changed, except that", id="and-a-name"),
+        pytest.param({"CustomProperties": [{"Id": FIELD, "Value": RUN}], "BillingName": "x"}, "never changed, except that", id="and-a-billing-name"),
+        pytest.param({"CustomProperties": [{"Id": FIELD, "Value": RUN}], "StatusId": 2}, "never changed, except that", id="and-a-status"),
+        pytest.param({"AlternateName": "x"}, "never changed, except that", id="an-alternate-name-alone"),
+        pytest.param({"StatusId": 2}, "never changed, except that", id="a-status-alone"),
+        pytest.param({}, "never changed, except that", id="an-empty-body"),
+        pytest.param({"CustomProperties": []}, "exactly one entry", id="no-entry"),
+        pytest.param({"CustomProperties": [{"Id": FIELD, "Value": RUN}, {"Id": SET_BEFORE, "Value": None}]}, "exactly one entry", id="two-entries"),
+        pytest.param({"CustomProperties": [{"Id": FIELD, "Value": RUN}, {"Id": FIELD, "Value": None}]}, "exactly one entry", id="the-same-field-twice"),
+        pytest.param({"CustomProperties": None}, "exactly one entry", id="null"),
+        pytest.param({"CustomProperties": {"Id": FIELD, "Value": RUN}}, "exactly one entry", id="an-object"),
+        pytest.param({"CustomProperties": "17"}, "exactly one entry", id="text"),
+        pytest.param({"CustomProperties": ["17"]}, "an object with Id and Value and nothing else", id="an-entry-that-is-text"),
+        pytest.param({"CustomProperties": [[FIELD, RUN]]}, "an object with Id and Value and nothing else", id="an-entry-that-is-a-list"),
+        pytest.param({"CustomProperties": [{"Id": FIELD}]}, "an object with Id and Value and nothing else", id="no-value-key"),
+        pytest.param({"CustomProperties": [{"Value": RUN}]}, "an object with Id and Value and nothing else", id="no-id-key"),
+        pytest.param({"CustomProperties": [{"Id": FIELD, "Value": RUN, "Name": "x"}]}, "an object with Id and Value and nothing else", id="an-extra-key"),
+        pytest.param({"CustomProperties": [{"Id": FIELD, "value": RUN}]}, "an object with Id and Value and nothing else", id="a-lowercase-key"),
+    ],
+)
+def test_only_a_body_of_one_custom_field_entry_may_touch_the_test_client(properties_guard, properties_cleanup_guard, body, match):
+    for subject in (properties_guard, properties_cleanup_guard):
+        refused(subject, build("PATCH", TEST_CLIENT_PATH, body), match)
+
+
+@pytest.mark.parametrize(
+    "field, shown",
+    [("17", "text"), (17.0, "a decimal number"), (True, "a boolean"), (None, "null"), ([17], "a list"), ({"Id": 17}, "an object")],
+)
+def test_the_id_of_the_custom_field_is_a_json_integer(properties_guard, field, shown):
+    refused(properties_guard, build("PATCH", TEST_CLIENT_PATH, property_body(field=field)), "CustomProperties\\[0\\].Id must be a JSON integer")
+
+
+@pytest.mark.parametrize("value", [5, True, "", " ", "no run id", f" {RUN}", "MCPTEST-20000101000000", RUN.lower(), ["x"], {"a": 1}, 1.5])
+def test_the_value_is_null_or_text_that_starts_with_the_run_id(properties_guard, value):
+    refused(properties_guard, build("PATCH", TEST_CLIENT_PATH, property_body(value)), f"must be null \\(a clear\\) or text that starts with the run id {RUN}")
+
+
+@pytest.mark.parametrize(
+    "field, match",
+    [
+        (99, "custom field 99 is not one the run recorded in the manifest"),
+        (1, "custom field 1 is not one the run recorded in the manifest"),
+        (UNKNOWN, f"custom field {UNKNOWN} is not one the run recorded in the manifest"),
+        (UNKNOWN + 1, "is not one the run recorded in the manifest"),
+        (SET_BEFORE, "custom field 18 is not recorded as unset before the run"),
+        (NO_FLAG, "custom field 20 is not recorded as unset before the run"),
+        (OTHER_CLIENT_FIELD, "custom field 19 is recorded for another client than the test client 9501"),
+    ],
+)
+def test_a_field_the_run_did_not_record_as_unset_for_the_test_client_is_never_written(properties_guard, properties_cleanup_guard, field, match):
+    for subject, value in ((properties_guard, RUN), (properties_guard, None), (properties_cleanup_guard, None)):
+        refused(subject, build("PATCH", TEST_CLIENT_PATH, property_body(value, field)), match)
+
+
+def test_without_a_record_there_is_no_write_at_all_even_with_the_option(manifest):
+    bare = LiveGuard("write", manifest, allow_custom_properties=True)  # no custom_property record in this manifest
+    refused(bare, build("PATCH", TEST_CLIENT_PATH, property_body()), "is not one the run recorded in the manifest")
+    refused(bare, build("PATCH", TEST_CLIENT_PATH, property_body(None)), "is not one the run recorded in the manifest")
+    assert bare.writes_allowed == 0
+
+
+def test_the_unknown_id_of_the_negative_check_is_refused_like_any_field_the_run_did_not_record(manifest, properties_guard, properties_cleanup_guard):
+    """update_client refuses that Id locally after its read, so no step needs a PATCH that carries it: not with the run's text,
+    not with a null, not with a record in the manifest, not from a cleanup, and not after the run recorded and cleaned a field."""
+    assert UNKNOWN == 9_000_000_000_000
+    bare = LiveGuard("write", manifest, allow_custom_properties=True)
+    for subject in (bare, properties_guard, properties_cleanup_guard):
+        for value in (RUN, None):
+            refused(
+                subject,
+                build("PATCH", TEST_CLIENT_PATH, property_body(value, UNKNOWN)),
+                f"custom field {UNKNOWN} is not one the run recorded in the manifest|a cleanup only clears a custom field",  # a cleanup: no value at all
+            )
+    properties_guard.manifest.cleaned("custom_property", FIELD, "cleared by the write matrix")
+    refused(properties_guard, build("PATCH", TEST_CLIENT_PATH, property_body(RUN, UNKNOWN)), "is not one the run recorded in the manifest")
+    refused(properties_guard, build("PATCH", TEST_CLIENT_PATH, {"CustomProperties": [{"Id": UNKNOWN, "Value": RUN}], "Name": RUN}), "never changed, except that")
+    assert properties_guard.writes_allowed == 0 and bare.writes_allowed == 0 and properties_cleanup_guard.writes_allowed == 0
+
+
+def test_a_field_whose_record_is_cleaned_takes_no_further_write_from_the_matrix_guard_a_null_included(properties_guard, properties_cleanup_guard, properties_manifest):
+    """manifest.ids() includes the cleaned records, so the guard looks at the record itself: once the area has cleared a field it
+    is done with it, and the matrix's guard takes nothing more for it, neither a value nor another clear. A cleanup guard, which
+    can only clear, still takes the null."""
+    properties_guard.check(build("PATCH", TEST_CLIENT_PATH, property_body()))
+    properties_guard.check(build("PATCH", TEST_CLIENT_PATH, property_body(None)))  # the clear of the area
+    properties_manifest.cleaned("custom_property", FIELD, "cleared by the write matrix (update_client clear_custom_property_ids)")
+    assert FIELD in properties_manifest.ids("custom_property") and properties_manifest.record("custom_property", FIELD).cleaned
+    gone = f"custom field {FIELD} was already cleared by this run \\(its record is cleaned\\): this guard takes no further write to it, a clear included"
+    refused(properties_guard, build("PATCH", TEST_CLIENT_PATH, property_body()), gone)
+    refused(properties_guard, build("PATCH", TEST_CLIENT_PATH, property_body(None)), gone)  # a null is a write too
+    refused(properties_guard, build("PATCH", TEST_CLIENT_PATH, property_body(f"{RUN} other")), "must be the text the manifest records for custom field 17")
+    assert properties_guard.writes_allowed == 2  # the set and the clear of the area; the refused ones are not counted
+    properties_cleanup_guard.check(build("PATCH", TEST_CLIENT_PATH, property_body(None)))  # a cleanup only ever clears
+    refused(properties_cleanup_guard, build("PATCH", TEST_CLIENT_PATH, property_body()), "a cleanup only clears a custom field")
+    # another recorded field is not affected by it
+    properties_manifest.created("custom_property", 21, properties_manifest.label("custom property 21"), {
+        "client_id": TEST_CLIENT, "name": "x", "type": "Text", "was_set": False, "value": RUN})
+    properties_guard.check(build("PATCH", TEST_CLIENT_PATH, property_body(RUN, 21)))
+    properties_guard.check(build("PATCH", TEST_CLIENT_PATH, property_body(None, 21)))
+
+
+def test_a_cleanup_guard_clears_a_recorded_field_and_never_saves_a_value(properties_cleanup_guard):
+    properties_cleanup_guard.check(build("PATCH", TEST_CLIENT_PATH, property_body(None)))
+    refused(properties_cleanup_guard, build("PATCH", TEST_CLIENT_PATH, property_body(RUN)), "a cleanup only clears a custom field \\(Value null\\)")
+    refused(properties_cleanup_guard, build("PATCH", TEST_CLIENT_PATH, property_body("")), "must be null \\(a clear\\) or text that starts with the run id")
+    assert properties_cleanup_guard.cleanup is True and properties_cleanup_guard.allow_custom_properties is True
+
+
+@pytest.mark.parametrize("body", [property_body(), property_body(None), property_body(field=UNKNOWN), {"AlternateName": "x"}, {}])
+def test_the_second_client_is_never_changed_with_or_without_the_option(properties_guard, properties_cleanup_guard, guard, body):
+    for subject in (guard, properties_guard, properties_cleanup_guard):
+        refused(
+            subject,
+            build("PATCH", f"/clients/{SECOND}", body),
+            f"path id {SECOND} is not allowed; client {SECOND} is one of the records the live tests run on and is never changed",
+        )
+
+
+def test_a_client_the_run_created_takes_no_custom_properties_but_still_takes_its_alternate_name(guard, properties_guard, properties_cleanup_guard):
+    for subject in (guard, properties_guard, properties_cleanup_guard):
+        subject.check(build("PATCH", RUN_CLIENT_PATH, {"AlternateName": "MCPTEST alt"}))
+        for body in (property_body(), property_body(None), {"AlternateName": "x", **property_body()}):
+            refused(subject, build("PATCH", RUN_CLIENT_PATH, body), f"CustomProperties may go only to the test client {TEST_CLIENT}")
+
+
+@pytest.mark.parametrize("path", ["/clients/9801", "/clients/5", f"/clients/{RUN_CLIENT + 1}"])
+def test_a_client_that_is_not_the_test_client_or_the_runs_own_is_refused_for_custom_properties_too(properties_guard, path):
+    refused(properties_guard, build("PATCH", path, property_body()), "only a client created by this run may be changed")
+
+
+def test_a_test_client_path_in_another_spelling_is_still_the_test_client(properties_guard):
+    properties_guard.check(build("PATCH", f"/clients/00{TEST_CLIENT}", property_body()))  # the id is read as a number, like the manifest's
+    refused(properties_guard, build("PATCH", f"/clients/{TEST_CLIENT}.0", property_body()), "the path id is not a valid client id")
+    refused(properties_guard, build("PATCH", f"/clients/{TEST_CLIENT}", property_body(), params={"x": 1}), "a write must not carry a query string")
+
+
+def test_a_manifest_that_lists_the_test_client_as_run_created_changes_nothing_for_the_body_rules(tmp_path):
+    run = Manifest(RUN, tmp_path / "wrong.json")
+    run.created("client", TEST_CLIENT, run.label("recorded by mistake"))
+    risky = LiveGuard("write", run, allow_custom_properties=True)
+    refused(risky, build("PATCH", TEST_CLIENT_PATH, {"AlternateName": "x"}), "never changed, except that")
+    refused(risky, build("PATCH", TEST_CLIENT_PATH, property_body()), "is not one the run recorded in the manifest")
+
+
+def test_the_option_opens_nothing_else(properties_guard, properties_cleanup_guard):
+    for subject in (properties_guard, properties_cleanup_guard):
+        refused(subject, build("POST", "/assets/custom", CUSTOM_BODY), "custom assets cannot be created unless the run enabled")
+        refused(subject, build("POST", "/invoices", {"ClientId": TEST_CLIENT, "StatusId": 5, "LineItems": [{"ItemId": INVOICE_ITEM, "Quantity": 1}]}), "StatusId 5")
+        refused(subject, build("DELETE", f"/clients/{TEST_CLIENT}"), "is one of the records the live tests run on and is never deleted")
+        refused(subject, build("PATCH", f"/contacts/{OPERATOR_CONTACT}", {"ClientId": TEST_CLIENT}), "is not a contact created by this run")
+        refused(subject, build("PATCH", f"/tickets/{FOREIGN}", {"Title": "x"}), "is not a ticket created by this run")
+        refused(subject, build("POST", "/clients", {"Name": "Acme"}), "Name must start with MCPTEST-")
+        # CreateClientCommand has no CustomProperties (contract 1b1c0cec0e9a): a created client never takes them either
+        refused(subject, build("POST", "/clients", {"Name": f"{RUN} client", **property_body()}), "field the spec does not define")
+
+
+def test_the_rule_table_and_the_docstring_describe_the_custom_property_rule(properties_guard):
+    rule = properties_guard.rule_table()["PATCH /v1/clients/{clientId}"]
+    for said in ("never the second client", "the test client only with allow_custom_properties", "ONE entry", "a cleanup sends the null only", "once the record is cleaned the matrix takes no further write to that field, a null included", "CustomProperties never go to a run-created client"):
+        assert said in rule, said
+    text = " ".join(guard_module.__doc__.split())
+    for said in (
+        "`allow_custom_properties=True` (off by default; only write_matrix --with-custom-properties sets it, and a cleanup of a manifest that holds a custom_property record)",
+        "The custom properties (allow_custom_properties=True",
+        "the one write the live tests make to the test client itself",
+        "exactly ONE entry",
+        "whose details say was_set is exactly false",
+        "so a field the run did not record can never be written",
+        "CUSTOM_PROPERTY_UNKNOWN_ID, the Id of the area's negative check, too, which update_client must refuse locally after its "
+        "read of the client, so that no PATCH carrying it is ever sent",
+        "once that record is cleaned (the area marks it cleaned after the clear), a guard that is not a cleanup guard takes NO further write to the field, a null included",
+        "A cleanup guard (cleanup=True) allows the null only",
+        "The granularity is the run, not the area",
+        "the manifest record is what unlocks a field, and only the custom_properties area writes one",
+        "`writes_allowed` counts the requests the guard let through that are not a GET",
+    ):
+        assert said in text, said
+    assert "never the test client or the second client" not in text  # the old rule: the test client is not totally frozen any more
+    assert "Counters: allowed_count is every request let through, writes_allowed the ones among them that are not a GET" in " ".join(
+        LiveGuard.__doc__.split()
+    )
+
+
+def test_the_unknown_id_is_no_id_a_client_custom_field_has_and_fits_the_spec():
+    assert 1 <= UNKNOWN < 2**63  # a valid int64 path and body value: the tool's own validation lets it through
+    field = SPEC.schema("CustomPropertyUpdate")["fields"]["Id"]
+    assert field["type"] == "integer" and field["format"] == "int64"
+
+
+def test_the_spec_body_of_the_client_patch_carries_custom_properties_so_the_guard_accepts_the_field():
+    fields = SPEC.op("PATCH /v1/clients/{clientId}").body["fields"]
+    assert "CustomProperties" in fields and fields["CustomProperties"]["items"]["ref"] == "CustomPropertyUpdate"
+    assert set(SPEC.schema("CustomPropertyUpdate")["fields"]) == {"Id", "Value"}  # what the guard allows in an entry, nothing else
+
+
+async def test_a_custom_property_write_through_the_real_hook_is_judged_before_it_leaves(properties_manifest, mock_gorelo):
+    mock_gorelo.on("PATCH", "/v1/clients/{clientId}", envelope({"Id": TEST_CLIENT}))
+    guard = LiveGuard("write", properties_manifest, allow_custom_properties=True)
+    async with httpx.AsyncClient(
+        base_url=BASE, transport=mock_gorelo.transport, event_hooks={"request": [guard]}, headers={"host": "api.usw.gorelo.io"}
+    ) as client:
+        ok = await client.patch(TEST_CLIENT_PATH, json=property_body())
+        assert ok.status_code == 200
+        with pytest.raises(GuardViolation, match="custom field 99 is not one the run recorded"):
+            await client.patch(TEST_CLIENT_PATH, json=property_body(field=99))
+        with pytest.raises(GuardViolation, match="never changed"):
+            await client.patch(TEST_CLIENT_PATH, json={"AlternateName": "x"})
+    assert len(mock_gorelo.requests) == 1 and mock_gorelo.requests[0].json == property_body()

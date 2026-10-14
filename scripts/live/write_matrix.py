@@ -1,7 +1,7 @@
 """The live write matrix: the write tools against the test client and the second client, then clean up.
 
     python -m scripts.live.write_matrix [--skip-email] [--only AREA,...] [--leftovers] [--with-items] [--with-invoices]
-                                        [--with-custom-assets] [--with-approved-invoice]
+                                        [--with-custom-assets] [--with-custom-properties] [--with-approved-invoice]
 
 Run id MCPTEST-<UTC yyyymmddHHMMSS>. Every record the run creates is named with it, announced in the run manifest
 (.live-runs/<run id>.json) BEFORE the create call and recorded with its id right after (the details contract of
@@ -17,8 +17,9 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
 "projects"). Names are prefixed with the run id; the test client unless noted.
 
     clients    create_client of a temporary client with a location phone and region US (the region fix),
-               update_client its alternate name (this is the only update_client call: the test client itself is never
-               changed), read it back
+               update_client its alternate name (this is the only update_client call of this area: the test client itself is
+               never given a name or a status, and only the custom_properties area, with its flag, may set a custom field),
+               read it back
     contacts   create_contact (mobile phone, region US); update_contact job_title with
                clear_secondary_email_ok=true, then check by a read that the mobile phone survived (PATCH replaces
                the contact); update_contact without a secondary-email choice must be refused locally (no request)
@@ -61,6 +62,42 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                the Gorelo app. The manifest records it before and after the create; the cleanup sends nothing for it and
                reports it as a known undeletable record (CUSTOM_ASSET_RESIDUE), and the summary prints a line telling the
                operator to remove it in the Gorelo app. Never part of a default run
+    custom_properties
+               get_client of the TEST CLIENT, then ONE client custom field value on that client itself (every other area
+               creates records of its own, so this is the only write to the test client; the guard otherwise refuses any PATCH of it).
+               SKIPPED unless --with-custom-properties is given (also under --only custom_properties without it: nothing is
+               sent, not even a read). Every update_client call with custom fields reads the client first (a GET) and refuses
+               locally an Id the client does not list (no PATCH, no second GET); otherwise it sends the PATCH, reads the client
+               again (a second GET) and checks on that read that every custom field it did not send is as it was. The area keeps {Id: (IsSet, Value)} from its first read and is SKIPPED, with the
+               Ids of the fields that are set (never a value), while ANY custom field of the test client is set (IsSet true): an
+               update that Gorelo applies as a replace would then have something to destroy, and with nothing set it has not. The
+               field is the unset one (IsSet false) whose Type.Name contains "text" (case-insensitive) with the lowest Id among
+               those whose Value is not null (an unset field shows its default there, so a clear can restore it); only when none
+               has a default, the lowest Id (the note says which case applied). With no custom field at all, or no unset text
+               field, the area is SKIPPED (the reason lists each field's Id, Type.Name and IsSet, never a value: the first eight in
+               the reason, all of them in a note). The field is recorded in the manifest (kind custom_property:
+               Id, Name, Type.Name, was_set false, the text, value_before: the Value of the first read) BEFORE the first write
+               (the note "recorded in the manifest" is written then): the guard accepts a write only to a recorded field, and the
+               cleanup knows what to undo. Then update_client with custom_properties=[{id, value: the run id}] (the answer's entry
+               must have IsSet true and Value equal to the text), a fresh get_client (the same), update_client with
+               clear_custom_property_ids=[id] (IsSet false in the answer), a fresh get_client (the same); after each of these four
+               answers every other custom field must read exactly as at the first read (IsSet, Value, still listed, none new) and,
+               after the clear, the chosen field must be back at its first IsSet false and Value: any difference FAILS the area
+               at once, naming the field Ids only and telling the operator to check them in the Gorelo app. Only then is the
+               record marked cleaned and the note "set, read, cleared, read" written. Then a negative check: update_client with
+               custom_properties naming CUSTOM_PROPERTY_UNKNOWN_ID (9000000000000, an Id that is not a client custom field) must be
+               REFUSED LOCALLY by the tool, after its read of the client and before any PATCH: it passes only when the one
+               request of that call was that GET, the guard let no write through and the tool's error has no HTTP status and names
+               the Id; anything else fails the area (a PATCH that carried the Id would be refused by the guard, which stops the run).
+               A last get_client must show every custom field as at the first read. No custom property PATCH error is expected, so
+               the run learns nothing of Gorelo's own names for such errors. If the run stops after the set and before
+               the clear succeeded, the cleanup clears the field ONLY when the manifest says it was unset before AND its current Value
+               still equals the run id (somebody may have changed it since) AND the cleanup's own read shows no other custom field
+               of the test client set (a clear that Gorelo applied as a replace would wipe it: the cleanup then sends nothing); otherwise
+               the field Id and the client are reported as a LEFTOVER (exit status 1) with how to clear it by hand. Other custom
+               fields that read differently after the cleanup's clear are a LEFTOVER too, named by their ids first and kept in the
+               manifest until somebody acknowledges them (scripts/live/cleanup.py). A required text field with no default cannot be
+               cleared back to nothing (Gorelo refuses the null), so it would stay set: that too is a leftover. Never part of a default run
     invoices   list_items for the first active product that belongs to nobody or to the test client, create_invoice (always a
                Draft for the test client with one line and no recipients), get_invoice, list_invoices by the run label,
                export_invoice_pdf (a PDF file; the export event is recorded on the test invoice), then delete_invoice
@@ -121,7 +158,10 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                scope missing" and nothing else is sent; with the Project scope: list_project_types (the first
                type) and the Everyone group (both are required by create_project), create_project, a section, a task
                in it, a private task comment, then delete the comment and the task (the project itself is soft
-               deleted by the cleanup)
+               deleted by the cleanup). Per the tool texts, a plain create_project fires the app's project-created
+               notification (Gorelo does not say who receives it) and creating the task fires the app's automation
+               triggers; the area sends no created_on, the one documented way to suppress both, so it says so in a note
+               (see the create_project and create_project_task texts). It makes no forms write: the Forms scope is only probed
 
 Who a ticket would email is checked on what Gorelo STORED, before anything else is sent for that ticket. Right
 after create_ticket's read-back (every run ticket, in Matrix.new_ticket) the stored ticket must have exactly the
@@ -232,6 +272,18 @@ Live requests per area (method and spec path, in the order they are sent; the te
         PATCH /v1/assets/custom/{customAssetId}  # clear_fields description, ip_address, warranty_end_date
         GET /v1/assets/custom
         PATCH /v1/assets/custom/{customAssetId}  # negative check: the second client as ClientId, Gorelo must answer HTTP 400
+    custom_properties:
+        GET /v1/clients/{clientId}  # get_client of the test client: its custom fields (only with --with-custom-properties)
+        GET /v1/clients/{clientId}  # update_client reads the client first: every Id it sends must be one of its custom fields
+        PATCH /v1/clients/{clientId}  # update_client custom_properties: the run id as the text of the chosen unset text field
+        GET /v1/clients/{clientId}  # update_client reads the client again: the fields it did not send must be as they were
+        GET /v1/clients/{clientId}  # fresh get_client: the field is set to that text, every other field as at the first read
+        GET /v1/clients/{clientId}  # update_client reads the client first
+        PATCH /v1/clients/{clientId}  # update_client clear_custom_property_ids: the field is cleared
+        GET /v1/clients/{clientId}  # update_client reads the client again
+        GET /v1/clients/{clientId}  # fresh get_client: the field is back at its first state, every other field as at the first read
+        GET /v1/clients/{clientId}  # negative check: update_client reads the client and refuses an Id that is not a custom field; no PATCH, no second read
+        GET /v1/clients/{clientId}  # last get_client: every custom field as at the first read
     approved_invoice:
         GET /v1/contacts  # list_contacts for the test client: every contact must be Inactive (only with --with-approved-invoice)
         GET /v1/clients/{clientId}/locations  # list_client_locations: no location may name a billing contact
@@ -255,6 +307,10 @@ Live requests per area (method and spec path, in the order they are sent; the te
     projects:
         GET /v1/projects  # scope probe; a 403 with code 080203 ends the area here (skipped)
         GET /v1/forms  # scope probe (no forms write step)
+        GET /v1/clients/{clientId}/locations  # the test client's location (cached: not sent when an earlier area of the run, uptime or custom_assets, already read it)
+        GET /v1/tickets/statuses  # the ticket lookups (cached: not sent when the tickets area ran first); only the Everyone group is used here
+        GET /v1/tickets/types
+        GET /v1/organization/groups
         GET /v1/projects/types  # list_project_types: the first type, required by create_project
         POST /v1/projects  # with that type and the Everyone group (group_id)
         GET /v1/projects/{projectId}
@@ -275,10 +331,13 @@ Live requests per area (method and spec path, in the order they are sent; the te
         DELETE /v1/clients/{clientId}  # the temporary client
 
 The lists above are the full path (the approver is accepted and stored as asked, the Project scope is granted, the
-time entry is deleted at once, --with-items, --with-invoices and --with-approved-invoice are given, the invoice has a
-Number and, for the approved one, Gorelo has pushed it to the accounting system by the first get_invoice). What varies: the
+time entry is deleted at once, --with-items, --with-invoices, --with-custom-assets, --with-custom-properties and
+--with-approved-invoice are given, the invoice has a Number and, for the approved one, Gorelo has pushed it to the
+accounting system by the first get_invoice). What varies: the
 three lookups come with the first area that needs them (--only comments or time starts with them and the plain
-ticket; --only projects sends them, and the test client's location, right after its two scope probes); get_ticket by number
+ticket; --only projects sends them, and the test client's location, right after its two scope probes, which is why the
+projects list above names them with the note that an earlier area of the same run has read them already, and a full run
+sends the other twelve requests of that area only); get_ticket by number
 or display number is tried up to 3 times; delete_time_entry repeats while Outcome is Reopened (the cleanup tries
 again up to 3 times if it never turns Deleted); search_tickets reads every page and adds a second search by run id
 when a big client truncates it; a rejected approver ends the email area after its POST (no GET, no approval
@@ -286,7 +345,12 @@ comment), and so do stored approvers that are not only the operator contact afte
 an audience the matrix did not ask for (or a read-back that failed) ends its area right after that ticket's GET;
 without the Project scope the projects area is its first two requests; the items, invoices and approved_invoice areas
 send nothing at all unless --with-items, respectively --with-invoices or --with-approved-invoice, is given (the
-custom_assets area likewise, unless --with-custom-assets is given); with
+custom_assets area likewise, unless --with-custom-assets is given, and the custom_properties area unless
+--with-custom-properties is given); the custom_properties area is its first request only (a skip, with the reason, and
+nothing written) when the test client has no custom field, when any of its custom fields is set or when none of them is an
+unset text field, and a set that Gorelo's answer does not confirm (or after which another custom field reads differently) ends it
+right after that PATCH (the cleanup then reads the client and clears the field it recorded: its own GET, then the GET, the
+PATCH and the second GET of update_client); with
 --with-invoices and no usable catalog item the invoices area is its first request; the two list_invoices checks of that
 area and delete_invoice's lookup by its
 Number are tried up to 3 times, like the ticket lookups, because a search can lag behind a write; an invoice that
@@ -338,16 +402,28 @@ itself and the second in its leftover text and in the help of --void-approved; e
 command (the area's FAIL for an invoice that never synced or has no Number, and the summary's line for an Approved invoice
 left over) ends with the second. Exit status 0 only when no area FAILED, nothing is left over (a known undeletable record,
 an attachment file or a voided invoice, is not a leftover) and the guard refused nothing; a skipped area (scope missing,
---skip-email, items without --with-items, custom_assets without --with-custom-assets, invoices without --with-invoices, approved_invoice without
+--skip-email, items without --with-items, custom_assets without --with-custom-assets, custom_properties without
+--with-custom-properties, while a custom field of the test client is set or with no unset text field to use, invoices without
+--with-invoices, approved_invoice without
 --with-approved-invoice, a precondition of the approved invoice that does not hold) is not a failure; 1 otherwise; 2 for a
 usage or setup error (an unknown area, --with-approved-invoice without --only approved_invoice or beside another flag, no
 API key, a tool the matrix calls that the server would not offer); 130 when interrupted (the cleanup has run by then).
-Output holds ids and Gorelo's messages only, never customer data and never the API key.
+A custom field value the run set on the test client and the cleanup could not clear is a LEFTOVER (exit status 1): the summary
+names the custom field Id and the client and says how to clear it, and its line depends on the kind of leftover: the field may
+still hold the run id (run the cleanup again, or clear it in the Gorelo app), another custom field of the client is set so the
+cleanup sent no write (clear the field in the Gorelo app), or other custom fields read differently after the clear (their ids,
+to be checked in the Gorelo app; no re-run is advised, and the cleanup reports them until they are acknowledged).
+Output holds ids and Gorelo's messages only, never customer data and never the API key. The text of an update_client error that
+a summary prints has its quoted strings cut out ("..."), because that tool quotes the name and the previous value of a custom field
+in its error for fields that changed without being sent (_env.without_quotes).
 
 Safety nets besides the guard: the matrix may call only the tools in MATRIX_TOOLS (no post_alert, no
 create_approved_invoice; the three item tools only with --with-items; the three custom asset tools only with
 --with-custom-assets; list_items, list_invoices, get_invoice,
-create_invoice, export_invoice_pdf and delete_invoice only with --with-invoices). With --with-approved-invoice the run
+create_invoice, export_invoice_pdf and delete_invoice only with --with-invoices). The custom_properties area needs no tool of
+its own (get_client and update_client are in MATRIX_TOOLS); what stops update_client from changing the test client in any
+other run is the guard: it refuses every PATCH of the test client unless it is built with allow_custom_properties
+(--with-custom-properties) and the body is one recorded custom field (a field whose record is cleaned takes the null only). With --with-approved-invoice the run
 may call ONLY APPROVED_INVOICE_TOOLS (create_approved_invoice, get_invoice, list_invoices, delete_invoice, list_items,
 list_contacts, list_client_locations) and its guard is built with allow_approved_invoice; create_approved_invoice is
 named nowhere else in this module. That run also switches off the 429 retries of its Gorelo client around the create call
@@ -375,11 +451,13 @@ from typing import Any
 from fastmcp import Client
 
 from gorelo_client import GoreloClient
-from scripts.live._env import EnvError, Pacer, live_settings, scrub
+from scripts.live._env import EnvError, Pacer, live_settings, scrub, without_quotes
 from scripts.live.cleanup import (
     CUSTOM_ASSET_CLIENT_UNKNOWN,
     CUSTOM_ASSET_RESIDUE,
+    CHANGED_FIELDS,
     custom_asset_residue,
+    custom_property_leftover_kind,
     MAX_REOPEN_ATTEMPTS,
     NO_SUCH_NUMBER,
     PACE_SECONDS,
@@ -387,11 +465,22 @@ from scripts.live.cleanup import (
     VOID_REMINDER,
     VOID_RESIDUE,
     CleanupReport,
+    changed_fields_of,
     run_cleanup,
+    shown_ids,
 )
-from scripts.live.guard import LiveGuard
+from scripts.live.guard import CUSTOM_PROPERTY_UNKNOWN_ID, LiveGuard
 from scripts.live.manifest import Manifest
-from scripts.live.smoke import GuardTripped, ToolFailed, ToolSession, emit, quiet_logs
+from scripts.live.smoke import (
+    GuardTripped,
+    ShapeError,
+    ToolFailed,
+    ToolSession,
+    custom_properties_of,
+    emit,
+    is_text_field,
+    quiet_logs,
+)
 from scripts.live import guard as live_guard
 from scripts.site_config import SITE, SiteConfigError, site
 from server import build_server
@@ -433,6 +522,13 @@ CUSTOM_ASSETS_AREA = "custom_assets"
 CUSTOM_ASSET_IP = "192.0.2.10"
 CUSTOM_ASSET_IP_CHANGED = "192.0.2.11"
 CUSTOM_ASSET_WARRANTY_DAYS = 365
+# Why the custom_properties area does not run by default (it is also the area's detail in the summary).
+CUSTOM_PROPERTIES_SKIP_REASON = (
+    "not live-tested by default: sets one custom field value on the test client itself and clears it again, the one write "
+    "the live guard otherwise never allows on that client"
+)
+CUSTOM_PROPERTIES_AREA = "custom_properties"
+FIELDS_SHOWN = 8  # custom fields (or, for the set ones, Ids) named in the reason of a skip; the area's note names all of them
 # Why the invoices area does not run by default (it is also the area's detail in the summary).
 INVOICES_SKIP_REASON = (
     "not live-tested by default: creates and deletes a Draft invoice on the test client, which uses up one invoice number"
@@ -959,6 +1055,7 @@ class Matrix:
         sync_polls: int = SYNC_POLLS,
         gorelo: GoreloClient | None = None,
         with_custom_assets: bool = False,
+        with_custom_properties: bool = False,
     ) -> None:
         if with_approved_invoice and gorelo is None:  # the one create is sent with 429 retries off: the client must be reachable
             raise SetupError(
@@ -977,6 +1074,7 @@ class Matrix:
         self.with_invoices = with_invoices
         self.with_approved_invoice = with_approved_invoice
         self.with_custom_assets = with_custom_assets
+        self.with_custom_properties = with_custom_properties
         self.sync_interval = sync_interval
         self.sync_polls = sync_polls
         self.gorelo = gorelo  # only the approved invoice run holds it (see without_429_retries)
@@ -1746,6 +1844,222 @@ async def area_custom_assets(m: Matrix) -> None:
     )
 
 
+def client_fields(record: dict[str, Any], tool: str) -> list[dict[str, Any]]:
+    """The CustomProperties of the client record that `tool` answered, checked entry by entry with the smoke's shape check
+    (custom_properties_of): a record that does not carry them as the contract says is API drift, a failed check."""
+    try:
+        return custom_properties_of(record)
+    except ShapeError as exc:
+        raise CheckFailed(f"{tool}: {exc}") from None
+
+
+def field_of(record: dict[str, Any], field_id: int, tool: str) -> dict[str, Any]:
+    """The entry for custom field `field_id` in the CustomProperties of `record`: exactly one, else CheckFailed."""
+    found = [entry for entry in client_fields(record, tool) if entry["Id"] == field_id]
+    if len(found) != 1:
+        raise CheckFailed(f"{tool}: CustomProperties has {len(found)} entries for custom field {field_id}, expected exactly 1")
+    return found[0]
+
+
+def check_field_set(record: dict[str, Any], field_id: int, text: str, tool: str) -> None:
+    """The custom field reads as saved with the text the run sent: IsSet true and Value equal to it (a text field shows what was
+    sent). A wrong Value is described by its kind only: it may be somebody else's text."""
+    entry = field_of(record, field_id, tool)
+    expect(f"{tool} custom field {field_id} IsSet", entry["IsSet"], True)
+    if entry["Value"] != text:
+        raise CheckFailed(f"{tool} custom field {field_id} Value: expected the text the run sent, got {field_kind(entry['Value'])}")
+
+
+def check_field_cleared(record: dict[str, Any], field_id: int, text: str, tool: str) -> None:
+    """The custom field reads as not set: IsSet false, and a Value that is not the run's text any more (it is the field's default,
+    or null)."""
+    entry = field_of(record, field_id, tool)
+    expect(f"{tool} custom field {field_id} IsSet", entry["IsSet"], False)
+    if entry["Value"] == text:
+        raise CheckFailed(f"{tool} custom field {field_id}: IsSet is false but Value still shows the text the run sent")
+
+
+def unset_text_field(fields: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The custom field the area writes: among the fields that are not set (IsSet exactly false) and whose Type.Name contains
+    "text", the one with the lowest Id whose Value is not null (an unset field shows its default as its Value, so a clear can
+    restore it); only when none has a default, the one with the lowest Id. None when there is no unset text field."""
+    candidates = [entry for entry in fields if entry["IsSet"] is False and is_text_field(entry)]
+    pool = [entry for entry in candidates if entry.get("Value") is not None] or candidates
+    return min(pool, key=lambda entry: entry["Id"]) if pool else None
+
+
+def pick_reason(chosen: dict[str, Any]) -> str:
+    """Which case of unset_text_field's rule applied, for the note (kinds only, never the default itself)."""
+    if chosen.get("Value") is not None:
+        return "it has a default (its Value is not null), so a clear can restore it: the lowest Id among such fields"
+    return (
+        "no unset text field has a default, so it is the lowest Id; a required field cannot be cleared back to nothing and "
+        "would stay set (a leftover)"
+    )
+
+
+def describe_fields(fields: list[dict[str, Any]], limit: int | None = FIELDS_SHOWN) -> str:
+    """Each custom field as "Id (Type.Name, IsSet true|false)", at most `limit` of them (all when None): ids and kinds, never a
+    value. The reason of a skip is cut at DETAIL_LIMIT characters, so it names the first FIELDS_SHOWN and counts the rest."""
+    shown = [
+        f"{entry['Id']} ({entry['Type']['Name']}, IsSet {str(entry['IsSet']).lower()})"
+        for entry in (fields if limit is None else fields[:limit])
+    ]
+    more = f" and {len(fields) - limit} more" if limit is not None and len(fields) > limit else ""
+    return ", ".join(shown) + more
+
+
+def describe_ids(ids: list[int], limit: int = FIELDS_SHOWN) -> str:
+    """Custom field Ids for a reason: the first `limit` of them and how many more there are."""
+    more = f" and {len(ids) - limit} more" if len(ids) > limit else ""
+    return ", ".join(str(ident) for ident in ids[:limit]) + more
+
+
+FieldStates = dict[int, tuple[bool, str | None]]
+
+
+def field_states(fields: list[dict[str, Any]]) -> FieldStates:
+    """{Id: (IsSet, Value)} of a CustomProperties list that client_fields has already checked (every Id once)."""
+    return {entry["Id"]: (entry["IsSet"], entry["Value"]) for entry in fields}
+
+
+def require_fields_as_before(
+    first: FieldStates, record: dict[str, Any], chosen: int, state: tuple[bool, str | None], tool: str, client: int
+) -> None:
+    """Every custom field of `record` reads as at the area's first read, except the chosen one, which reads as `state`.
+
+    A field with another IsSet or Value, one that is no longer listed and one that is new all count. The failure names the
+    Ids only, never a name or a value, and tells the operator to check them in the Gorelo app. This is what makes an update
+    that Gorelo applied as a replace (or any other write to a field the area did not send) a failure and never a pass."""
+    wanted = {**first, chosen: state}
+    now = field_states(client_fields(record, tool))
+    changed = sorted(ident for ident in wanted.keys() | now.keys() if wanted.get(ident) != now.get(ident))
+    if changed:
+        raise CheckFailed(
+            f"{tool}: custom field(s) {describe_ids(changed)} of client {client} do not read as at the first read of this run "
+            "(IsSet, Value or presence changed); check them in the Gorelo app"
+        )
+
+
+async def refuse_unknown_field(m: Matrix, client: int, text: str) -> str:
+    """The negative check: update_client with an Id that is not a client custom field must be refused LOCALLY by the tool.
+
+    The tool reads the client first and refuses an Id that client does not list before it sends anything (no PATCH, and no
+    second read), so the one request of the call is that GET and the guard lets no write through (guard.writes_allowed does
+    not move). It passes only on that
+    refusal: a ToolFailed with no HTTP status that names the Id, one request, no write. Anything else is a CheckFailed saying
+    what happened: another error (the read failed, a timeout, an HTTP answer), no request at all, a write that was let
+    through, or a success. A PATCH that carries the Id never reaches Gorelo: the guard refuses it (GuardTripped, which stops
+    the run), because the Id is not a field the run recorded. Returns the words for the note."""
+    unknown = CUSTOM_PROPERTY_UNKNOWN_ID
+    requests, writes = m.pacer.requests, m.guard.writes_allowed
+    try:
+        await m.tool("update_client", client_id=client, custom_properties=[{"id": unknown, "value": text}])
+    except ToolFailed as exc:
+        sent, wrote = m.pacer.requests - requests, m.guard.writes_allowed - writes
+        if wrote:
+            raise CheckFailed(
+                f"update_client with an Id that is not a client custom field let {wrote} write request(s) through to Gorelo; look at "
+                f"client {client} in the Gorelo app for a custom value of {text!r}"
+            ) from None
+        if exc.status is None and sent == 1 and str(unknown) in exc.text:
+            return "the tool refused it itself after reading the client: its one request was that GET, no PATCH was sent"
+        status = f"HTTP {exc.status}" if exc.status is not None else "no HTTP answer"
+        raise CheckFailed(
+            "update_client with an Id that is not a client custom field was not refused locally after one GET and before any "
+            f"PATCH, so the negative check did not pass ({sent} request(s), {status}): {without_quotes(exc.text)[:180]}"
+        ) from None
+    raise CheckFailed(
+        f"update_client ACCEPTED custom field {unknown}, which is not a client custom field (a PATCH reached Gorelo): look at "
+        f"client {client} in the Gorelo app for a custom value of {text!r}"
+    )
+
+
+async def area_custom_properties(m: Matrix) -> None:
+    """One custom field value on the test client: set, read, cleared, read, and a negative check with an Id that is no client field.
+
+    The one area that writes to the test client ITSELF (every other area creates records of its own), so it is opt-in
+    (--with-custom-properties), it runs only while no custom field of the test client is set (an update that Gorelo applied as
+    a replace would otherwise destroy values), it uses nothing but a text field with no saved value, and
+    the field is recorded in the manifest BEFORE the first write: that record is what the guard insists on for every write and
+    what the cleanup undoes if the run stops after the set and before the clear. After every answer and every fresh read the
+    other custom fields must read exactly as at the first read (require_fields_as_before)."""
+    if not m.with_custom_properties:  # nothing is announced or sent, not even a read: the area is not touched without the flag
+        raise Skipped(CUSTOM_PROPERTIES_SKIP_REASON)
+    client = SITE.test_client
+    fields = client_fields(await m.tool("get_client", client_id=client), "get_client")
+    if not fields:
+        raise Skipped("no client custom fields are defined (get_client of the test client lists none); nothing was written")
+    held = sorted(entry["Id"] for entry in fields if entry["IsSet"] is not False)
+    if held:
+        m.note("custom fields of the test client (Id, Type, IsSet): " + describe_fields(fields, None))  # all of them, never cut
+        raise Skipped(
+            f"custom field(s) {describe_ids(held)} of the test client are set (IsSet true), so nothing was written: the area runs "
+            "only while none is, so that an update applied as a replace would have nothing to destroy"
+        )
+    chosen = unset_text_field(fields)
+    if chosen is None:
+        m.note("custom fields of the test client (Id, Type, IsSet): " + describe_fields(fields, None))  # all of them, never cut
+        raise Skipped(
+            "no custom field of the test client is an unset text field, so nothing was written; its fields (Id, Type, IsSet): "
+            + describe_fields(fields)
+        )
+    field_id, text = chosen["Id"], m.manifest.run_id
+    if CUSTOM_PROPERTY_UNKNOWN_ID in {entry["Id"] for entry in fields}:  # the negative check must name an Id no field has
+        raise CheckFailed(
+            f"custom field {CUSTOM_PROPERTY_UNKNOWN_ID}, the Id the negative check sends, is a client custom field here; "
+            "nothing was written"
+        )
+    first = field_states(fields)  # {Id: (IsSet, Value)} before the run wrote anything: what every later read is compared with
+    try:  # BEFORE the first write: the guard refuses any write to a field the manifest does not record as unset
+        m.manifest.created(
+            "custom_property",
+            field_id,
+            m.manifest.label(f"custom property {field_id}"),
+            {
+                "client_id": client,
+                "name": chosen["Name"],
+                "type": chosen["Type"]["Name"],
+                "was_set": False,
+                "value": text,
+                "value_before": chosen["Value"],
+            },
+        )
+    except ValueError as exc:
+        raise CheckFailed(f"custom field {field_id} cannot be recorded in the manifest ({exc}); nothing was written") from None
+    m.note(
+        f"custom field {field_id} (Type {chosen['Type']['Name']!r}) of client {client}: unset before the run and picked because "
+        f"{pick_reason(chosen)}; recorded in the manifest before the first write"
+    )
+
+    saved = await m.tool("update_client", client_id=client, custom_properties=[{"id": field_id, "value": text}])
+    check_field_set(saved, field_id, text, "update_client")
+    require_fields_as_before(first, saved, field_id, (True, text), "update_client", client)
+    fresh = await m.tool("get_client", client_id=client)
+    check_field_set(fresh, field_id, text, "get_client after the set")
+    require_fields_as_before(first, fresh, field_id, (True, text), "get_client after the set", client)
+
+    cleared = await m.tool("update_client", client_id=client, clear_custom_property_ids=[field_id])
+    check_field_cleared(cleared, field_id, text, "update_client (clear)")
+    require_fields_as_before(first, cleared, field_id, first[field_id], "update_client (clear)", client)
+    after = await m.tool("get_client", client_id=client)
+    check_field_cleared(after, field_id, text, "get_client after the clear")
+    require_fields_as_before(first, after, field_id, first[field_id], "get_client after the clear", client)
+    m.mark_cleaned("custom_property", field_id, "cleared by the write matrix (update_client clear_custom_property_ids)")
+    m.note(
+        f"custom field {field_id}: set to the run id, read, cleared, read; the other {len(first) - 1} custom field(s) read as at the "
+        "first read after every step"
+    )
+
+    outcome = await refuse_unknown_field(m, client, text)
+    last = await m.tool("get_client", client_id=client)
+    require_fields_as_before(first, last, field_id, first[field_id], "get_client after the negative check", client)
+    m.note(
+        f"negative check, update_client with the Id {CUSTOM_PROPERTY_UNKNOWN_ID}, which is not a client custom field: {outcome}; "
+        f"the last read shows the same {len(first)} custom fields as the first"
+    )
+
+
 async def area_invoices(m: Matrix) -> None:
     """A Draft invoice for the test client, created, read, listed, exported as a PDF and deleted again.
 
@@ -2129,6 +2443,14 @@ async def area_projects(m: Matrix) -> None:
     if type_id is None:
         raise Skipped("the tenant has no project type to create a project with")
     label = m.manifest.label("project")
+    # What this area can set off, per the create_project and create_project_task texts and the spec: the
+    # project-created notification of the app fires on a plain create_project (Gorelo does not say who receives it; the group is
+    # the Everyone group), and creating a task fires the same automation triggers as in the app. The only documented way to
+    # suppress both is created_on (a backdated import), which this area does not send: it exercises the plain tools.
+    m.note(
+        "create_project sends no created_on, so the project-created notification of the app fires (Gorelo does not say who "
+        "receives it) and creating the task fires the app's automation triggers; the comment is private and emails nobody"
+    )
     project = full(
         await m.create(
             "project",
@@ -2218,6 +2540,7 @@ AREAS: tuple[Area, ...] = (
     Area("time", area_time),
     Area("items", area_items),
     Area(CUSTOM_ASSETS_AREA, area_custom_assets),
+    Area(CUSTOM_PROPERTIES_AREA, area_custom_properties),
     Area("invoices", area_invoices),
     Area(APPROVED_INVOICE_AREA, area_approved_invoice),
     Area("uptime", area_uptime),
@@ -2259,7 +2582,8 @@ def select_areas(only: Sequence[str] | None, skip_email: bool, with_approved_inv
 @dataclass
 class AreaResult:
     """status: pass, FAIL, skipped (scope missing, no run ticket, items without --with-items, custom_assets without
-    --with-custom-assets, invoices without
+    --with-custom-assets, custom_properties without --with-custom-properties, while a custom field of the test client is set or
+    with no unset text field to use, invoices without
     --with-invoices, approved_invoice without --with-approved-invoice or with a precondition that does not hold, no
     catalog item or project type to use) or not run (the run stopped after a guard refusal)."""
 
@@ -2284,6 +2608,8 @@ async def _run_area(matrix: Matrix, area: Area) -> AreaResult:
         status, detail, tripped = "FAIL", f"the guard refused a request, the run stops: {exc}", True
     except (ToolFailed, CheckFailed) as exc:
         status, detail = "FAIL", str(exc)
+        if isinstance(exc, ToolFailed) and exc.tool == "update_client":  # its alarm for other custom fields quotes names and values
+            detail = without_quotes(detail)
     except Exception as exc:
         status, detail = "FAIL", f"{type(exc).__name__}: {exc}"
     if len(matrix.guard.violations) > refused and not tripped:
@@ -2296,6 +2622,31 @@ async def _run_area(matrix: Matrix, area: Area) -> AreaResult:
         notes=list(matrix.notes),
         requests=matrix.pacer.requests - requests,
         tripped=tripped,
+    )
+
+
+def custom_property_summary(record: Any, run_id: str, manifest_path: str) -> str:
+    """The summary line for a custom_property record that is left over, by the kind of leftover (custom_property_leftover_kind):
+    other custom fields changed while the cleanup cleared the run's field (their ids, and no re-run as the advice), the cleanup
+    sent nothing because another custom field of the test client is set, or the field may still hold the run's text."""
+    client, ident = record.details.get("client_id"), record.id
+    kind = custom_property_leftover_kind(record)
+    if kind == "changed":
+        return (
+            f"custom field(s) {shown_ids(changed_fields_of(record.details))} of client {client} read differently after the run's "
+            f"field {ident} was cleared: check them in the Gorelo app; python -m scripts.live.cleanup {manifest_path} reports "
+            f'them again until "{CHANGED_FIELDS}" is deleted from custom property {ident} in that manifest'
+        )
+    if kind == "others_set":
+        return (
+            f"a custom field value is left over: custom property {ident} of client {client} still holds {run_id}, and other "
+            f"custom fields of that client are set, so the cleanup sends no write: clear custom property {ident} in the Gorelo app, "
+            f"then run python -m scripts.live.cleanup {manifest_path} to close the record"
+        )
+    return (
+        f"a custom field value is left over: custom property {ident} of client {client} may still hold {run_id}; run python -m "
+        f"scripts.live.cleanup {manifest_path} (it clears the field only while it still holds that text), or clear it in the "
+        "Gorelo app"
     )
 
 
@@ -2369,6 +2720,9 @@ class MatrixReport:
                     "an Approved invoice is left over: check the accounting system, then void it with: "
                     f"python -m scripts.live.cleanup {self.manifest_path} --void-approved ({VOID_COMMAND_NOTE})"
                 )
+            for record in leftovers:  # a value the run set on the test client itself and could not clear: say where, and how
+                if record.kind == "custom_property":
+                    lines.append(custom_property_summary(record, self.run_id, self.manifest_path))
         for asset in self.assets:  # a custom asset cannot be deleted through the API: the operator removes it by hand
             lines.append(f"reminder: custom asset {asset} {custom_asset_residue(self.asset_clients.get(asset))}")
         for name in self.voided:  # the last thing said before the result: an invoice voided in Gorelo may still be open in Xero
@@ -2419,6 +2773,7 @@ async def run_matrix(
     with_invoices: bool = False,
     with_approved_invoice: bool = False,
     with_custom_assets: bool = False,
+    with_custom_properties: bool = False,
     settings: Settings | None = None,
     transport: Any = None,
     pace: float = PACE_SECONDS,
@@ -2441,6 +2796,13 @@ async def run_matrix(
                  tools cannot be called. The asset it creates cannot be deleted through the API: the cleanup reports it as a
                  known residue and the summary tells the operator to remove it in the Gorelo app. Not allowed beside
                  with_approved_invoice (that run takes no other flag).
+    with_custom_properties run the custom_properties area (--with-custom-properties). Without it the area is skipped with
+                 CUSTOM_PROPERTIES_SKIP_REASON, also when it was selected with areas=["custom_properties"], and nothing is sent
+                 for it (not even a read). It sets one unset text custom field of the TEST CLIENT itself to the run id and clears it
+                 again, so it is the one area behind a guard that allows a PATCH of the test client (allow_custom_properties); it
+                 runs only while no custom field of the test client is set, and every other field must read as at the first read
+                 after each step; the field is recorded in the manifest before the first write and the cleanup clears it if the
+                 run stopped in between. Not allowed beside with_approved_invoice (that run takes no other flag).
     with_invoices run the invoices area (--with-invoices). Without it the area is skipped with INVOICES_SKIP_REASON,
                  also when it was selected with areas=["invoices"], and the six invoice tools cannot be called.
     with_approved_invoice run the approved_invoice area (--with-approved-invoice), which approves one $1 invoice on
@@ -2471,7 +2833,8 @@ async def run_matrix(
             flag
             for flag, given in (
                 ("--with-items", with_items), ("--with-invoices", with_invoices),
-                ("--with-custom-assets", with_custom_assets), ("--leftovers", leftovers),
+                ("--with-custom-assets", with_custom_assets), ("--with-custom-properties", with_custom_properties),
+                ("--leftovers", leftovers),
                 ("--skip-email", skip_email),
             )
             if given
@@ -2489,7 +2852,7 @@ async def run_matrix(
     echo("areas: " + ", ".join(area.key for area in selected))
     guard = LiveGuard(
         "write", manifest, require_intents=True, allow_approved_invoice=with_approved_invoice,
-        allow_custom_assets=with_custom_assets,
+        allow_custom_assets=with_custom_assets, allow_custom_properties=with_custom_properties,
     )
     pacer = Pacer(pace)
     hooks = {"request": [guard, pacer]}
@@ -2518,6 +2881,7 @@ async def run_matrix(
                     with_invoices=with_invoices,
                     with_approved_invoice=with_approved_invoice,
                     with_custom_assets=with_custom_assets,
+                    with_custom_properties=with_custom_properties,
                     sync_interval=sync_interval,
                     sync_polls=sync_polls,
                     gorelo=gorelo,
@@ -2580,7 +2944,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--only",
         metavar="AREA,...",
-        help="run only these areas, in the matrix order: " + ", ".join(area.key for area in AREAS),
+        help="run only these areas, in the matrix order: " + ", ".join(area.key for area in AREAS)
+        + ". 'forms' is another name for 'projects': the Forms scope is only probed there, and the area WRITES a project, a "
+        "section, a task and a private task comment on the test client (the project-created notification of the app may fire)",
     )
     parser.add_argument(
         "--leftovers",
@@ -2599,6 +2965,14 @@ def main(argv: list[str] | None = None) -> int:
         help="also run the custom_assets area (creates and updates ONE custom asset on the test client, which CANNOT be deleted "
         "through the API: it stays there until removed in the Gorelo app); without it the area is skipped, also under "
         "--only custom_assets",
+    )
+    parser.add_argument(
+        "--with-custom-properties",
+        action="store_true",
+        help="also run the custom_properties area (sets one unset text custom field of the test client ITSELF to the run id and "
+        "clears it again: the one write the live guard allows on that client; it runs only while no custom field of that client "
+        "is set; the field is recorded before the first write and the cleanup clears it if the run stops in between); without "
+        "it the area is skipped, also under --only custom_properties",
     )
     parser.add_argument(
         "--with-invoices",
@@ -2624,6 +2998,7 @@ def main(argv: list[str] | None = None) -> int:
                 with_invoices=args.with_invoices,
                 with_approved_invoice=args.with_approved_invoice,
                 with_custom_assets=args.with_custom_assets,
+                with_custom_properties=args.with_custom_properties,
             )
         )
     except UsageError as exc:

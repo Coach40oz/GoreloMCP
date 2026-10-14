@@ -7672,7 +7672,7 @@
           "Projects"
         ],
         "summary": "Creates a project for the authenticated service provider.",
-        "description": "The project is created in the `NotStarted` status and numbered from the same sequence\r\nthe app uses, so its number and prefix match what the app would have given it. The same\r\ncreation timeline entry and the same project-created notification fire as when a project\r\nis created in the app.\r\n            \r\nGroups are given as `GroupId` **or** `GroupIds` - exactly one of the two, and\r\nsending both is a 400 rather than a silent choice between them.",
+        "description": "The project is created in the `NotStarted` status and numbered from the same sequence\r\nthe app uses, so its number and prefix match what the app would have given it. The same\r\ncreation timeline entry and the same project-created notification fire as when a project\r\nis created in the app.",
         "operationId": "post_v1_projects",
         "requestBody": {
           "description": "Project details.",
@@ -14476,6 +14476,13 @@
       "ClientResponse": {
         "type": "object",
         "properties": {
+          "CustomProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomPropertyValue"
+            },
+            "description": "Every custom field the service provider has defined for clients, with its effective value\r\non this client (saved, else the field's default, else null) and `IsSet` saying whether\r\na value is saved. Empty only when no custom fields are defined."
+          },
           "Id": {
             "type": "integer",
             "description": "Client identifier.",
@@ -14522,7 +14529,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "A single client, as returned by `GET /v1/clients/{clientId}`, `POST` and `PATCH`.\r\nTimestamps are UTC."
+        "description": "A single client, as returned by `GET /v1/clients/{clientId}`, `POST` and `PATCH`: the\r\nlist shape plus its custom properties, which the list deliberately leaves out.\r\nTimestamps are UTC."
       },
       "ClientResponseBaseResponse": {
         "type": "object",
@@ -17800,6 +17807,55 @@
         },
         "additionalProperties": false
       },
+      "CustomPropertyUpdate": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "integer",
+            "description": "Identifier of the custom field to set.",
+            "format": "int64"
+          },
+          "Value": {
+            "type": "string",
+            "description": "New value to save. `null` clears the saved value, so the field falls back to its default\r\n(which may itself be empty); an empty string saves an empty value. Either is rejected with a\r\n400 on a required field when it would leave the field with no value.",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "A single custom-field value to set on a PATCH body. Identified by `Id` only;\r\na custom field not present in the array is left untouched."
+      },
+      "CustomPropertyValue": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "integer",
+            "description": "Custom field identifier.",
+            "format": "int64"
+          },
+          "Variable": {
+            "type": "string",
+            "description": "The field's variable name, returned raw with no prefix."
+          },
+          "Name": {
+            "type": "string",
+            "description": "Custom field display name."
+          },
+          "Type": {
+            "$ref": "#/components/schemas/CodeModel"
+          },
+          "Value": {
+            "type": "string",
+            "description": "The field's effective value, as the app shows it: the value saved on this record, else the\r\nfield's default, else null. Always a string regardless of Type.",
+            "nullable": true
+          },
+          "IsSet": {
+            "type": "boolean",
+            "description": "True when a value is saved on this record; false when `Value` is the field's default\r\n(or null). A saved value that happens to equal the default is still true."
+          }
+        },
+        "additionalProperties": false,
+        "description": "A custom field's value on a device or client."
+      },
       "DeleteAgentResult": {
         "type": "object",
         "properties": {
@@ -18703,6 +18759,13 @@
       "DeviceResponse": {
         "type": "object",
         "properties": {
+          "CustomProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomPropertyValue"
+            },
+            "description": "Every custom field the service provider has defined for devices, with its effective value\r\non this device (saved, else the field's default, else null) and `IsSet` saying whether\r\na value is saved. Empty only when no custom fields are defined."
+          },
           "Id": {
             "type": "string",
             "description": "Device identifier.",
@@ -18869,7 +18932,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "A single agent, as returned by `GET /v1/assets/agents/{deviceId}`. Timestamps are UTC."
+        "description": "A single agent, as returned by `GET /v1/assets/agents/{deviceId}`: the list shape plus its\r\ncustom properties, which the list leaves out. Timestamps are UTC."
       },
       "DeviceResponseBaseResponse": {
         "type": "object",
@@ -23193,6 +23256,14 @@
           "AlternateName": {
             "type": "string",
             "description": "New alternate / trading name. Leave null to keep the current value. Maximum 500 characters.",
+            "nullable": true
+          },
+          "CustomProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomPropertyUpdate"
+            },
+            "description": "Custom field values to upsert. Identified by `Id`\r\n(the custom field id) only - an entry present updates that field's value, one absent from the array\r\nis left untouched, and omitting `CustomProperties` entirely leaves all custom properties\r\nuntouched. A `null``Value` clears the saved value so the field falls back to its\r\ndefault; an empty string saves an empty value. On a required field, either is rejected when it\r\nwould leave the field with no value.",
             "nullable": true
           }
         },

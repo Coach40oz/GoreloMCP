@@ -47,8 +47,23 @@ The guard and cleanup read these `details` keys, so the harness must record them
                        only with --void-approved. A voided invoice cannot be removed: it stays listed as Void, its
                        outcome ends with "(still listed as Void)", and cleanup counts it as a known residue (neither
                        cleaned nor a leftover), like an uploaded file
+    custom_property    the custom field value that the write matrix's custom_properties area sets on the test client and clears
+                       again. The record is not a create: the id is the custom field's Id (a positive integer) and the
+                       record exists to say what the cleanup must undo, so it is written BEFORE the first write.
+                       details: client_id (the test client), name and type (the field's Name and Type.Name, for the
+                       reader), was_set (exactly the JSON false: the field was NOT set before the run; the guard refuses
+                       every write to a field whose record does not say so, and the cleanup touches only such a field),
+                       value (the text the run saves: the run id), and value_before (the Value the field showed at the
+                       run's first read: null, or the field's default text, which an unset field shows; the cleanup
+                       compares the field with it after a clear, and skips that comparison when a record lacks it).
+                       The cleanup clears the field only while it still shows that text and no other custom field of the
+                       client is set; a field it cannot clear stays a leftover that names the field and the client. Once
+                       the run has cleared the field the record is cleaned and a matrix guard takes no further write to it.
+                       A cleanup that saw OTHER custom fields change while it cleared the field adds changed_fields (the
+                       ids, a list of integers): the record stays a leftover and every later cleanup reports those ids
+                       again, until somebody deletes that entry from the manifest to acknowledge them
 
-`id` is an int for client, contact and time_entry, a UUID for ticket, comment, item, uptime, project,
+`id` is an int for client, contact, time_entry and custom_property, a UUID for ticket, comment, item, uptime, project,
 section, task, project_comment, invoice and custom_asset, and any short token for attachment, side_conversation and approval.
 Never put secrets in `details` (the manifest refuses keys that look like one). An uploaded attachment's url
 carries an access token: record its name, not its url.
@@ -86,6 +101,7 @@ KINDS: tuple[str, ...] = (
     "approval",
     "invoice",
     "custom_asset",
+    "custom_property",
 )
 # "int": a positive integer. "uuid": a UUID (stored lowercase, hyphenated). "any": either of those or a short token.
 ID_TYPES: dict[str, str] = {
@@ -105,6 +121,7 @@ ID_TYPES: dict[str, str] = {
     "approval": "any",
     "invoice": "uuid",
     "custom_asset": "uuid",
+    "custom_property": "int",
 }
 # the kinds of records that exist before a run (listed leftovers of earlier probes)
 LEFTOVER_KINDS = ("client", "contact")

@@ -4,7 +4,7 @@ Two layers:
 
 * Harness level (always runs): the area is driven against a scripted tool session (AssetSession) that sits in front of the
   REAL LiveGuard (write mode, require_intents=True, allow_custom_assets) and a real manifest. Nothing here depends on the
-  custom asset tools themselves: the session answers what coder A's tools answer (a row, or {Id, warning}) and turns each
+  custom asset tools themselves: the session answers what those tools answer (a row, or {Id, warning}) and turns each
   call into the request the tool would send, so the guard judges the real bodies.
 * End to end (runs once the three custom asset tools are registered): run_matrix against FakeGorelo extended with the
   custom asset routes, with the real tools, the real guard and the real cleanup.
@@ -49,7 +49,7 @@ LOCATION, HARDWARE = 9001, 42
 TOOLS_REGISTERED = {"list_custom_asset_hardware_types", "create_custom_asset", "update_custom_asset"} <= {
     spec.name for spec in REGISTRY.specs
 }
-needs_tools = pytest.mark.skipif(not TOOLS_REGISTERED, reason="the custom asset tools (coder A) are not registered yet")
+needs_tools = pytest.mark.skipif(not TOOLS_REGISTERED, reason="the custom asset tools are not registered yet")
 PASCAL = {
     "name": "Name", "client_id": "ClientId", "location_id": "LocationId", "hardware_type_id": "HardwareTypeId",
     "description": "Description", "contact_id": "ContactId", "warranty_end_date": "WarrantyEndDate",
@@ -449,9 +449,9 @@ def test_the_custom_asset_tools_are_named_apart_and_only_the_flag_opens_them():
     assert write_matrix.tools_for(False, False, True, True) == write_matrix.APPROVED_INVOICE_TOOLS
 
 
-def test_the_area_sits_between_items_and_invoices_and_is_selected_by_name():
+def test_the_area_sits_after_items_and_before_the_custom_properties_and_invoices_and_is_selected_by_name():
     keys = [area.key for area in write_matrix.AREAS]
-    assert keys.index("items") + 1 == keys.index("custom_assets") == keys.index("invoices") - 1
+    assert keys.index("items") + 1 == keys.index("custom_assets") == keys.index("custom_properties") - 1 == keys.index("invoices") - 2
     assert write_matrix.CUSTOM_ASSETS_AREA == "custom_assets"
     assert [a.key for a in write_matrix.select_areas(["custom_assets"], False)] == ["custom_assets"]
 
@@ -478,7 +478,7 @@ def test_the_command_line_has_the_flag_and_it_is_off_by_default(capsys):
 
 
 # --------------------------------------------------------------------------
-# End to end with the real tools (runs once coder A's tools are registered)
+# End to end with the real tools (runs once the custom asset tools are registered)
 # --------------------------------------------------------------------------
 
 
@@ -583,6 +583,10 @@ async def test_end_to_end_a_run_with_every_optional_area_but_the_approved_invoic
     fake = AssetsFake()
     report = await run(fake, with_items=True, with_invoices=True, with_custom_assets=True)
     assert report.ok, "\n".join(lines)
-    assert [r.status for r in report.results if r.area not in ("approved_invoice",)] == ["pass"] * (len(report.results) - 1)
+    # the approved invoice and the custom properties have flags of their own (the first one runs alone)
+    assert [r.status for r in report.results if r.area not in ("approved_invoice", "custom_properties")] == ["pass"] * (
+        len(report.results) - 2
+    )
+    assert results(report)["custom_properties"].status == "skipped"
     assert report.summary["undeletable"] == 2  # the uploaded file and the custom asset
     assert area_ops(fake, report)["custom_assets"] == GOLDEN_CUSTOM_ASSETS and GOLDEN["items"]

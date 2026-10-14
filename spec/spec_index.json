@@ -1,5 +1,5 @@
 {
- "contract_sha256": "bce2fad59937fd6f1cda91c27b9e4ee81fb6cf9d87de8b0680c2a8962cc64a41",
+ "contract_sha256": "1b1c0cec0e9ab1db09e5654e7b7ff9439cd8d14ff60006f6fda9228acde48614",
  "op_count": 103,
  "openapi": "3.0.1",
  "ops": {
@@ -2692,6 +2692,14 @@
      "BillingName": {
       "nullable": true,
       "type": "string"
+     },
+     "CustomProperties": {
+      "items": {
+       "ref": "CustomPropertyUpdate",
+       "type": null
+      },
+      "nullable": true,
+      "type": "array"
      },
      "Name": {
       "nullable": true,
@@ -6001,6 +6009,14 @@
      "format": "date-time",
      "nullable": true,
      "type": "string"
+    },
+    "CustomProperties": {
+     "items": {
+      "ref": "CustomPropertyValue",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
     },
     "Domains": {
      "items": {
@@ -9326,6 +9342,55 @@
    "required": [],
    "type": "object"
   },
+  "CustomPropertyUpdate": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Value": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "CustomPropertyValue": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "IsSet": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Type": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "Value": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Variable": {
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "DeleteAgentResult": {
    "additional_properties": false,
    "fields": {
@@ -10393,6 +10458,14 @@
      "format": "date-time",
      "nullable": false,
      "type": "string"
+    },
+    "CustomProperties": {
+     "items": {
+      "ref": "CustomPropertyValue",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
     },
     "Description": {
      "nullable": false,
@@ -15049,6 +15122,14 @@
      "nullable": true,
      "type": "string"
     },
+    "CustomProperties": {
+     "items": {
+      "ref": "CustomPropertyUpdate",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
     "Name": {
      "nullable": true,
      "type": "string"
@@ -16480,6 +16561,6 @@
    "type": "apiKey"
   }
  },
- "sha256": "929bcea8f9703221cff551b1185c0be3558e13171c550664ce3170ceb9c215d4",
+ "sha256": "2439fc166daff1df05c3f0b6e18611e3daf2d0330c1be68b7e9fa6038e51a24a",
  "source": "https://api.usw.gorelo.io/swagger/v1/swagger.json"
 }

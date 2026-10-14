@@ -1134,18 +1134,24 @@ def _param_for_property(prop: str | None, field_map: Mapping[str, str]) -> str |
 
 _PATH_SEGMENT = re.compile(r"([^\[\].]+)((?:\[\d*\])*)")
 _PATH_INDEX = re.compile(r"\[(\d*)\]")
+# An index of more than this many digits is not converted: no list has so many items, and int() refuses thousands of digits,
+# which would turn Gorelo's error into a crash. A name with such an index is kept as Gorelo wrote it.
+_PATH_INDEX_DIGITS_MAX = 18
 
 
 def _split_property(prop: str) -> list[tuple[str, list[int]]] | None:
     """Gorelo's PropertyName as [(name, [list indexes])], or None if it is not a dotted path with well formed
-    indexes. "Attachments[0].Url" -> [("Attachments", [0]), ("Url", [])]; an empty index "[]" carries no number."""
+    indexes (an index of more than 18 digits is not well formed: it is never converted).
+    "Attachments[0].Url" -> [("Attachments", [0]), ("Url", [])]; an empty index "[]" carries no number."""
     segments: list[tuple[str, list[int]]] = []
     for part in prop.split("."):
         match = _PATH_SEGMENT.fullmatch(part)
         if match is None:
             return None
-        indexes = [int(number) for number in _PATH_INDEX.findall(match.group(2)) if number]
-        segments.append((match.group(1), indexes))
+        numbers = [number for number in _PATH_INDEX.findall(match.group(2)) if number]
+        if any(len(number) > _PATH_INDEX_DIGITS_MAX for number in numbers):
+            return None
+        segments.append((match.group(1), [int(number) for number in numbers]))
     return segments
 
 

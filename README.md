@@ -1,6 +1,6 @@
 # Gorelo MCP server
 
-A self-hosted server that lets Claude (on claude.ai) work with your Gorelo PSA. You run it on a small Linux server of your own. Claude connects to it through a custom connector and gets tools for tickets, clients, contacts, assets (including custom assets), time entries, invoices and uptime checks, using the Gorelo Public API (`https://api.usw.gorelo.io/v1`). Projects and forms are available as optional extras. Your Gorelo API key stays on your server and is sent only to Gorelo's API.
+A self-hosted server that lets Claude (on claude.ai) work with your Gorelo PSA. You run it on a small Linux server of your own. Claude connects to it through a custom connector and gets tools for tickets, clients (including their custom fields), contacts, assets (including custom assets), time entries, invoices and uptime checks, using the Gorelo Public API (`https://api.usw.gorelo.io/v1`). Projects and forms are available as optional extras: they are off by default and need the `Project` and `Forms` scopes on your Gorelo API key. Your Gorelo API key stays on your server and is sent only to Gorelo's API.
 
 ## What you can ask Claude to do
 
@@ -9,14 +9,15 @@ A self-hosted server that lets Claude (on claude.ai) work with your Gorelo PSA. 
 - "Add a private note to ticket 1234 saying I called the client and left a voicemail."
 - "Log 45 minutes on ticket 1234 as remote support."
 - "Add a custom asset for Acme: the reception printer, serial number ABC123, at the main office."
+- "Show the custom fields of Acme, then set its Support plan field to Gold."
 - "List the contacts at Acme and tell me which ones have no phone number."
 - "Draft an invoice for Acme with two hours of remote support and one monthly backup item."
 - "Which of my uptime checks are failing right now?"
 - "Run health_check and tell me if the Gorelo connection is fine."
 
-## What's new
+## What's new in 1.2.0
 
-Version 1.1.0 adds custom assets (list, create, update) and follows Gorelo's API description of 2026-10-12. See [CHANGELOG.md](CHANGELOG.md).
+Version 1.2.0 adds custom fields. Claude can read the custom fields of a client (`get_client`) and of a device (`get_agent`), and set or clear the custom fields of a client (`update_client`). Gorelo's lists leave custom fields out, so Claude reads them from the single client or device. This version follows Gorelo's API description of 2026-10-14. Custom fields have not been tested against a live Gorelo account yet. Version 1.1.0 added custom assets (list, create, update). See [CHANGELOG.md](CHANGELOG.md).
 
 ## What it does not do, and how it stays safe
 

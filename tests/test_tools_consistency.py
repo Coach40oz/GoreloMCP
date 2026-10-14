@@ -105,7 +105,8 @@ EMAIL_ACTION = re.compile(r"\b(?<!secondary )(?:emails?|emailed|notify|notif\w+)
 
 # Every non-read tool whose text talks about emailing or notifying, with what it must say about who. A tool that
 # does not email says so ("emails nobody", "Nothing is emailed"); one that does names the recipients; one where
-# Gorelo documents a notification but no recipient says that Gorelo does not say who.
+# Gorelo documents a notification but no recipient says that Gorelo does not say who; one whose operation text is silent
+# about whether anything is sent (create_task_approval) says that Gorelo does not say, and has the model tell the user first.
 EMAIL_WHO = {
     "create_ticket": ("send_created_email=true also emails the contact", "may still notify contacts"),
     "update_ticket": ("a status change may email the contact",),
@@ -130,7 +131,14 @@ EMAIL_WHO = {
         "Tell the user who will be emailed before posting anything that is not private",
     ),
     "create_project_section": ("nothing is emailed",),
-    "create_task_approval": ("Nothing is emailed until a comment is posted into the approval",),
+    # The task approval operation text never says whether creating the approval notifies anyone (the "created
+    # empty, posting into it emails the approvers" text belongs to the TICKET approval operation), so the tool says that
+    # Gorelo does not say, makes the model tell the user first, and keeps the pointer to the approval comment
+    "create_task_approval": (
+        "Gorelo does not say whether creating it notifies the approvers",
+        "tell the user they may be notified before you create one",
+        'create_project_comment (task_id, conversation_type="approval", conversation_id = this Id), which emails the approvers',
+    ),
     "create_task_side_conversation": ("emails nobody", "Nothing is emailed until a comment is posted into it"),
     "post_alert": ("notify technicians",),
     # create_invoice (a Draft) and get/list tools never talk about email: a draft has no recipients parameter at all,
@@ -162,6 +170,20 @@ async def test_every_write_that_talks_about_email_or_notifications_says_who_gets
         description = flat(tools[name].description)
         for fragment in fragments:
             assert fragment in description, f"{name} must say {fragment!r}: {description}"
+
+
+async def test_create_task_approval_never_promises_that_creating_it_emails_nobody(server_factory):
+    # "The approval is created empty ... post into it afterwards ... which is also what sends the approvers their
+    # confirmation email" is the text of the TICKET approval operation only. The task operation says who may approve,
+    # that an ineligible contact is rejected, and that the task goes into a waiting-on-the-contact state; it says nothing
+    # about email, so this tool must not tell the model that nothing is sent (the model would pass that on to the user and
+    # then create an approval that may already notify the approvers). The sibling create_task_side_conversation keeps its
+    # "emails nobody": its operation text says the conversation "is created empty; its messages are posted afterwards".
+    tools = await all_tools(server_factory)
+    text = flat(tools["create_task_approval"].description)
+    assert not re.search(r"nothing is (?:emailed|sent)|emails nobody|\bempty\b|until a comment", text, re.IGNORECASE), text
+    assert text.index("Gorelo does not say whether creating it notifies the approvers") < text.index("which emails the approvers")
+    assert "emails nobody" in flat(tools["create_task_side_conversation"].description)
 
 
 # --------------------------------------------------------------------------

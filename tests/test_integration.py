@@ -254,15 +254,21 @@ async def test_destructive_tools_require_confirm_defaulting_to_false(server_fact
 async def test_default_tools_list_stays_within_budget(server_factory):
     tools_list = await list_tools(server_factory(toolsets=frozenset(DEFAULT_TOOLSETS), destructive=False))
     size = len(json.dumps([t.model_dump(mode="json", exclude_none=True) for t in tools_list]))
-    # Budget set from the measured size plus ~9% headroom, raised once for the three default tools
-    # contract e15cb5a18ec2 added; growth beyond it needs a deliberate bump, because every byte here is context
-    # claude.ai loads in every conversation that uses the connector.
+    # The budget sits about 1 percent above the size measured with the custom property texts (see the constant below). It
+    # was raised once for the three default tools contract e15cb5a18ec2 added and once more for the custom properties of
+    # contract 1b1c0cec0e9a; growth beyond it needs a deliberate bump, because every byte here is context claude.ai loads
+    # in every conversation that uses the connector.
     assert size < TOOLS_LIST_BUDGET_BYTES, size
 
 
-# The default tools/list is about 82_700 bytes (gated tools such as the delete tools and create_approved_invoice are not in it);
-# the budget leaves room for roughly 8 percent more.
-TOOLS_LIST_BUDGET_BYTES = 89_100
+# The default tools/list is 90_209 bytes with all the texts of the custom properties (gated tools such as the delete
+# tools and create_approved_invoice are not in it). Before them it was 89_083 bytes. They add 842 bytes for update_client,
+# which gained custom_properties and clear_custom_property_ids (an object entry {id, value} and a list of ids, with their
+# texts), and for the get_client and list_clients texts about CustomProperties (contract 1b1c0cec0e9a), 73 bytes for the
+# same contract's sentence on the two device tools, 108 bytes for the update_client sentence that has the model compare
+# the returned Values with what it sent, and 103 bytes for the one that says update_client reads the client first. The
+# budget leaves 891 bytes (about 1 percent) above that, a little room for growth.
+TOOLS_LIST_BUDGET_BYTES = 91_100
 MAX_TOOL_DESCRIPTION_CHARS = 900
 MAX_PARAM_DESCRIPTION_CHARS = 220
 
