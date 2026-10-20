@@ -1,9 +1,8 @@
 """tools/projects.py: projects, sections, tags, types and project or task comments. Offline only.
 
-An API key without the Project scope gets a 403 (code 080203), so every behaviour here is checked
-against MockGorelo with realistic PascalCase envelopes: exact method, path, query names and body, result
-shapes, Gorelo errors mapped to the snake_case param, each local validation error with zero HTTP calls,
-and the destructive gate.
+Every behaviour here is checked against MockGorelo with realistic PascalCase envelopes: exact method, path,
+query names and body, result shapes, Gorelo errors mapped to the snake_case param, each local validation
+error with zero HTTP calls, and the destructive gate.
 """
 
 import json
@@ -101,7 +100,7 @@ def project_row(**changes):
     record = {
         "Id": PROJECT, "Title": "Office move", "Number": 462, "DisplayNumber": "PRO-462", "ClientId": 9101,
         "LocationId": 9001, "LeadAssigneeId": 9201, "GroupIds": [7201], "PrimaryGroupId": 7201,
-        "Status": {"Id": 1, "Name": "NotStarted"}, "StatusUpdatedOn": None, "StatusReason": "",
+        "Status": {"Id": 1, "Name": "Not started"}, "StatusUpdatedOn": None, "StatusReason": "",
         "Type": {"Id": TYPE_ID, "Name": "Migration"}, "TagIds": [TAG_ID], "TargetDate": None,
         "ProgressPercent": 0.0, "LastUpdate": None, "CreatedOn": "2026-10-01T14:30:00Z", "UpdatedOn": None,
         "ClosedOn": None,
@@ -380,9 +379,12 @@ def test_the_values_offered_are_exactly_the_ones_the_spec_text_allows(tool, para
 
 @needs_spec_text
 def test_the_status_and_conversation_ids_in_the_descriptions_match_the_spec_text():
-    assert "NotStarted=1, InProgress=2, OnHold=3, Completed=4, Closed=5" in param_text("get", "/v1/projects", "StatusIds")
+    listed = param_text("get", "/v1/projects", "StatusIds")
+    assert "1 Not started, 2 In progress, 3 On hold, 4 Completed, 5 Closed" in listed
+    assert "Any other id is a 400. Omitted returns every status." in listed
     for tool, param in (("list_projects", "status_ids"), ("update_project", "status_id")):
-        assert "1 NotStarted, 2 InProgress, 3 OnHold, 4 Completed, 5 Closed" in param_description(tool, param)
+        assert "1 Not started, 2 In progress, 3 On hold, 4 Completed, 5 Closed" in param_description(tool, param)
+    assert "Omit for every status." in param_description("list_projects", "status_ids")
     kinds = param_text("get", "/v1/projects/{projectId}/tasks/{taskId}/comments", "ConversationType")
     assert "`1` Public, `2` Private, `3` Side Conversation, `4` Approval" in kinds
     assert module.CONVERSATION_TYPE_IDS == {"public": 1, "private": 2, "side_conversation": 3, "approval": 4}
@@ -423,7 +425,7 @@ def test_group_ids_is_not_clearable_because_its_field_text_says_nothing_about_cl
 @needs_spec_text
 def test_the_lead_is_removed_through_clear_fields_with_the_zero_the_spec_text_documents():
     # "Send 0 to remove the lead" is Gorelo's way; the tool offers it only as the clear_fields opt-in and never as a
-    # bare 0 in lead_assignee_id. The Project scope is missing, so the zero itself cannot be probed live.
+    # bare 0 in lead_assignee_id. This test pins the spec text only, not what Gorelo does with the zero.
     assert "`LeadAssigneeId: 0` removes the lead" in spec_text("patch", "/v1/projects/{projectId}")
     assert "lead_assignee_id" in offered_values("update_project", "clear_fields")
     assert module.PROJECT_CLEAR_VALUES["lead_assignee_id"] == 0
@@ -492,7 +494,7 @@ def test_the_group_sentence_tripwire_reads_the_summary_as_well_as_the_descriptio
 @needs_spec_text
 def test_the_documented_rules_the_docstrings_repeat_are_in_the_spec_text():
     create = spec_text("post", "/v1/projects")
-    assert "created in the `NotStarted` status" in create and "numbered from the same sequence the app uses" in create
+    assert "created in status 1 (Not started)" in create and "numbered from the same sequence the app uses" in create
     assert "same project-created notification" in create
     # The 2026-10-14 snapshot dropped the sentence about GroupId or GroupIds from this operation text (it had stayed there,
     # stale, since 2026-10-02: CreateProjectCommand has had only GroupId since then, see
@@ -525,6 +527,16 @@ def schema_fields(name):
     """{field: description} of a component schema of the full OpenAPI snapshot (the field texts live there)."""
     properties = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["components"]["schemas"][name]["properties"]
     return {field: " ".join(prop.get("description", "").split()) for field, prop in properties.items()}
+
+
+@needs_spec_text
+def test_the_project_reads_say_that_last_update_type_comes_from_a_fixed_set():
+    # 2026-10-17: ProjectLastUpdateModel.UpdateType lists its values; the long list stays out of the tool text.
+    text = schema_fields("ProjectLastUpdateModel")["UpdateType"]
+    assert "from a fixed set" in text and "Empty, with an empty `Summary`, for any other recorded event" in text
+    for name in ("list_projects", "get_project"):
+        doc = " ".join(specs()[name].fn.__doc__.split())
+        assert "UpdateType is one of a fixed set of event names (it and Summary are empty for any other recorded event)" in doc, name
 
 
 @needs_spec_text
@@ -774,7 +786,7 @@ async def test_list_projects_an_empty_page_is_reported_as_zero_rows(server, mock
     [
         ({"status_ids": []}, "status_ids: expected at least one id, got an empty list"),
         # 0 is answered with the status scale, not with "a positive whole number such as 123" (123 is no status)
-        ({"status_ids": [0]}, "status_ids[0]: expected 1 NotStarted, 2 InProgress, 3 OnHold, 4 Completed, 5 Closed, got 0"),
+        ({"status_ids": [0]}, "status_ids[0]: expected 1 Not started, 2 In progress, 3 On hold, 4 Completed, 5 Closed, got 0"),
         ({"client_ids": [0]}, "client_ids[0]: expected a positive whole number such as 123, got zero or a negative number"),
         ({"lead_assignee_ids": [9201, -1]}, "lead_assignee_ids[1]: expected a positive whole number"),
         ({"client_ids": [2**63]}, "client_ids[0]: expected a positive whole number such as 123, got a number above"),
@@ -1290,7 +1302,7 @@ async def test_create_project_a_server_error_says_gorelo_may_have_applied_the_ch
 def test_create_project_docstring_states_the_documented_side_effects():
     doc = " ".join(specs()["create_project"].fn.__doc__.split())
     for fragment in (
-        "NotStarted", "the app's numbering", "project-created notification the app sends",
+        "status 1 (Not started)", "the app's numbering", "project-created notification the app sends",
         "do not create it again",
         # the sweep: a write that can notify says who (Gorelo names nobody), and that no tool deletes a project
         "project-created notification the app sends (Gorelo does not say who receives it)",
@@ -1477,7 +1489,7 @@ async def test_update_project_false_for_clear_target_date_is_the_same_as_leaving
         ({"updated_by_name": "", "title": "T"}, "updated_by_name: must not be empty or whitespace only"),
         ({"client_id": 0}, "client_id: expected a positive whole number"),
         ({"location_id": 0}, "location_id: expected a positive whole number"),
-        ({"status_id": 0}, "status_id: expected 1 NotStarted, 2 InProgress, 3 OnHold, 4 Completed, 5 Closed, got 0"),
+        ({"status_id": 0}, "status_id: expected 1 Not started, 2 In progress, 3 On hold, 4 Completed, 5 Closed, got 0"),
         ({"type_id": "migration"}, "type_id: expected a GUID such as"),
         ({"tag_ids": ["x"]}, "tag_ids[0]: expected a GUID such as"),
         ({"watcher_ids": [0]}, "watcher_ids[0]: expected a positive whole number"),
@@ -1779,7 +1791,6 @@ def test_update_project_docstring_states_what_replaces_what_and_the_pairings():
     assert "group_ids" not in removable
     closed = param_description("update_project", "closed_on")
     assert "Closed project" in closed and "status_id 5" in closed and "before the project was created" in closed
-    assert "Completed" not in closed  # 2026-10-02: ClosedOn belongs to a Closed project, Completed carries no date
     assert "also becomes the last update" in closed  # ClosedOn "also becomes its UpdatedOn"
     assert "removes the target date" in param_description("update_project", "clear_target_date")
     assert "To remove it use clear_target_date" in param_description("update_project", "target_date")
@@ -1810,7 +1821,7 @@ def test_update_project_says_closing_stamps_closed_on_and_reopening_clears_it():
     doc = " ".join(specs()["update_project"].fn.__doc__.split())
     assert "Moving a project to Closed stamps ClosedOn, and moving a Closed project to any other status clears it." in doc
     status = param_description("update_project", "status_id")
-    assert "1 NotStarted, 2 InProgress, 3 OnHold, 4 Completed, 5 Closed." in status
+    assert "1 Not started, 2 In progress, 3 On hold, 4 Completed, 5 Closed." in status
     assert "Completed is normally reached automatically" in status and "Closed is the manual end state" in status
     assert "due" not in status.lower()
 
@@ -1834,20 +1845,20 @@ def test_the_project_parameters_that_hold_a_date_are_the_target_date_ones():
 # status ids: the project scale
 # --------------------------------------------------------------------------
 
-# A project has its own status scale, which is not the task scale (a task has WorkingOnIt and Done and stops at 4). A
+# A project has its own status scale, which is not the task scale (a task has Working on it and Done and stops at 4). A
 # status outside the project scale is refused locally, with zero HTTP calls, by update_project and by the status_ids
 # filter of list_projects, naming the param and listing the accepted values with their labels the way priority_id does.
 # That includes 0 and the negative numbers, which are answered with the scale too ("expected a positive whole
 # number such as 123" would suggest that 123 is a status); a value that is not a whole number (a boolean, a decimal,
 # text) keeps the id message of positive_id.
-PROJECT_SCALE = "1 NotStarted, 2 InProgress, 3 OnHold, 4 Completed, 5 Closed"
+PROJECT_SCALE = "1 Not started, 2 In progress, 3 On hold, 4 Completed, 5 Closed"
 PROJECT_EXPECTED = f"expected {PROJECT_SCALE}"
 ID_EXPECTED = "expected a positive whole number such as 123"
 
 
 def documented_scale(text):
-    """{id: label} of every "Label=N" pair of a spec text (spaces inside a label dropped: "Not Started" is NotStarted)."""
-    return {int(number): label.replace(" ", "") for label, number in re.findall(r"([A-Za-z][A-Za-z ]*)=(\d+)", text)}
+    """{id: label} of every "N Label" item of a spec text such as "1 Not started, 2 In progress" (the label runs to the comma or the full stop)."""
+    return {int(number): label for number, label in re.findall(r"(\d+) ([A-Z][a-z]+(?: [a-z]+)*)", text)}
 
 
 @needs_spec_text
@@ -1858,7 +1869,7 @@ def test_the_project_status_scale_is_the_one_the_two_spec_texts_document():
     }
     for where, text in texts.items():
         assert documented_scale(text) == module.PROJECT_STATUS_LABELS, where
-    assert module.PROJECT_STATUS_LABELS == {1: "NotStarted", 2: "InProgress", 3: "OnHold", 4: "Completed", 5: "Closed"}
+    assert module.PROJECT_STATUS_LABELS == {1: "Not started", 2: "In progress", 3: "On hold", 4: "Completed", 5: "Closed"}
     # the one status a ClosedOn date belongs to is the last of the scale, and a new project has no status to choose
     assert module.PROJECT_STATUS_LABELS[module.PROJECT_CLOSED] == "Closed"
     assert "StatusId" not in schema_fields("CreateProjectCommand") and "status_id" not in accepted_params("create_project")
@@ -2564,13 +2575,29 @@ async def test_create_project_comment_on_a_task_maps_each_conversation_type(serv
     assert mock_gorelo.requests[0].json == expected
 
 
+@pytest.mark.parametrize("task", [False, True], ids=["project comment", "task comment"])
+async def test_create_project_comment_has_no_body_text_parameter_any_more(server, mock_gorelo, task):
+    # 2026-10-17: BodyText left both comment commands ("Send Body only"), so the old parameter is refused before any request.
+    arguments = {"project_id": PROJECT, "body": "<p>Hi</p>", "body_text": "Hi", **({"task_id": TASK} if task else {})}
+    text = await call_tool_error(server, "create_project_comment", arguments)
+    assert "body_text" in text and "Unexpected keyword argument" in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("op", [f"POST {PC}", f"POST {TC}"])
+def test_the_spec_comment_commands_have_no_body_text_and_the_tool_sends_none(spec_index, op):
+    fields = set(spec_index.ops[op].body["fields"])
+    assert "Body" in fields and "BodyText" not in fields
+    assert "BodyText" not in set(specs()["create_project_comment"].field_map.values())
+
+
 async def test_create_project_comment_sends_every_optional_field(server, mock_gorelo):
     route_comment(mock_gorelo, task=True)
     await call_tool(
         server,
         "create_project_comment",
         {
-            "project_id": PROJECT, "task_id": TASK, "body": "<p>See file</p>", "body_text": "See file",
+            "project_id": PROJECT, "task_id": TASK, "body": "<p>See file</p>",
             "conversation_type": "side_conversation", "conversation_id": CONVERSATION,
             "attachments": [
                 {"name": "plan.pdf", "url": "https://files.example.test/a?token=1"},
@@ -2580,7 +2607,7 @@ async def test_create_project_comment_sends_every_optional_field(server, mock_go
         },
     )
     assert mock_gorelo.requests[0].json == {
-        "Body": "<p>See file</p>", "BodyText": "See file", "ConversationTypeId": 3, "ConversationId": CONVERSATION,
+        "Body": "<p>See file</p>", "ConversationTypeId": 3, "ConversationId": CONVERSATION,
         "Attachments": [
             {"Name": "plan.pdf", "Url": "https://files.example.test/a?token=1"},
             {"Name": "photo.png", "Url": "https://files.example.test/b?token=2"},
@@ -2605,7 +2632,6 @@ async def test_create_project_comment_sends_every_optional_field(server, mock_go
         ({"task_id": TASK, "conversation_type": "approval", "conversation_id": " "}, "conversation_id: must not be empty or whitespace only"),
         ({"body": ""}, "body: must not be empty or whitespace only"),
         ({"body": "   "}, "body: must not be empty or whitespace only"),
-        ({"body_text": ""}, "body_text: must not be empty or whitespace only"),
         ({"attachments": []}, "attachments: must not be an empty list"),
         ({"attachments": [{"name": " ", "url": "https://x.test/a"}]}, "attachments[0].name: must not be empty or whitespace only"),
         ({"attachments": [{"name": "a.pdf", "url": ""}]}, "attachments[0].url: must not be empty or whitespace only"),
@@ -2651,10 +2677,11 @@ def test_the_comment_conversation_rules_are_the_ones_the_two_schemas_state():
     assert "`1` Public, `2` Private, `3` Side Conversation, `4` Approval" in task["ConversationTypeId"]
     assert "Defaults to 2 (Private)" in task["ConversationTypeId"].replace("**", "")
     assert "Required for Side Conversation and Approval, and rejected for Public and Private" in task["ConversationId"]
-    # BodyText is markdown (not plain text), on both comment commands
+    # 2026-10-17: BodyText is no longer accepted by either comment command ("Send Body only"), so the tool has no body_text
     for fields in (project, task):
-        assert fields["BodyText"] == "The same body as markdown, if you keep one."
-    assert param_description("create_project_comment", "body_text") == "The same body as markdown, if you keep one."
+        assert "BodyText" not in fields
+    assert "body_text" not in accepted_params("create_project_comment")
+    assert "body_text" not in specs()["create_project_comment"].field_map
 
 
 @pytest.mark.parametrize("task", [False, True], ids=["project comment", "task comment"])
@@ -2772,8 +2799,8 @@ def test_create_project_comment_docstring_states_who_is_emailed_and_the_waiting_
         assert fragment in doc, fragment
     kinds = param_description("create_project_comment", "conversation_type")
     assert "Project comments allow only those" in kinds and "side_conversation and approval" in kinds
-    # 2026-10-02: the schema texts of BodyText (markdown), CreatedByName (API when omitted) and CreatedOn (now when omitted)
-    assert param_description("create_project_comment", "body_text") == "The same body as markdown, if you keep one."
+    # 2026-10-02: the schema texts of CreatedByName (API when omitted) and CreatedOn (now when omitted)
+    assert "body_text" not in accepted_params("create_project_comment")
     assert "Gorelo records API" in param_description("create_project_comment", "created_by_name")
     created = param_description("create_project_comment", "created_on")
     assert "omitted, now" in created and "importing a comment that existed elsewhere" in created

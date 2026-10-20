@@ -14,8 +14,8 @@ tools/project_tasks.py.
 Not exposed on purpose: project delete and section delete (DELETE /v1/projects/{projectId} and
 DELETE /v1/projects/{projectId}/sections/{sectionId}). Each one soft-deletes every task under it.
 
-An API key without the Project scope gets a 403 (code 080203), so these tools are covered by
-offline tests only. A 403 reaches the model through format_gorelo_error's missing-scope message.
+An API key without the Project scope gets a 403 (code 080203), which reaches the model through
+format_gorelo_error's missing-scope message. The offline tests cover these tools.
 
 Contract e15cb5a18ec2 (2026-10-02) changed projects, and this module follows it: the project DueDate is TargetDate
 (create, update, ClearTargetDate and the list filters TargetDateAfter and TargetDateBefore; tasks keep their
@@ -34,10 +34,10 @@ The same contract documents every request field for the first time, and the tool
   a group. The tool therefore never sends an empty GroupIds, whichever way the call is made (a direct call that names
   group_ids in clear_fields is refused too, not only the schema).
 * status_reason is read by Gorelo only when status_id is sent, so it is refused without status_id.
-* status_id and the status_ids filter are checked against the project scale (1 NotStarted to 5 Closed) before any
-  request. The task scale is another one (WorkingOnIt and Done, and it stops at 4), so a value outside the project scale
+* status_id and the status_ids filter are checked against the project scale (1 Not started to 5 Closed) before any
+  request. The task scale is another one (Working on it and Done, and it stops at 4), so a value outside the project scale
   is refused here instead of being sent to Gorelo. The scale is the one UpdateProjectCommand.StatusId and the StatusIds
-  filter of GET /v1/projects document (CreateProjectCommand has no status: a new project is NotStarted).
+  filter of GET /v1/projects document (CreateProjectCommand has no status: a new project is in status 1, Not started).
 * client_id needs location_id in the same call (a location belongs to a client), and the move clears the shared
   contacts.
 * closed_on is for a Closed project (status_id 5, already or in this call). On create, updated_on must not be earlier
@@ -226,7 +226,6 @@ LIST_COMMENTS_MAP = {
 }
 CREATE_COMMENT_MAP = {
     "body": "Body",
-    "body_text": "BodyText",
     "conversation_type": "ConversationTypeId",
     "conversation_id": "ConversationId",
     "attachments": "Attachments",
@@ -234,9 +233,9 @@ CREATE_COMMENT_MAP = {
     "created_on": "CreatedOn",
 }
 
-# The project status scale ("NotStarted=1, InProgress=2, OnHold=3, Completed=4, Closed=5"): StatusId of a project update
+# The project status scale ("1 Not started, 2 In progress, 3 On hold, 4 Completed, 5 Closed"): StatusId of a project update
 # and the StatusIds filter of the project list. A task has its own scale (see tools/project_tasks.py).
-PROJECT_STATUS_LABELS = {1: "NotStarted", 2: "InProgress", 3: "OnHold", 4: "Completed", 5: "Closed"}
+PROJECT_STATUS_LABELS = {1: "Not started", 2: "In progress", 3: "On hold", 4: "Completed", 5: "Closed"}
 PROJECT_STATUS_SCALE = ", ".join(f"{status} {label}" for status, label in PROJECT_STATUS_LABELS.items())
 PROJECT_STATUSES = f"{PROJECT_STATUS_SCALE}."
 PROJECT_CLOSED = 5  # the one status a ClosedOn date belongs to
@@ -260,7 +259,7 @@ def _given(check: Callable[[str, Any], Any], param: str, value: Any) -> Any:
 
 
 def _status(param: str, value: Any) -> int:
-    """One status of a project: 1 NotStarted to 5 Closed. A caller's None means "not given", so wrap it with _given.
+    """One status of a project: 1 Not started to 5 Closed. A caller's None means "not given", so wrap it with _given.
 
     Every whole number outside the scale is refused here, with zero HTTP calls, and answered with the scale and quoted
     back (it is not caller data worth hiding), 0 and the negative numbers included: positive_id's "expected a positive
@@ -470,7 +469,9 @@ def _delete_not_confirmed(how: str, trace_id: str | None) -> ToolError:
 @gorelo_tool(toolset=TOOLSET, kind="read", ops=[LIST_PROJECTS], field_map=LIST_PROJECTS_MAP)
 async def list_projects(
     ctx: Context,
-    status_ids: Annotated[list[StrictId] | None, Field(description=PROJECT_STATUSES)] = None,
+    status_ids: Annotated[
+        list[StrictId] | None, Field(description=f"{PROJECT_STATUSES} Omit for every status.")
+    ] = None,
     client_ids: Annotated[list[StrictId] | None, Field(description="Client ids (list_clients).")] = None,
     type_ids: Annotated[list[str] | None, Field(description="Type ids (list_project_types).")] = None,
     lead_assignee_ids: Annotated[
@@ -498,7 +499,7 @@ async def list_projects(
     page_size: Annotated[int, Field(description="Rows per page, 1-200 (clamped).")] = 50,
     cursor: Annotated[str | None, Field(description="next_cursor from the previous page.")] = None,
 ) -> dict:
-    """List projects, newest activity first by default, and return one page. Rows carry TargetDate (the date the project is targeted to finish); get_project adds Description, SharedWithContactIds and WatcherIds.
+    """List projects, newest activity first by default, and return one page. Rows carry TargetDate (the date the project is targeted to finish) and LastUpdate, whose UpdateType is one of a fixed set of event names (it and Summary are empty for any other recorded event); get_project adds Description, SharedWithContactIds and WatcherIds.
     Paging: pass next_cursor back as cursor with the SAME filters until has_more is false.
     """
     filters = {
@@ -534,7 +535,7 @@ async def get_project(
     ctx: Context,
     project_id: Annotated[str, Field(description="Project id (list_projects).")],
 ) -> dict:
-    """Get one project's full record, including Description, SharedWithContactIds and WatcherIds. Sections and tasks are separate: list_project_sections, list_project_tasks."""
+    """Get one project's full record, including Description, SharedWithContactIds and WatcherIds. LastUpdate.UpdateType is one of a fixed set of event names (it and Summary are empty for any other recorded event). Sections and tasks are separate: list_project_sections, list_project_tasks."""
     data = await client_of(ctx).get_one(
         GET_PROJECT, path_params={"projectId": guid("project_id", project_id)}, tool="get_project"
     )
@@ -587,7 +588,7 @@ async def create_project(
     ] = None,
 ) -> dict:
     """Create a project and return its record. Required: title, client_id, location_id, type_id and group_id (a project belongs to one client, one of its locations, one project type and one technician group); everything else is optional.
-    Side effects: creates a real project as NotStarted, with the app's numbering and the project-created notification the app sends (Gorelo does not say who receives it); the CreatedOn field text says a backdated project sends no emails or notifications (the operation text still describes the creation notification). Projects cannot be deleted through this server (a delete removes every task in it). If the result is {Id, warning} the project exists: do not create it again.
+    Side effects: creates a real project in status 1 (Not started), with the app's numbering and the project-created notification the app sends (Gorelo does not say who receives it); the CreatedOn field text says a backdated project sends no emails or notifications (the operation text still describes the creation notification). Projects cannot be deleted through this server (a delete removes every task in it). If the result is {Id, warning} the project exists: do not create it again.
     """
     non_empty("title", title)
     created_text, created_at = _instant("created_on", created_on)
@@ -973,7 +974,6 @@ async def create_project_comment(
     task_id: Annotated[
         str | None, Field(description="Task id (list_project_tasks): comment on that task instead.")
     ] = None,
-    body_text: Annotated[str | None, Field(description="The same body as markdown, if you keep one.")] = None,
     conversation_type: Annotated[
         ConversationKind,
         Field(
@@ -1036,7 +1036,6 @@ async def create_project_comment(
     payload = build_body(
         {
             "body": body,
-            "body_text": body_text,
             "conversation_type": CONVERSATION_TYPE_IDS[conversation_type],
             "conversation_id": conv_id,
             "attachments": _attachments(attachments),

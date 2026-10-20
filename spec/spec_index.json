@@ -1,7 +1,7 @@
 {
- "contract_sha256": "1b1c0cec0e9ab1db09e5654e7b7ff9439cd8d14ff60006f6fda9228acde48614",
- "op_count": 103,
- "openapi": "3.0.1",
+ "contract_sha256": "a7954b24844b94cdd6f1a4227b99dd15bb962a0de2a60cbd81f477368fb0269c",
+ "op_count": 117,
+ "openapi": "3.0.4",
  "ops": {
   "DELETE /v1/api-keys/{apiKeyId}": {
    "body": null,
@@ -159,6 +159,36 @@
     "401",
     "404",
     "409",
+    "500"
+   ]
+  },
+  "DELETE /v1/documents/{documentId}/related-items/{relatedItemId}": {
+   "body": null,
+   "method": "DELETE",
+   "operation_id": "delete_v1_documents_documentId_related-items_relatedItemId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/documents/{documentId}/related-items/{relatedItemId}",
+   "path_params": {
+    "documentId": {
+     "format": "uuid",
+     "type": "string"
+    },
+    "relatedItemId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "RemoveDocumentRelatedItemResult",
+    "kind": "envelope",
+    "schema": "RemoveDocumentRelatedItemResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
     "500"
    ]
   },
@@ -777,6 +807,32 @@
     "500"
    ]
   },
+  "GET /v1/assets/custom/{customAssetId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_assets_custom_customAssetId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/custom/{customAssetId}",
+   "path_params": {
+    "customAssetId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "CustomAssetResponse",
+    "kind": "envelope",
+    "schema": "CustomAssetResponseBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
   "GET /v1/billing-roles": {
    "body": null,
    "method": "GET",
@@ -1029,6 +1085,10 @@
      "format": "int32",
      "required": false,
      "type": "integer"
+    },
+    "StatusIds": {
+     "required": false,
+     "type": "string"
     }
    },
    "response": {
@@ -1061,6 +1121,289 @@
     "data": "ContractDetailModel",
     "kind": "envelope",
     "schema": "ContractDetailModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/deletions": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_deletions",
+   "page_size_rule": "reject",
+   "paged": true,
+   "path": "/v1/deletions",
+   "path_params": {},
+   "query_params": {
+    "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "PageSize": {
+     "default": 50,
+     "format": "int32",
+     "required": false,
+     "type": "integer"
+    },
+    "Since": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
+    "TypeIds": {
+     "required": false,
+     "type": "string"
+    }
+   },
+   "response": {
+    "data": "[DeletionResponse]",
+    "kind": "envelope",
+    "schema": "DeletionResponseListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "403",
+    "500"
+   ]
+  },
+  "GET /v1/documents": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_documents",
+   "page_size_rule": "reject",
+   "paged": true,
+   "path": "/v1/documents",
+   "path_params": {},
+   "query_params": {
+    "ClientIds": {
+     "required": false,
+     "type": "string"
+    },
+    "CreatedBefore": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
+    "CreatedSince": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
+    "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "IsInternal": {
+     "required": false,
+     "type": "boolean"
+    },
+    "IsPublicLinkEnabled": {
+     "required": false,
+     "type": "boolean"
+    },
+    "IsPublishedToPortal": {
+     "required": false,
+     "type": "boolean"
+    },
+    "IsStarred": {
+     "required": false,
+     "type": "boolean"
+    },
+    "PageSize": {
+     "default": 50,
+     "format": "int32",
+     "required": false,
+     "type": "integer"
+    },
+    "ParentDocumentId": {
+     "format": "uuid",
+     "required": false,
+     "type": "string"
+    },
+    "Query": {
+     "required": false,
+     "type": "string"
+    },
+    "SortBy": {
+     "default": "createdOn",
+     "required": false,
+     "type": "string"
+    },
+    "SortOrder": {
+     "default": "desc",
+     "required": false,
+     "type": "string"
+    },
+    "StatusIds": {
+     "required": false,
+     "type": "string"
+    },
+    "UpdatedBefore": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
+    "UpdatedSince": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    }
+   },
+   "response": {
+    "data": "[DocumentListItemModel]",
+    "kind": "envelope",
+    "schema": "DocumentListItemModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/documents/{documentId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_documents_documentId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/documents/{documentId}",
+   "path_params": {
+    "documentId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "DocumentDetailModel",
+    "kind": "envelope",
+    "schema": "DocumentDetailModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/documents/{documentId}/pdf": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_documents_documentId_pdf",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/documents/{documentId}/pdf",
+   "path_params": {
+    "documentId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": null,
+    "kind": "binary",
+    "schema": null
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/documents/{documentId}/related-items": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_documents_documentId_related-items",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/documents/{documentId}/related-items",
+   "path_params": {
+    "documentId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "[DocumentRelatedItemModel]",
+    "kind": "envelope",
+    "schema": "DocumentRelatedItemModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/documents/{documentId}/versions": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_documents_documentId_versions",
+   "page_size_rule": "reject",
+   "paged": true,
+   "path": "/v1/documents/{documentId}/versions",
+   "path_params": {
+    "documentId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {
+    "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "PageSize": {
+     "default": 50,
+     "format": "int32",
+     "required": false,
+     "type": "integer"
+    }
+   },
+   "response": {
+    "data": "[DocumentVersionListItemModel]",
+    "kind": "envelope",
+    "schema": "DocumentVersionListItemModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/documents/{documentId}/versions/{versionId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_documents_documentId_versions_versionId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/documents/{documentId}/versions/{versionId}",
+   "path_params": {
+    "documentId": {
+     "format": "uuid",
+     "type": "string"
+    },
+    "versionId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "DocumentVersionDetailModel",
+    "kind": "envelope",
+    "schema": "DocumentVersionDetailModelBaseResponse"
    },
    "status_codes": [
     "200",
@@ -1499,6 +1842,10 @@
      "format": "int32",
      "required": false,
      "type": "integer"
+    },
+    "StatusIds": {
+     "required": false,
+     "type": "string"
     }
    },
    "response": {
@@ -2841,6 +3188,81 @@
     "500"
    ]
   },
+  "PATCH /v1/documents/{documentId}": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "AlternateName": {
+      "nullable": true,
+      "type": "string"
+     },
+     "Attachments": {
+      "items": {
+       "ref": "CommentAttachmentModel",
+       "type": null
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "Body": {
+      "nullable": true,
+      "type": "string"
+     },
+     "IsStarred": {
+      "nullable": true,
+      "type": "boolean"
+     },
+     "Move": {
+      "nullable": false,
+      "ref": "UpdateDocumentMove",
+      "type": null
+     },
+     "PublicLinkEnabled": {
+      "nullable": true,
+      "type": "boolean"
+     },
+     "PublishToPortalEnabled": {
+      "nullable": true,
+      "type": "boolean"
+     },
+     "StatusId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "Title": {
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "UpdateDocumentCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_documents_documentId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/documents/{documentId}",
+   "path_params": {
+    "documentId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "DocumentDetailModel",
+    "kind": "envelope",
+    "schema": "DocumentDetailModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "500"
+   ]
+  },
   "PATCH /v1/items/{itemId}": {
    "body": {
     "content_type": "application/json-patch+json",
@@ -3960,6 +4382,160 @@
     "500"
    ]
   },
+  "POST /v1/documents": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "Body": {
+      "nullable": true,
+      "type": "string"
+     },
+     "ClientId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "ParentDocumentId": {
+      "format": "uuid",
+      "nullable": true,
+      "type": "string"
+     },
+     "Title": {
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "CreateDocumentCommand"
+   },
+   "method": "POST",
+   "operation_id": "post_v1_documents",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/documents",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "DocumentDetailModel",
+    "kind": "envelope",
+    "schema": "DocumentDetailModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "500"
+   ]
+  },
+  "POST /v1/documents/{documentId}/duplicate": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "Title": {
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "DuplicateDocumentCommand"
+   },
+   "method": "POST",
+   "operation_id": "post_v1_documents_documentId_duplicate",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/documents/{documentId}/duplicate",
+   "path_params": {
+    "documentId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "DocumentDetailModel",
+    "kind": "envelope",
+    "schema": "DocumentDetailModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "409",
+    "500"
+   ]
+  },
+  "POST /v1/documents/{documentId}/related-items": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "RelatedItems": {
+      "items": {
+       "ref": "AddDocumentRelatedItem",
+       "type": null
+      },
+      "nullable": true,
+      "type": "array"
+     }
+    },
+    "required": [],
+    "schema": "AddDocumentRelatedItemsCommand"
+   },
+   "method": "POST",
+   "operation_id": "post_v1_documents_documentId_related-items",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/documents/{documentId}/related-items",
+   "path_params": {
+    "documentId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "[DocumentRelatedItemModel]",
+    "kind": "envelope",
+    "schema": "DocumentRelatedItemModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "POST /v1/documents/{documentId}/versions/{versionId}/restore": {
+   "body": null,
+   "method": "POST",
+   "operation_id": "post_v1_documents_documentId_versions_versionId_restore",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/documents/{documentId}/versions/{versionId}/restore",
+   "path_params": {
+    "documentId": {
+     "format": "uuid",
+     "type": "string"
+    },
+    "versionId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "DocumentDetailModel",
+    "kind": "envelope",
+    "schema": "DocumentDetailModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
   "POST /v1/forms/{formId}/submission-links": {
    "body": {
     "content_type": "application/json-patch+json",
@@ -4361,10 +4937,6 @@
       "nullable": false,
       "type": "string"
      },
-     "BodyText": {
-      "nullable": true,
-      "type": "string"
-     },
      "ConversationId": {
       "nullable": true,
       "type": "string"
@@ -4573,10 +5145,6 @@
      "Body": {
       "min_length": 1,
       "nullable": false,
-      "type": "string"
-     },
-     "BodyText": {
-      "nullable": true,
       "type": "string"
      },
      "ConversationId": {
@@ -5267,6 +5835,37 @@
   }
  },
  "schemas": {
+  "AddDocumentRelatedItem": {
+   "additional_properties": false,
+   "fields": {
+    "ItemId": {
+     "nullable": true,
+     "type": "string"
+    },
+    "ItemTypeId": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AddDocumentRelatedItemsCommand": {
+   "additional_properties": false,
+   "fields": {
+    "RelatedItems": {
+     "items": {
+      "ref": "AddDocumentRelatedItem",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "AlertListItemModel": {
    "additional_properties": false,
    "fields": {
@@ -7653,6 +8252,31 @@
    "required": [],
    "type": "object"
   },
+  "CreateDocumentCommand": {
+   "additional_properties": false,
+   "fields": {
+    "Body": {
+     "nullable": true,
+     "type": "string"
+    },
+    "ClientId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "ParentDocumentId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "Title": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "CreateInvoiceCommand": {
    "additional_properties": false,
    "fields": {
@@ -8129,10 +8753,6 @@
     "Body": {
      "min_length": 1,
      "nullable": false,
-     "type": "string"
-    },
-    "BodyText": {
-     "nullable": true,
      "type": "string"
     },
     "ConversationId": {
@@ -8616,10 +9236,6 @@
     "Body": {
      "min_length": 1,
      "nullable": false,
-     "type": "string"
-    },
-    "BodyText": {
-     "nullable": true,
      "type": "string"
     },
     "ConversationId": {
@@ -9257,7 +9873,7 @@
      "type": "string"
     },
     "Description": {
-     "nullable": false,
+     "nullable": true,
      "type": "string"
     },
     "HardwareType": {
@@ -9300,6 +9916,40 @@
      "format": "date",
      "nullable": true,
      "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "CustomAssetResponseBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "CustomAssetResponse",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
     }
    },
    "required": [],
@@ -9365,6 +10015,10 @@
      "format": "int64",
      "nullable": false,
      "type": "integer"
+    },
+    "IsHidden": {
+     "nullable": false,
+     "type": "boolean"
     },
     "IsSet": {
      "nullable": false,
@@ -10238,6 +10892,64 @@
    "required": [],
    "type": "object"
   },
+  "DeletionResponse": {
+   "additional_properties": false,
+   "fields": {
+    "DeletedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Id": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Type": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DeletionResponseListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "DeletionResponse",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "nullable": false,
+     "ref": "PaginationDataContext",
+     "type": null
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "DeviceListItemResponse": {
    "additional_properties": false,
    "fields": {
@@ -10646,6 +11358,516 @@
      "nullable": false,
      "ref": "HttpStatusCode",
      "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DocumentChildModel": {
+   "additional_properties": false,
+   "fields": {
+    "ChildCount": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "Title": {
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DocumentDetailModel": {
+   "additional_properties": false,
+   "fields": {
+    "AlternateName": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Attachments": {
+     "items": {
+      "ref": "CommentAttachmentModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "Body": {
+     "nullable": false,
+     "type": "string"
+    },
+    "ChildCount": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Children": {
+     "items": {
+      "ref": "DocumentChildModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "ClientId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "CreatedById": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Depth": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "DocumentOrder": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "IsStarred": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "ParentDocumentId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "PublicLinkEnabled": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "PublicLinkUrl": {
+     "nullable": true,
+     "type": "string"
+    },
+    "PublishToPortalEnabled": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "RelatedItems": {
+     "items": {
+      "ref": "DocumentRelatedItemModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "RootDocumentId": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "Status": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "Title": {
+     "nullable": false,
+     "type": "string"
+    },
+    "UpdatedById": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DocumentDetailModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "DocumentDetailModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DocumentListItemModel": {
+   "additional_properties": false,
+   "fields": {
+    "AlternateName": {
+     "nullable": true,
+     "type": "string"
+    },
+    "ChildCount": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "ClientId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "CreatedById": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Depth": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "DocumentOrder": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "IsStarred": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "ParentDocumentId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "PublicLinkEnabled": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "PublishToPortalEnabled": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "RootDocumentId": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "Status": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "Title": {
+     "nullable": false,
+     "type": "string"
+    },
+    "UpdatedById": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DocumentListItemModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "DocumentListItemModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "nullable": false,
+     "ref": "PaginationDataContext",
+     "type": null
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DocumentRelatedItemModel": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "ItemId": {
+     "nullable": false,
+     "type": "string"
+    },
+    "ItemType": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DocumentRelatedItemModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "DocumentRelatedItemModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DocumentVersionDetailModel": {
+   "additional_properties": false,
+   "fields": {
+    "Attachments": {
+     "items": {
+      "ref": "CommentAttachmentModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "Body": {
+     "nullable": false,
+     "type": "string"
+    },
+    "EditedById": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "EditedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "IsCurrent": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Title": {
+     "nullable": false,
+     "type": "string"
+    },
+    "VersionId": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DocumentVersionDetailModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "DocumentVersionDetailModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DocumentVersionListItemModel": {
+   "additional_properties": false,
+   "fields": {
+    "EditedById": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "EditedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "IsCurrent": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Title": {
+     "nullable": false,
+     "type": "string"
+    },
+    "VersionId": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DocumentVersionListItemModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "DocumentVersionListItemModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "nullable": false,
+     "ref": "PaginationDataContext",
+     "type": null
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DuplicateDocumentCommand": {
+   "additional_properties": false,
+   "fields": {
+    "Title": {
+     "nullable": true,
+     "type": "string"
     }
    },
    "required": [],
@@ -12870,6 +14092,52 @@
      },
      "nullable": true,
      "type": "array"
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "RemoveDocumentRelatedItemResult": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "RemoveDocumentRelatedItemResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "RemoveDocumentRelatedItemResult",
+     "type": null
     },
     "DataContext": {
      "additional_properties": false,
@@ -15313,6 +16581,72 @@
    "required": [],
    "type": "object"
   },
+  "UpdateDocumentCommand": {
+   "additional_properties": false,
+   "fields": {
+    "AlternateName": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Attachments": {
+     "items": {
+      "ref": "CommentAttachmentModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "Body": {
+     "nullable": true,
+     "type": "string"
+    },
+    "IsStarred": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "Move": {
+     "nullable": false,
+     "ref": "UpdateDocumentMove",
+     "type": null
+    },
+    "PublicLinkEnabled": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "PublishToPortalEnabled": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "StatusId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Title": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateDocumentMove": {
+   "additional_properties": false,
+   "fields": {
+    "ClientId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "ParentDocumentId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "UpdateItemCommand": {
    "additional_properties": false,
    "fields": {
@@ -16561,6 +17895,6 @@
    "type": "apiKey"
   }
  },
- "sha256": "2439fc166daff1df05c3f0b6e18611e3daf2d0330c1be68b7e9fa6038e51a24a",
+ "sha256": "a62b4785226ebe0133e4ea3f5b8ec8a83de61bdbe008f5ed259a36c8f9890b63",
  "source": "https://api.usw.gorelo.io/swagger/v1/swagger.json"
 }

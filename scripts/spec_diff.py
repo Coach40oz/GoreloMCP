@@ -705,7 +705,7 @@ def diff_op(old_op: dict[str, Any], new_op: dict[str, Any], counts: Counter) -> 
         if norm_path(old_op["path"]) == norm_path(new_op["path"]):
             why = " (trailing slash only)"
         elif _match_path(old_op["path"]) == _match_path(new_op["path"]):
-            why = " (path parameter names only)"
+            why = " (only the path parameter names differ)"
         else:
             why = ""
         lines.append(f"- path: `{old_op['path']}` -> `{new_op['path']}`{why}")

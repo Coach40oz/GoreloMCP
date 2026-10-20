@@ -205,6 +205,33 @@ async def test_untyped_path_tokens_are_percent_encoded_on_the_wire(client_factor
     assert mock_gorelo.last.raw_path == "/v1/things/caf%C3%A9%3A%40%2Bx"
 
 
+# A redirect is never followed: the answer names another host, which must get nothing (the mock has no route there).
+# A redirect answer to a write may have been applied (a 303 after a POST means it was): write_unconfirmed, unlike a GET.
+REDIRECT_TARGET = "https://collector.example.test/collect"
+
+
+@pytest.mark.parametrize(
+    "method, path, call, status, write_unconfirmed",
+    [
+        pytest.param("GET", "/v1/clients/7", lambda c: c.get_one(CLIENT_OP, path_params={"clientId": 7}, tool="t"), 302, False, id="get-302"),
+        pytest.param("POST", "/v1/clients", lambda c: c.post(CREATE_CLIENT, json_body={"Name": "x", "Location": {"Name": "y"}}, tool="t"), 302, True, id="post-302"),
+        pytest.param("PATCH", "/v1/time-entries/55", lambda c: c.patch("PATCH /v1/time-entries/{timeEntryId}", path_params={"timeEntryId": 55}, json_body={"Comment": "x"}, tool="t"), 303, True, id="patch-303"),
+        pytest.param("DELETE", "/v1/time-entries/55", lambda c: c.delete("DELETE /v1/time-entries/{timeEntryId}", path_params={"timeEntryId": 55}, tool="t"), 307, True, id="delete-307"),
+    ],
+)
+async def test_a_redirect_to_another_host_is_an_error_and_is_never_followed(
+    client_factory, mock_gorelo, method, path, call, status, write_unconfirmed
+):
+    mock_gorelo.on(method, path, httpx.Response(status, headers={"Location": REDIRECT_TARGET}))
+    async with client_factory() as client:
+        with pytest.raises(GoreloAPIError) as info:
+            await call(client)
+    err = info.value
+    assert (err.kind, err.status, err.write_unconfirmed) == ("shape", status, write_unconfirmed)
+    assert f"HTTP {status}" in str(err)
+    assert [(r.method, r.url) for r in mock_gorelo.requests] == [(method, f"https://api.usw.gorelo.io{path}")]
+
+
 # --------------------------------------------------------------------------
 # Envelope handling
 # --------------------------------------------------------------------------
@@ -2094,6 +2121,7 @@ async def test_a_declared_length_over_the_cap_refuses_an_unexpected_body_before_
     "status, content_type, recorded",
     [
         pytest.param(200, "text/html", True, id="200-html"),
+        pytest.param(302, "text/html", True, id="302-redirect-may-be-recorded"),
         pytest.param(502, "text/html", True, id="502-gateway-page"),
         pytest.param(404, "application/json", False, id="404-refused-so-nothing-recorded"),
         pytest.param(403, "text/html", False, id="403-refused-so-nothing-recorded"),
@@ -2103,7 +2131,7 @@ async def test_an_oversized_unexpected_answer_is_refused_unread_and_flagged_like
     client_factory, status, content_type, recorded
 ):
     # the same rule as for a small body (see test_every_unreadable_or_failed_pdf_answer_is_unconfirmed...):
-    # a 2xx or 5xx answer to the PDF export may have been recorded, a 4xx refusal was not
+    # a 2xx, 3xx or 5xx answer to the PDF export may have been recorded, a 4xx refusal was not
     chunks_read = []
 
     async def body():
@@ -2177,7 +2205,7 @@ async def test_a_json_envelope_answer_to_a_binary_request_still_parses_as_an_env
 
 
 # --------------------------------------------------------------------------
-# Logging: names and numbers only, never values
+# Logging: names, record ids and numbers, never field or query values
 # --------------------------------------------------------------------------
 
 

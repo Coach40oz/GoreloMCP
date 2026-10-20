@@ -13,9 +13,12 @@ WHY
   tenants. If a shared service were breached, every tenant would be exposed at once.
   Running it yourself also means you decide:
     - which Gorelo key it uses and what scopes that key has;
-    - which tools exist (toolsets, and the gated delete and void tools);
+    - which tools exist (toolsets, and the gated tools: delete, void, approved invoices and sharing a document);
     - when it updates, so that a Gorelo API change does not reach your tenant untested;
-    - where logs go. The server logs names of parameters, never values (see 08).
+    - where logs go. The journal holds request paths with their record ids and the names of the query
+      parameters and body fields sent to Gorelo, the error text of a failed tool call (which can quote
+      what the call was given), the visitor's address, the name a client registered with, and one access
+      line per request with its full query string. The API key and the password are never logged (see 08).
   Using a tunnel means no inbound port is opened on the host, so there is nothing for the
   internet to scan or connect to except what the tunnel exposes.
 

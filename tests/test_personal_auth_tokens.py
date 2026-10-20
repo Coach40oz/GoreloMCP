@@ -1,6 +1,6 @@
 """personal_auth.py, the token lifecycle: one issuer, rotation, tombstones, reuse, /revoke (which only looks a token up:
 no reuse detection and no expiry line inside a request to it), expired tokens, pruning, the state file at start and at
-every save, and compatibility with the code that production ran before.
+every save, and compatibility with the code that ran before.
 
 Everything is offline: temporary state directories, fake data, a fake clock where time matters, and the real HTTP app
 driven in process through httpx.ASGITransport (no sockets). The authorization code is put into provider.auth_codes
@@ -871,8 +871,8 @@ async def test_a_retired_token_presented_by_another_client_is_still_a_reuse(stat
     capture(caplog)
     clock = FakeClock()
     provider = make_provider(state_dir, clock=clock, reuse_policy="revoke")
-    owner, thief = await register(provider, 1), await register(provider, 2)
-    (old,), live = await rotated(provider, owner, clock)
+    holder, thief = await register(provider, 1), await register(provider, 2)
+    (old,), live = await rotated(provider, holder, clock)
     family = provider._refresh_meta[live.refresh_token]["family"]
     clock.advance(1000)
     caplog.clear()
@@ -1001,8 +1001,8 @@ async def test_revoking_an_unknown_or_already_revoked_token_answers_200_and_chan
 
 async def test_a_client_cannot_revoke_the_token_of_another_client(state_dir, make_provider, serve):
     provider = make_provider(state_dir)
-    owner, other = await register(provider, 1), await register(provider, 2)
-    tokens = await sign_in(provider, owner)
+    holder, other = await register(provider, 1), await register(provider, 2)
+    tokens = await sign_in(provider, holder)
     async with serve(provider) as http:
         for presented in (tokens.refresh_token, tokens.access_token):
             reply = await http.post(
@@ -1335,9 +1335,9 @@ async def test_the_prune_at_load_drops_old_expired_access_tokens_from_memory_but
 
 
 class LegacyFile:
-    """A realistic version 1 file: a live session (client "Claude"), old pairs whose access tokens expired
-    long ago and whose refresh tokens never expire, and clients that never got a token. Built relative to the real clock
-    because the framework checks expiry against it."""
+    """A synthetic version 1 file of a long-running install: a live session (client "Claude"), two old pairs whose access
+    tokens expired long ago and whose refresh tokens never expire, and one client that never got a token. Built relative to
+    the real clock because the framework checks expiry against it."""
 
     def __init__(self, now: float | None = None) -> None:
         self.now = int(time.time() if now is None else now)
@@ -1353,25 +1353,25 @@ class LegacyFile:
                 "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"], "scope": None,
                 "client_name": name, "client_uri": None, "logo_uri": None, "contacts": None, "tos_uri": None,
                 "policy_uri": None, "jwks_uri": None, "jwks": None, "software_id": None, "software_version": None,
-                "client_id": client_id, "client_secret": f"secret-of-{client_id[:8]}", "client_id_issued_at": self.now - 17 * DAY,
+                "client_id": client_id, "client_secret": f"secret-of-{client_id[:8]}", "client_id_issued_at": self.now - 4 * DAY,
                 "client_secret_expires_at": None,
             }
 
         add_client(self.live_client, "Claude")
         access[self.live_access] = {
-            "token": self.live_access, "client_id": self.live_client, "scopes": [], "expires_at": self.now + 13 * DAY, "resource": None,
+            "token": self.live_access, "client_id": self.live_client, "scopes": [], "expires_at": self.now + 26 * DAY, "resource": None,
         }
         refresh[self.live_refresh] = {"token": self.live_refresh, "client_id": self.live_client, "scopes": [], "expires_at": None}
         a2r[self.live_access], r2a[self.live_refresh] = self.live_refresh, self.live_access
-        for n in (2, 3):  # the two old sessions of a smaller version of the file
+        for n in (2, 3):  # two old sessions whose access tokens expired long ago
             client_id = f"0000000{n}-0000-4000-8000-00000000000{n}"
             add_client(client_id, "Claude")
             pat, prt = f"pat_{n}" + "c" * 62, f"prt_{n}" + "d" * 62
-            access[pat] = {"token": pat, "client_id": client_id, "scopes": [], "expires_at": self.now - 150 * DAY, "resource": None}
+            access[pat] = {"token": pat, "client_id": client_id, "scopes": [], "expires_at": self.now - 60 * DAY, "resource": None}
             refresh[prt] = {"token": prt, "client_id": client_id, "scopes": [], "expires_at": None}
             a2r[pat], r2a[prt] = prt, pat
             self.old.append((client_id, pat, prt))
-        add_client("00000004-0000-4000-8000-000000000004", "test")  # a client that never got a token
+        add_client("00000004-0000-4000-8000-000000000004", "Example client")  # a client that never got a token
         self.parts = {"clients": clients, "access_tokens": access, "refresh_tokens": refresh, "a2r": a2r, "r2a": r2a}
 
     def document(self) -> dict:
@@ -1515,7 +1515,7 @@ async def test_a_rollback_and_a_roll_forward_lose_nothing(state_dir, make_provid
         assert (await http_refresh(http, session, live["refresh_token"])).status_code == 200
 
 
-async def test_the_owners_session_survives_the_upgrade_a_file_shaped_like_the_live_one(state_dir, make_provider, serve, caplog):
+async def test_a_session_survives_the_upgrade_of_a_typical_version_1_file(state_dir, make_provider, serve, caplog):
     capture(caplog)
     builder = LegacyFile()
     original = the_file_of_previous_release(builder, state_dir)
@@ -1531,7 +1531,7 @@ async def test_the_owners_session_survives_the_upgrade_a_file_shaped_like_the_li
             assert await mcp_status(http, pat) == 401  # long expired
         session = Session(builder.live_client, f"secret-of-{builder.live_client[:8]}", builder.live_access, builder.live_refresh, 0)
 
-        # the refresh test: the access token expires, the user opens a new conversation
+        # the access token expires, the user opens a new conversation (to check that the client refreshes by itself)
         provider.access_tokens[builder.live_access].expires_at = int(time.time()) - 60
         caplog.clear()
         assert await mcp_status(http, builder.live_access) == 401
@@ -1563,9 +1563,9 @@ async def test_the_pair_the_legacy_code_issued_earlier_gets_an_issue_time_of_abo
     the_file_of_previous_release(builder, state_dir)
     provider = make_provider(state_dir)
     for _, _, prt in builder.old:
-        assert provider._refresh_meta[prt]["issued_at"] == builder.now - 150 * DAY - 30 * DAY
+        assert provider._refresh_meta[prt]["issued_at"] == builder.now - 60 * DAY - 30 * DAY  # issued 90 days ago
         assert provider._refresh_meta[prt]["origin"] == "legacy"
-    assert provider._refresh_meta[builder.live_refresh]["issued_at"] == builder.now + 13 * DAY - 30 * DAY  # 17 days ago
+    assert provider._refresh_meta[builder.live_refresh]["issued_at"] == builder.now + 26 * DAY - 30 * DAY  # 4 days ago
 
 
 async def test_the_whole_real_flow_works_end_to_end_on_this_release(state_dir, make_provider, serve):
@@ -1668,7 +1668,7 @@ def test_personal_auth_py_holds_no_em_or_en_dash_and_no_non_ascii_text():
     assert text.isascii()
 
 
-def test_the_frozen_copy_is_r2_with_only_the_four_dashes_replaced():
+def test_the_frozen_copy_is_the_previous_release_with_only_the_four_dashes_replaced():
     path = REPO_ROOT / "tests" / "legacy" / "personal_auth_previous.py"
     copy_text = path.read_text(encoding="utf-8")
     assert EM_DASH not in copy_text and EN_DASH not in copy_text and copy_text.isascii()

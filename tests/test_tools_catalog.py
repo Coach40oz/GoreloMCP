@@ -3,6 +3,7 @@
 import inspect
 import json
 import logging
+import re
 from pathlib import Path
 
 import httpx
@@ -225,6 +226,7 @@ def test_the_docstrings_state_the_facts_the_model_must_know():
     assert "archive it with update_item (status=archived, always possible)" in create
     listing = " ".join(inspect.getdoc(catalog.list_items).split())
     assert "Only get_item returns a bundle's SubItems" in listing and "labor items never appear" in listing
+    assert "Archived items are left out unless status is archived or all" in listing
     categories = " ".join(inspect.getdoc(catalog.list_item_categories).split())
     assert "read a subcategory with its category" in categories
 
@@ -284,6 +286,19 @@ async def test_the_advertised_schema_does_not_forbid_a_negative_price(server):
 
 
 LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
+needs_spec_text = pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
+
+
+def operation(method, path):
+    return json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["paths"][path][method]
+
+
+def param_text(method, path, name):
+    return " ".join(next(p["description"] for p in operation(method, path)["parameters"] if p["name"] == name).split())
+
+
+def scale_of(text):  # {id: label} from "1 Active, 2 Archived"
+    return {int(n): label for n, label in re.findall(r"(\d+) ([A-Z][a-z]+)", text)}
 
 
 @pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
@@ -463,6 +478,7 @@ async def test_every_filter_goes_out_under_its_spec_name(server, mock_gorelo):
         ({"type": "bundle"}, {"TypeIds": "2"}),
         ({"status": "active"}, {"StatusIds": "1"}),
         ({"status": "archived"}, {"StatusIds": "2"}),
+        ({"status": "all"}, {"StatusIds": "1,2"}),
     ],
 )
 async def test_type_and_status_names_become_gorelo_ids(server, mock_gorelo, args, query):
@@ -497,6 +513,26 @@ async def test_paging_follows_next_cursor_with_the_same_filters(server, mock_gor
         {"StatusIds": "1", "PageSize": "1", "Cursor": "c-2"},
     ]
     assert one["filters"] == two["filters"] == {"status": "active"}
+
+
+async def test_paging_with_status_all_asks_for_both_statuses_on_every_page(server, mock_gorelo):
+    mock_gorelo.on(
+        "GET",
+        ITEMS,
+        in_order(
+            envelope([item_row()], pagination("c-2", 2)),
+            envelope([item_row(uid(12), bundle=True)], pagination(None, 2, has_more=False)),
+        ),
+    )
+    args = {"status": "all", "page_size": 1}
+    one = await call_tool(server, "list_items", args)
+    two = await call_tool(server, "list_items", {**args, "cursor": one["next_cursor"]})
+    assert (one["has_more"], two["has_more"]) == (True, False)
+    assert [r.query for r in mock_gorelo.requests] == [
+        {"StatusIds": "1,2", "PageSize": "1"},
+        {"StatusIds": "1,2", "PageSize": "1", "Cursor": "c-2"},
+    ]
+    assert one["filters"] == two["filters"] == {"status": "all"}
 
 
 async def test_an_empty_page_is_reported_with_its_total(server, mock_gorelo):
@@ -568,7 +604,17 @@ async def test_an_id_list_is_strict_true_and_text_are_refused_instead_of_becomin
     assert mock_gorelo.requests == []
 
 
-@pytest.mark.parametrize("args, param", [({"type": "service"}, "type"), ({"status": "deleted"}, "status"), ({"type": "Product"}, "type")])
+@pytest.mark.parametrize(
+    "args, param",
+    [
+        ({"type": "service"}, "type"),
+        ({"status": "deleted"}, "status"),
+        ({"status": "both"}, "status"),
+        ({"status": ["active"]}, "status"),
+        ({"status": "ARCHIVED"}, "status"),
+        ({"type": "Product"}, "type"),
+    ],
+)
 async def test_a_name_gorelo_does_not_know_is_refused_with_the_param_name(server, mock_gorelo, args, param):
     text = await call_tool_error(server, "list_items", args)
     assert param in text
@@ -579,6 +625,36 @@ async def test_calling_list_items_directly_with_an_unknown_type_is_refused_not_d
     with pytest.raises(ToolError, match="type: must be one of 'product', 'bundle', got 'service'"):
         await call_directly(client_factory, catalog.list_items, type="service")
     assert mock_gorelo.requests == []
+
+
+async def test_calling_list_items_directly_with_an_unknown_status_is_refused_not_dropped(client_factory, mock_gorelo):
+    with pytest.raises(ToolError, match="status: must be one of 'active', 'archived', 'all', got 'deleted'"):
+        await call_directly(client_factory, catalog.list_items, status="deleted")
+    assert mock_gorelo.requests == []
+
+
+async def test_list_items_status_offers_active_archived_and_all_and_update_item_keeps_two(server):
+    tools = await list_tools(server)
+
+    def enum_of(tool, param):
+        schema = tool_def(tool, tools).inputSchema["properties"][param]
+        return next(branch["enum"] for branch in schema.get("anyOf", [schema]) if "enum" in branch)
+
+    assert enum_of("list_items", "status") == ["active", "archived", "all"]
+    assert enum_of("update_item", "status") == ["active", "archived"]
+    properties = tool_def("list_items", tools).inputSchema["properties"]
+    assert properties["status"]["description"] == "Omit for Active only (archived left out). 'archived': archived only. 'all': both."
+    assert properties["type"]["description"] == "Omit for both."
+
+
+@needs_spec_text
+def test_the_item_status_texts_are_the_ones_in_the_spec():
+    text = param_text("get", "/v1/items", "StatusIds")
+    assert "1 Active, 2 Archived. Omitted returns Active only (archived excluded). Any other id is a 400." in text
+    assert scale_of(text) == {1: "Active", 2: "Archived"} == {v: k.capitalize() for k, v in catalog.ITEM_STATUS_IDS.items()}
+    op = " ".join(operation("get", "/v1/items")["description"].split())
+    assert "`Status` reflects whether the item is archived: 1 Active, 2 Archived. Archived items are left out unless `statusIds` names Archived." in op
+    assert catalog.ITEM_LIST_STATUS == {"active": "1", "archived": "2", "all": "1,2"}
 
 
 # --------------------------------------------------------------------------

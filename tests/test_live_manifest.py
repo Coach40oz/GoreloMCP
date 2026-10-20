@@ -21,17 +21,18 @@ from scripts.live import _env, cleanup
 from scripts.live import manifest as manifest_module
 from scripts.live.guard import GuardViolation, LiveGuard
 from scripts.live.manifest import ID_TYPES, KINDS, Manifest, Record, normalize_id
-from settings import TOOLSETS
+from settings import DEFAULT_BASE_URL, TOOLSETS
 
 pytestmark = pytest.mark.anyio
 
 RUN = "MCPTEST-20991002101500"
+US_HOST, AU_HOST = "api.usw.gorelo.io", "api.aue.gorelo.io"
 APP_ENV_FILE = _env.ENV_FILE  # the real constant, read before any fixture replaces it
 
 
 @pytest.fixture(autouse=True)
 def _never_read_the_real_env(monkeypatch, tmp_path):
-    """Whatever a test does, the live service's .env is not the file that gets opened."""
+    """Whatever a test does, the service's .env is not the file that gets opened."""
     monkeypatch.setattr(_env, "ENV_FILE", tmp_path / "no-such-dir" / ".env")
 
 
@@ -81,10 +82,40 @@ def test_the_default_location_is_dot_live_runs_in_the_repo():
 
 def test_start_makes_a_fresh_run_and_refuses_to_reuse_a_file(tmp_path):
     moment = datetime(2099, 10, 2, 10, 15, 0, tzinfo=timezone.utc)
-    first = Manifest.start(moment, directory=tmp_path)
+    first = Manifest.start(moment, directory=tmp_path, api_host=US_HOST)
     assert first.run_id == RUN and first.path == tmp_path / f"{RUN}.json" and first.path.is_file()
     with pytest.raises(FileExistsError):
-        Manifest.start(moment, directory=tmp_path)
+        Manifest.start(moment, directory=tmp_path, api_host=US_HOST)
+
+
+def test_start_writes_the_api_host_of_the_run_before_any_record(tmp_path):
+    first = Manifest.start(datetime(2099, 10, 2, 10, 15, 0, tzinfo=timezone.utc), directory=tmp_path, api_host=AU_HOST)
+    state = read_file(first)
+    assert state["api_host"] == AU_HOST and state["intents"] == [] and state["records"] == []
+    assert first.api_host == AU_HOST and Manifest.load(first.path).api_host == AU_HOST
+
+
+def test_a_file_without_the_api_host_key_reads_as_the_us_host(tmp_path):
+    old = Manifest.start(datetime(2099, 10, 2, 10, 15, 0, tzinfo=timezone.utc), directory=tmp_path, api_host=AU_HOST)
+    state = read_file(old)
+    del state["api_host"]  # the shape of a file written before 1.3.0
+    old.path.write_text(json.dumps(state), encoding="utf-8")
+    assert Manifest.load(old.path).api_host == US_HOST and Manifest(RUN, old.path).api_host == US_HOST
+    assert "api_host" not in read_file(Manifest(RUN, tmp_path / "bare.json"))  # a file made without a host has no key
+
+
+def test_a_file_made_against_one_host_is_not_reopened_against_another(tmp_path):
+    path = Manifest.start(datetime(2099, 10, 2, 10, 15, 0, tzinfo=timezone.utc), directory=tmp_path, api_host=AU_HOST).path
+    with pytest.raises(ValueError, match="was made against api.aue.gorelo.io, not api.usw.gorelo.io"):
+        Manifest(RUN, path, api_host=US_HOST)
+    assert Manifest(RUN, path, api_host=AU_HOST).api_host == AU_HOST
+
+
+@pytest.mark.parametrize("bad", ["", "https://api.aue.gorelo.io", "api.aue.gorelo.io:443", "api", None, 5])
+def test_the_api_host_of_a_run_must_be_a_host_name_and_nothing_is_written_otherwise(tmp_path, bad):
+    with pytest.raises(ValueError, match="must be a host name"):
+        Manifest.start(datetime(2099, 10, 2, 10, 15, 0, tzinfo=timezone.utc), directory=tmp_path, api_host=bad)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_a_label_starts_with_the_run_id(manifest):
@@ -131,18 +162,20 @@ SAMPLE_IDS = {
     "invoice": uid(11),
     "custom_asset": uid(12),
     "custom_property": 17,
+    "document": uid(13),
 }
 
 
-def test_the_kinds_are_the_seventeen_the_harness_records():
+def test_the_kinds_are_the_eighteen_the_harness_records():
     assert KINDS == (
         "client", "contact", "ticket", "comment", "time_entry", "item", "uptime", "project", "section", "task",
-        "project_comment", "attachment", "side_conversation", "approval", "invoice", "custom_asset", "custom_property",
+        "project_comment", "attachment", "side_conversation", "approval", "invoice", "custom_asset", "custom_property", "document",
     )
     assert set(ID_TYPES) == set(KINDS) and set(SAMPLE_IDS) == set(KINDS)
     assert ID_TYPES["invoice"] == "uuid"  # an invoice is named by a GUID, never by a number
     assert ID_TYPES["custom_asset"] == "uuid"  # so is a custom asset (customAssetId is a uuid)
     assert ID_TYPES["custom_property"] == "int"  # a custom field is named by its Id, a whole number (int64 in the spec)
+    assert ID_TYPES["document"] == "uuid"  # a document is named by a GUID (documentId)
 
 
 def test_a_custom_property_is_recorded_by_the_id_of_its_custom_field_with_the_details_the_guard_and_cleanup_read(manifest):
@@ -629,6 +662,8 @@ def test_load_of_a_missing_file_is_a_file_not_found_error(tmp_path):
         (lambda s: s["intents"].append({"kind": "ticket", "label": RUN, "status": "weird"}), "unknown status"),
         (lambda s: s["intents"].append({"kind": "ticket", "label": "other", "status": "open"}), "label of an intent"),
         (lambda s: s["approved_leftovers"].append({"kind": "ticket"}), "listed leftover"),
+        (lambda s: s.update(api_host="https://api.usw.gorelo.io"), "api_host"),
+        (lambda s: s.update(api_host=5), "api_host"),
     ],
 )
 def test_load_refuses_a_file_that_is_not_a_valid_manifest(manifest, mutate, problem):
@@ -910,7 +945,7 @@ async def test_cleanup_deletes_in_reverse_creation_order_with_tools_where_they_e
     assert outcomes[("side_conversation", SIDE)] == f"removed with ticket {TICKET}"
     assert outcomes[("approval", "approval-1")] == f"removed with ticket {TICKET}"
     assert outcomes[("comment", PUBLIC_COMMENT)] == f"removed with ticket {TICKET}"
-    assert lines[0] == "cleanup of MCPTEST-20991002101500: 14 cleaned, 0 left over, 1 known undeletable"
+    assert lines[1] == "cleanup of MCPTEST-20991002101500: 14 cleaned, 0 left over, 1 known undeletable"
     assert f"  known undeletable attachment report.txt {manifest.label('attachment')}: {UNDELETABLE}" in lines
     assert "result: nothing left over" not in lines  # an uploaded file stays in Gorelo
     assert lines[-1] == "result: cleanup complete; 1 known undeletable record remains (see above)"
@@ -946,7 +981,7 @@ async def test_every_request_of_both_clients_passes_one_cleanup_guard(manifest, 
     await cleanup.run_cleanup(manifest, settings=make_settings(destructive=True), transport=mock_gorelo.transport, pace=0, echo=lambda line: None)
     assert len(made) == 1
     args, kwargs, guard = made[0]
-    assert args[0] == "write" and kwargs == {"cleanup": True}
+    assert args[0] == "write" and kwargs == {"cleanup": True, "base_url": DEFAULT_BASE_URL}
     assert guard.seen == sent(mock_gorelo) and len(guard.seen) == 10  # tool requests and raw requests alike
     assert not guard.tripped
 
@@ -1166,7 +1201,7 @@ async def test_a_second_cleanup_adds_nothing_for_the_undeletable_file(manifest, 
     report = await run_it()
     assert len(mock_gorelo.requests) == requests and report.ok
     assert manifest.record("attachment", "report.txt").attempts == attempts  # the same outcome is not recorded twice
-    assert lines[0] == f"cleanup of {RUN}: 1 cleaned, 0 left over, 1 known undeletable"
+    assert lines[1] == f"cleanup of {RUN}: 1 cleaned, 0 left over, 1 known undeletable"
     assert lines[-1] == "result: cleanup complete; 1 known undeletable record remains (see above)"
 
 
@@ -1178,7 +1213,7 @@ async def test_an_undeletable_file_alone_never_fails_the_run_but_a_real_leftover
     report = await run_it()
     assert not report.ok  # the contact could not be deleted
     assert [r.kind for r in report.leftovers] == ["contact"] and [r.kind for r in report.undeletable] == ["attachment"]
-    assert lines[0] == "cleanup of MCPTEST-20991002101500: 1 cleaned, 1 left over, 1 known undeletable"
+    assert lines[1] == "cleanup of MCPTEST-20991002101500: 1 cleaned, 1 left over, 1 known undeletable"
     assert any(line.startswith("  known undeletable attachment report.txt ") for line in lines)
     assert lines[-1] == "result: SOMETHING IS LEFT OVER"  # the file does not soften a real leftover
 
@@ -1373,7 +1408,7 @@ async def test_a_draft_invoice_is_read_first_and_deleted_with_delete_invoice(man
     ]
     assert mock_gorelo.requests[1].query["Number"] == "1042"
     assert report.ok and manifest.leftovers() == [] and manifest.record("invoice", INVOICE).outcome == "Deleted (Draft, delete_invoice)"
-    assert lines[0] == f"cleanup of {RUN}: 1 cleaned, 0 left over"
+    assert lines[1] == f"cleanup of {RUN}: 1 cleaned, 0 left over"
     assert f"  cleaned    invoice {INVOICE} {manifest.label('invoice')} (Deleted (Draft, delete_invoice))" in lines
     assert lines[-1] == "result: nothing left over"
 
@@ -1448,7 +1483,7 @@ async def test_an_invoice_that_is_not_a_draft_is_never_deleted_or_voided_and_is_
     outcome = f"left for the user: invoice INV-1042 has status {shown}; {GENERIC_TAIL}"
     assert manifest.record("invoice", INVOICE).outcome == outcome and not manifest.record("invoice", INVOICE).cleaned
     assert f"  LEFTOVER   invoice {INVOICE} {manifest.label('invoice')} ({outcome})" in lines
-    assert lines[0] == f"cleanup of {RUN}: 0 cleaned, 1 left over" and lines[-1] == "result: SOMETHING IS LEFT OVER"
+    assert lines[1] == f"cleanup of {RUN}: 0 cleaned, 1 left over" and lines[-1] == "result: SOMETHING IS LEFT OVER"
 
 
 @pytest.mark.parametrize("flag", [False, True])
@@ -1681,7 +1716,7 @@ async def test_when_the_lookup_by_number_finds_nothing_the_draft_it_just_read_is
     ]
     assert mock_gorelo.requests[1].query["Number"] == "1042"
     assert report.ok and manifest.leftovers() == [] and manifest.record("invoice", INVOICE).outcome == FALLBACK
-    assert lines[0] == f"cleanup of {RUN}: 1 cleaned, 0 left over"
+    assert lines[1] == f"cleanup of {RUN}: 1 cleaned, 0 left over"
     assert f"  cleaned    invoice {INVOICE} {manifest.label('invoice')} ({FALLBACK})" in lines
     assert lines[-1] == "result: nothing left over"
 
@@ -1885,7 +1920,7 @@ async def test_an_approved_invoice_is_a_leftover_for_the_user_without_the_flag_a
     assert record.outcome == outcome and not record.cleaned and manifest.details("invoice", INVOICE)["status_id"] == 5
     assert not report.ok and [r.id for r in report.leftovers] == [INVOICE] and report.undeletable == []
     assert f"  LEFTOVER   invoice {INVOICE} {manifest.label('approved invoice')} ({outcome})" in lines
-    assert lines[0] == f"cleanup of {RUN}: 0 cleaned, 1 left over" and lines[-1] == "result: SOMETHING IS LEFT OVER"
+    assert lines[1] == f"cleanup of {RUN}: 0 cleaned, 1 left over" and lines[-1] == "result: SOMETHING IS LEFT OVER"
     assert report.voided == [] and not any(line.startswith("reminder:") for line in lines)  # nothing was voided: nothing to remind of
 
 
@@ -1905,7 +1940,7 @@ async def test_with_the_flag_an_approved_invoice_is_read_looked_up_by_number_and
     assert record.outcome == outcome and not record.cleaned
     assert manifest.details("invoice", INVOICE) == {"status_id": 4, "number": 1042, "display_number": "INV-1042"}
     assert report.ok and report.cleaned == [] and report.leftovers == [] and [r.id for r in report.undeletable] == [INVOICE]
-    assert lines[0] == f"cleanup of {RUN}: 0 cleaned, 0 left over, 1 known undeletable"
+    assert lines[1] == f"cleanup of {RUN}: 0 cleaned, 0 left over, 1 known undeletable"
     assert f"  known undeletable invoice {INVOICE} {manifest.label('approved invoice')}: {outcome}" in lines
     assert "result: nothing left over" not in lines  # an invoice stays in Gorelo, as Void: never claimed to be gone
     assert lines[-1] == "result: cleanup complete; 1 known undeletable record remains (see above)"
@@ -2784,6 +2819,16 @@ def test_the_command_line_refuses_a_missing_or_invalid_manifest(tmp_path, capsys
     bad.write_text("not json", encoding="utf-8")
     assert cleanup.main([str(bad)]) == 2
     assert "not a valid run manifest" in capsys.readouterr().err
+
+
+async def test_the_cleanup_report_starts_with_the_api_host_its_run_was_made_against(tmp_path, mock_gorelo, make_settings):
+    lines = []
+    manifest = Manifest(RUN, tmp_path / "au.json", api_host=AU_HOST)
+    report = await cleanup.run_cleanup(
+        manifest, settings=make_settings(destructive=True, base_url=f"https://{AU_HOST}/v1"), transport=mock_gorelo.transport,
+        pace=0, echo=lines.append, verify_clients=False,
+    )
+    assert report.ok and lines[0] == f"api host: {AU_HOST}" and lines[1] == f"cleanup of {RUN}: 0 cleaned, 0 left over"
 
 
 def test_the_command_line_reports_a_missing_api_key_without_a_traceback(tmp_path, monkeypatch, capsys):

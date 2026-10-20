@@ -25,13 +25,23 @@ import tools.clients as clients_module
 import tools.contacts as contacts_module
 import tools.meta as meta_module
 import tools.org as org_module
-from gorelo_client import is_forbidden_op
+from gorelo_client import GoreloAPIError, is_forbidden_op
 from tools._common import REGISTRY
 
 pytestmark = pytest.mark.anyio
 
 CLIENTS = "/v1/clients"
 SHAPE_PREFIX = "Gorelo returned an unexpected response for health_check"
+BASE_401 = f"Gorelo rejected health_check (HTTP 401, code 070401): Invalid API key. [trace {TEST_TRACE_ID}]"
+
+
+def region_hint(host):
+    return (
+        f"Hint: Gorelo answered 401 from {host}; check GORELO_API_KEY (the raw key, no Bearer prefix) and "
+        "GORELO_BASE_URL: it must be the host of the region your Gorelo account is hosted in (US api.usw.gorelo.io, "
+        "Australia api.aue.gorelo.io)."
+    )
+
 
 # Every tool of the core module group (meta, clients, contacts, org, assets, alerts), all in toolset "core".
 CORE_TOOLS = {
@@ -70,9 +80,13 @@ def test_health_check_is_declared_as_a_core_read_tool_over_get_clients():
 
 def test_the_docstring_says_what_it_returns_and_that_a_failure_is_data_not_an_error():
     doc = flat(meta_module.health_check.__doc__)
-    assert "returns {ok, api, total_clients, toolsets, destructive, spec_sha256}" in doc
-    assert "{ok: false, error, status} instead of a tool error" in doc
+    assert "returns {ok, api, api_host, total_clients, toolsets, destructive, gated_tools, spec_sha256}" in doc
+    assert "total_clients is the number of clients Gorelo lists by default (Archived clients are not counted)." in doc
+    assert "gated_tools lists the delete, void, approved-invoice and sharing tools switched on ([] means none)" in doc
     assert "Side effects:" not in doc  # read only
+    assert "api_host is the Gorelo host this server calls" in doc
+    assert "api_host is the Gorelo host this server calls (GORELO_BASE_URL)." in doc
+    assert "{ok: false, error, status} instead of a tool error" in doc
 
 
 def test_the_module_text_says_destructive_means_whether_the_gated_tools_are_on_not_only_the_delete_tools():
@@ -80,6 +94,7 @@ def test_the_module_text_says_destructive_means_whether_the_gated_tools_are_on_n
     # and also create_approved_invoice, so "whether delete tools are on" described only part of what it switches
     module_text = flat(meta_module.__doc__)
     assert "whether the gated tools are on" in module_text
+    assert "the names of the gated tools that are registered" in module_text and "never values" in module_text
     assert "whether delete tools are on" not in module_text
     gated = {spec.name for spec in REGISTRY.specs if spec.kind == "destructive"}
     assert "create_approved_invoice" in gated and any(name.startswith("delete_") for name in gated)
@@ -189,6 +204,7 @@ ID_PARAMS = {
     "get_contact": ["contact_id"],
     "create_contact": ["client_id", "location_id"],
     "update_contact": ["contact_id", "location_id"],
+    "list_org_users": ["status_ids"],
     "list_agents": ["status_ids", "client_ids"],
     "list_custom_assets": ["client_ids"],
     "post_alert": ["client_id"],
@@ -205,6 +221,7 @@ BASE_ARGS = {
     "get_contact": {"contact_id": 1},
     "create_contact": {"client_id": 1, "first_name": "a", "last_name": "b", "primary_email": "c"},
     "update_contact": {"contact_id": 1, "job_title": "X", "secondary_email": []},
+    "list_org_users": {},
     "list_agents": {},
     "list_custom_assets": {},
     "post_alert": {"name": "n", "client_id": 1, "resource": "r", "severity": 1},
@@ -278,11 +295,8 @@ async def test_every_core_tool_and_parameter_description_stays_within_the_size_l
 # The size budget of the core module group: measured as (json.dumps of each tool
 # as the client sees it, exclude_none) with every toolset on and destructive tools on. The advertised schemas are
 # compacted centrally (server.compact_input_schema), so what the modules still control is their descriptions.
-# Measured 19115 bytes for the first 16 tools (descriptions are 7593 of them), 19659 at the start of the
-# API update and 21794 with list_alerts (about 2050 bytes, 275 characters of them the alert type names the spec
-# publishes and the model needs to filter by type) and the longer post_alert text; the limit is that plus 10 percent,
-# rounded up to the next 100.
-CORE_BUDGET_BYTES = 24000
+# Measured 24_910 bytes for 1.3.0; the limit is 25_300, which leaves 390 bytes.
+CORE_BUDGET_BYTES = 25_300
 
 
 async def test_the_core_tool_list_stays_within_its_size_budget(server_factory):
@@ -348,9 +362,11 @@ async def test_a_healthy_api_reports_the_client_count_and_the_server_configurati
     assert result == {
         "ok": True,
         "api": "reachable",
+        "api_host": "api.usw.gorelo.io",
         "total_clients": 40,
         "toolsets": ["core", "tickets"],
         "destructive": True,
+        "gated_tools": ["delete_ticket_comment"],
         "spec_sha256": spec_index.sha256,
     }
 
@@ -359,6 +375,34 @@ async def test_destructive_off_and_a_single_toolset_are_reported_as_they_are(ser
     mock_gorelo.on("GET", CLIENTS, paged_envelope([a_client()], total_count=1))
     result = await call_tool(server, "health_check")
     assert result["toolsets"] == ["core"] and result["destructive"] is False and "note" not in result
+    assert result["gated_tools"] == []  # an empty list is a real answer ("none"), not a missing one
+
+
+async def test_the_registered_gated_tools_are_reported_by_name_whether_all_or_some_are_switched_on(server_factory, mock_gorelo):
+    mock_gorelo.on("GET", CLIENTS, paged_envelope([a_client()], total_count=1))
+    every = await call_tool(server_factory(toolsets={"core", "tickets", "time", "uptime"}, destructive=True), "health_check")
+    assert every["gated_tools"] == ["delete_ticket_comment", "delete_time_entry", "delete_uptime_check"]
+    some = await call_tool(
+        server_factory(toolsets={"core", "tickets", "time", "uptime"}, destructive=True, destructive_tools=frozenset({"delete_time_entry"})),
+        "health_check",
+    )
+    assert some["destructive"] is True and some["gated_tools"] == ["delete_time_entry"]
+    off = await call_tool(server_factory(toolsets={"core", "tickets", "time"}, destructive=False), "health_check")
+    assert off["destructive"] is False and off["gated_tools"] == []
+    assert "note" not in every and "note" not in some and "note" not in off
+
+
+async def test_gated_tools_are_names_of_registered_tools_and_nothing_else(server_factory, mock_gorelo):
+    from settings import TOOLSETS
+
+    mock_gorelo.on("GET", CLIENTS, paged_envelope([a_client()], total_count=1))
+    server = server_factory(toolsets=frozenset(TOOLSETS), destructive=True, destructive_tools=frozenset({"delete_item", "share_document"}))
+    result = await call_tool(server, "health_check")
+    registered = {tool.name for tool in await list_tools(server)}
+    assert result["gated_tools"] == ["delete_item", "share_document"] and set(result["gated_tools"]) <= registered
+    kinds = {spec.name: spec.kind for spec in REGISTRY.specs}
+    assert {kinds[name] for name in result["gated_tools"]} == {"destructive"}
+    assert all(isinstance(name, str) and name in kinds for name in result["gated_tools"])  # names, no values
 
 
 async def test_exactly_one_get_with_page_size_one_is_sent(server, mock_gorelo):
@@ -387,8 +431,9 @@ async def test_called_without_the_lifespan_data_it_still_answers_and_says_what_i
     async with client_factory() as client:
         result = await meta_module.health_check(make_ctx(client))
     assert result["ok"] is True and result["total_clients"] == 40
-    assert (result["toolsets"], result["destructive"], result["spec_sha256"]) == (None, None, None)
-    assert "toolsets, destructive, spec_sha256 could not be read" in result["note"]
+    assert (result["toolsets"], result["destructive"], result["gated_tools"], result["spec_sha256"]) == (None, None, None, None)
+    assert "toolsets, destructive, gated_tools, spec_sha256 could not be read" in result["note"]
+    assert result["api_host"] == "api.usw.gorelo.io" and "api_host" not in result["note"]
 
 
 async def test_a_partly_missing_lifespan_names_only_what_is_missing(client_factory, mock_gorelo):
@@ -396,7 +441,8 @@ async def test_a_partly_missing_lifespan_names_only_what_is_missing(client_facto
     async with client_factory() as client:
         result = await meta_module.health_check(make_ctx(client, toolsets=["core"], destructive=False))
     assert result["toolsets"] == ["core"] and result["destructive"] is False and result["spec_sha256"] is None
-    assert result["note"].startswith("spec_sha256 could not be read")
+    assert result["gated_tools"] is None
+    assert result["note"].startswith("gated_tools, spec_sha256 could not be read")
 
 
 async def test_without_a_gorelo_client_the_tool_raises_instead_of_pretending_to_diagnose():
@@ -412,11 +458,8 @@ async def test_without_a_gorelo_client_the_tool_raises_instead_of_pretending_to_
 async def test_an_unauthorized_key_is_reported_not_raised(server, mock_gorelo):
     mock_gorelo.on("GET", CLIENTS, error_envelope(401, [("070401", "Invalid API key.")]))
     result = await call_tool(server, "health_check")
-    assert result == {
-        "ok": False,
-        "error": f"Gorelo rejected health_check (HTTP 401, code 070401): Invalid API key. [trace {TEST_TRACE_ID}]",
-        "status": 401,
-    }
+    assert result == {"ok": False, "error": f"{BASE_401} {region_hint('api.usw.gorelo.io')}", "status": 401}
+    assert "GORELO_API_KEY" in result["error"] and "GORELO_BASE_URL" in result["error"]
 
 
 async def test_a_missing_scope_is_reported_with_the_scope_name(server, mock_gorelo):
@@ -467,6 +510,63 @@ async def test_a_failed_envelope_with_http_200_is_a_failure(server, mock_gorelo)
     result = await call_tool(server, "health_check")
     assert result["ok"] is False and result["status"] == 200
     assert "Something went wrong." in result["error"]
+
+
+# --------------------------------------------------------------------------
+# api_host: the host that was called is named; a 401 names the two settings to check
+# --------------------------------------------------------------------------
+
+AU_SETTINGS = {"toolsets": {"core"}, "base_url": "https://api.aue.gorelo.io/v1"}
+
+
+async def test_the_result_names_the_host_it_called(server_factory, mock_gorelo):
+    mock_gorelo.on("GET", CLIENTS, paged_envelope([a_client()]))
+    result = await call_tool(server_factory(**AU_SETTINGS), "health_check")
+    assert result["ok"] is True and result["api_host"] == "api.aue.gorelo.io"
+    assert mock_gorelo.last.headers["host"] == "api.aue.gorelo.io"  # the request really went there
+
+
+async def test_a_401_names_the_host_that_was_called_and_the_variable_that_changes_it(server_factory, mock_gorelo):
+    mock_gorelo.on("GET", CLIENTS, error_envelope(401, [("070401", "Invalid API key.")]))
+    result = await call_tool(server_factory(**AU_SETTINGS), "health_check")
+    assert result == {"ok": False, "error": f"{BASE_401} {region_hint('api.aue.gorelo.io')}", "status": 401}
+
+
+async def test_a_401_gateway_json_that_is_not_an_envelope_gets_the_hint_too(server, mock_gorelo):
+    # a malformed key gets the gateway's own JSON, not the Gorelo envelope
+    gateway = {"error": "Invalid or missing API key format", "timestamp": "2026-10-17T10:00:00Z"}
+    mock_gorelo.on("GET", CLIENTS, gateway, status=401)
+    result = await call_tool(server, "health_check")
+    assert result["ok"] is False and result["status"] == 401
+    assert result["error"].startswith(SHAPE_PREFIX) and result["error"].endswith(region_hint("api.usw.gorelo.io"))
+    assert "GORELO_API_KEY" in result["error"] and "GORELO_BASE_URL" in result["error"]
+
+
+async def test_a_401_from_a_plain_text_page_gets_the_hint_too(server, mock_gorelo):
+    mock_gorelo.on("GET", CLIENTS, httpx.Response(401, text="Unauthorized", headers={"content-type": "text/plain"}))
+    result = await call_tool(server, "health_check")
+    assert result["ok"] is False and result["status"] == 401
+    assert result["error"].startswith(SHAPE_PREFIX) and result["error"].endswith(region_hint("api.usw.gorelo.io"))
+
+
+@pytest.mark.parametrize("status, code", [(403, "080203"), (404, "070404"), (500, "070500")])
+async def test_only_a_401_gets_the_region_hint(server, mock_gorelo, status, code):
+    mock_gorelo.on("GET", CLIENTS, error_envelope(status, [(code, "Refused.")]))
+    result = await call_tool(server, "health_check")
+    assert result["status"] == status and "Hint:" not in result["error"] and "GORELO_BASE_URL" not in result["error"]
+
+
+async def test_a_client_whose_host_cannot_be_read_still_gets_the_hint():
+    class Unreadable:
+        base_url = ""
+
+        async def get_page(self, op_key, **kwargs):
+            raise GoreloAPIError(
+                status=401, op_key=op_key, kind="http", notifications=[{"code": "070401", "message": "Invalid API key."}]
+            )
+
+    result = await meta_module.health_check(make_ctx(Unreadable()))
+    assert result["status"] == 401 and region_hint("an address it could not read") in result["error"]
 
 
 # --------------------------------------------------------------------------

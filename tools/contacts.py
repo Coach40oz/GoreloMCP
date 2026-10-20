@@ -12,6 +12,10 @@ Ops owned by this module:
 Contract notes (observed on 2026-10-01, see docs/API-OBSERVED-BEHAVIOR.md):
 
 * GET /v1/contacts has both a legacy ClientId and ClientIds. list_contacts only ever sends ClientIds.
+* GET /v1/contacts StatusIds is 1 Active, 3 Temporary, 4 Archived (contract a7954b24844b, 2026-10-17; 2 Inactive is gone):
+  the default leaves Archived out, a supplied list returns only those statuses, deleted contacts are never listed,
+  up to 100 values, any other value is a 400. list_contacts checks every item against that scale, and the count,
+  before any request. No other contacts tool takes or sets a status.
 * POST /v1/contacts accepts the four required fields (ClientId, FirstName, LastName, PrimaryEmail) and
   leaves everything else null, so create_contact infers nothing and defaults nothing.
 * The contact id travels in the PATH only. The published UpdateContactCommand (contract e15cb5a18ec2, 2026-10-02)
@@ -53,6 +57,7 @@ from pydantic import Field
 
 from gorelo_client import GoreloAPIError
 from tools._common import (
+    MAX_ID,
     StrictBool,
     StrictId,
     build_body,
@@ -179,6 +184,32 @@ PHONE_PAIRS = (
     ("office_phone", "office_phone_country_code"),
 )
 
+# The contact status scale of the GET /v1/contacts StatusIds filter (contract a7954b24844b, 2026-10-17): "1 Active, 3
+# Temporary, 4 Archived", any other value is a 400. 2 (Inactive) is gone. No other contacts tool takes or sets a status.
+CONTACT_STATUS_LABELS = {1: "Active", 3: "Temporary", 4: "Archived"}
+CONTACT_STATUS_SCALE = ", ".join(f"{status} {label}" for status, label in CONTACT_STATUS_LABELS.items())
+STATUS_IDS_MAX = 100  # "Up to 100 values"
+
+
+def _status(param: str, value: Any) -> int:
+    """One contact status: 1 Active, 3 Temporary or 4 Archived (same rules as tools/clients.py _status)."""
+    if isinstance(value, int) and not isinstance(value, bool) and -MAX_ID <= value < 1:
+        status = int(value)
+    else:
+        status = positive_id(param, value)
+    if status not in CONTACT_STATUS_LABELS:
+        raise ValueError(f"{param}: expected {CONTACT_STATUS_SCALE}, got {status}")
+    return status
+
+
+def _statuses(param: str, values: Any) -> list[int] | None:
+    """The status_ids filter of list_contacts: at most STATUS_IDS_MAX items, each on the scale, a bad one named by its index."""
+    if isinstance(values, (list, tuple)) and values:
+        if len(values) > STATUS_IDS_MAX:
+            raise ValueError(f"{param}: at most {STATUS_IDS_MAX} values, got {len(values)}")
+        return [_status(f"{param}[{index}]", item) for index, item in enumerate(values)]
+    return positive_ids(param, values)
+
 
 def _filled(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
@@ -216,7 +247,12 @@ async def list_contacts(
     client_ids: Annotated[
         list[StrictId] | None, Field(description="Only these clients' contacts (list_clients). Not with client_id.")
     ] = None,
-    status_ids: Annotated[list[StrictId] | None, Field(description="1 Active, 2 Inactive, 3 Temporary, 4 Archive.")] = None,
+    status_ids: Annotated[
+        list[StrictId] | None,
+        Field(
+            description="1 Active, 3 Temporary, 4 Archived, up to 100. Omit it and Archived contacts are left out; give it and only those are returned."
+        ),
+    ] = None,
     query: Annotated[str | None, Field(description="Matches email addresses, first name and last name.")] = None,
     created_since: Annotated[str | None, Field(description=f"Created at or after; {SINCE_HELP}")] = None,
     created_before: Annotated[str | None, Field(description="Created before.")] = None,
@@ -226,7 +262,7 @@ async def list_contacts(
     cursor: Annotated[str | None, Field(description="next_cursor from the previous call.")] = None,
 ) -> dict:
     """List contacts one page per call; returns {items, has_more, next_cursor, total_count, ...}.
-    Filter by client_id (one) or client_ids (several), not both. Rows can be temporary contacts (IsTemporaryContact true, ClientId null) that belong to no client (Gorelo's release notes of 2026-10-09). Rows never include SecondaryEmail: Gorelo does not return it. Paging: pass next_cursor as cursor, same filters, until has_more is false.
+    Filter by client_id (one) or client_ids (several), not both. Archived contacts are left out unless status_ids asks for status 4; deleted contacts are never listed. Rows can be temporary contacts (IsTemporaryContact true, ClientId null) that belong to no client (Gorelo's release notes of 2026-10-09). Rows never include SecondaryEmail: Gorelo does not return it. Paging: pass next_cursor as cursor, same filters, until has_more is false.
     """
     if client_id is not None and client_ids is not None:
         raise ValueError(
@@ -236,7 +272,7 @@ async def list_contacts(
         clients = csv_ids("client_id", [positive_id("client_id", client_id)])
     else:
         clients = csv_ids("client_ids", positive_ids("client_ids", client_ids))
-    ids = csv_ids("status_ids", positive_ids("status_ids", status_ids))
+    ids = csv_ids("status_ids", _statuses("status_ids", status_ids))
     keyword = non_empty("query", query)
     created_after = utc_iso("created_since", created_since)
     created_until = utc_iso("created_before", created_before)

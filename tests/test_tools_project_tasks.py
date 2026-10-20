@@ -1,9 +1,8 @@
 """tools/project_tasks.py: project tasks, task conversations and task approvals. Offline only.
 
-An API key without the Project scope gets a 403 (code 080203), so every behaviour here is checked
-against MockGorelo with realistic PascalCase envelopes: exact method, path, query names and body, result
-shapes, Gorelo errors mapped to the snake_case param, each local validation error with zero HTTP calls,
-and the destructive gate.
+Every behaviour here is checked against MockGorelo with realistic PascalCase envelopes: exact method, path,
+query names and body, result shapes, Gorelo errors mapped to the snake_case param, each local validation
+error with zero HTTP calls, and the destructive gate.
 """
 
 import json
@@ -97,7 +96,7 @@ def task_row(**changes):
     record = {
         "Id": TASK, "Title": "Rack the switch", "Number": 7, "DisplayNumber": "PRO-462-7", "SectionId": SECTION,
         "LeadAssigneeId": 9201, "AssistingAssigneeIds": [], "WatcherIds": [], "PrimaryGroupId": 7201,
-        "Status": {"Id": 1, "Name": "NotStarted"}, "StatusUpdatedOn": None, "StatusReason": "",
+        "Status": {"Id": 1, "Name": "Not started"}, "StatusUpdatedOn": None, "StatusReason": "",
         "Priority": {"Id": 3, "Name": "Normal"}, "DueDate": None, "IsUnread": False, "IsWaitingOnThem": False,
         "ChecklistSummary": {"Total": 0, "Completed": 0}, "BlockedByTaskIds": [], "BlockingTaskIds": [],
         "LastUpdate": None, "CreatedOn": "2026-10-01T14:30:00Z", "UpdatedOn": None, "ClosedOn": None,
@@ -285,9 +284,12 @@ def test_the_values_offered_are_exactly_the_ones_the_spec_text_allows(param, spe
 
 @needs_spec_text
 def test_the_status_and_priority_ids_in_the_descriptions_match_the_spec_text():
-    assert "NotStarted=1, WorkingOnIt=2, OnHold=3, Done=4" in param_text("get", "/v1/projects/{projectId}/tasks", "StatusIds")
+    listed = param_text("get", "/v1/projects/{projectId}/tasks", "StatusIds")
+    assert "1 Not started, 2 Working on it, 3 On hold, 4 Done" in listed
+    assert "Any other id is a 400. Omitted returns every status." in listed
     for tool, param in (("list_project_tasks", "status_ids"), ("create_project_task", "status_id"), ("update_project_task", "status_id")):
-        assert "1 NotStarted, 2 WorkingOnIt, 3 OnHold, 4 Done" in param_description(tool, param)
+        assert "1 Not started, 2 Working on it, 3 On hold, 4 Done" in param_description(tool, param)
+    assert "Omit for every status." in param_description("list_project_tasks", "status_ids")
     create = spec_text("post", "/v1/projects/{projectId}/tasks")
     assert "None=0, Urgent=1, High=2, Normal=3, Low=4" in create and "Omit it for Normal" in create
     for tool, param in (("create_project_task", "priority_id"), ("update_project_task", "priority_id")):
@@ -317,7 +319,7 @@ def test_the_clear_values_are_the_ones_the_spec_text_documents():
 @needs_spec_text
 def test_the_lead_is_removed_through_clear_fields_with_the_zero_the_spec_text_documents():
     # "Send 0 to remove the lead" is Gorelo's way; the tool offers it only as the clear_fields opt-in and never as a
-    # bare 0 in lead_assignee_id. The Project scope is missing, so the zero itself cannot be probed live.
+    # bare 0 in lead_assignee_id. This test pins the spec text only, not what Gorelo does with the zero.
     assert "`LeadAssigneeId: 0` removes the lead" in spec_text("patch", "/v1/projects/{projectId}/tasks/{taskId}")
     assert "lead_assignee_id" in offered_values("update_project_task", "clear_fields")
     assert module.TASK_CLEAR_VALUES["lead_assignee_id"] == 0
@@ -353,7 +355,7 @@ def test_the_documented_rules_the_docstrings_repeat_are_in_the_spec_text():
     approval = spec_text("post", "/v1/projects/{projectId}/tasks/{taskId}/conversations/approval")
     assert "active contact of the task's client **and** carry a contact tag marked as an approver" in approval
     assert "puts the task in a waiting-on-the-contact state" in approval
-    assert "Disapproved as soon as anyone disapproves" in spec_text("get", "/v1/projects/{projectId}/tasks/{taskId}/approvals/{approvalId}")
+    assert "Denied as soon as anyone denies" in spec_text("get", "/v1/projects/{projectId}/tasks/{taskId}/approvals/{approvalId}")
     assert "null `Id`" in spec_text("get", "/v1/projects/{projectId}/tasks/{taskId}/conversations")
     assert "assignedToMe` is not offered" in spec_text("get", "/v1/projects/{projectId}/tasks")
     assert "The conversation is created empty" in spec_text("post", "/v1/projects/{projectId}/tasks/{taskId}/conversations/side-conversation")
@@ -366,11 +368,21 @@ def schema_fields(name):
 
 
 @needs_spec_text
+def test_the_task_reads_say_that_last_update_type_comes_from_a_fixed_set():
+    # 2026-10-17: the task rows carry ProjectLastUpdateModel, whose UpdateType lists its values (the long list stays out of the tool text).
+    text = schema_fields("ProjectLastUpdateModel")["UpdateType"]
+    assert "from a fixed set" in text and "Empty, with an empty `Summary`, for any other recorded event" in text
+    for name in ("list_project_tasks", "get_project_task"):
+        doc = " ".join(specs()[name].fn.__doc__.split())
+        assert "UpdateType is one of a fixed set of event names (it and Summary are empty for any other recorded event)" in doc, name
+
+
+@needs_spec_text
 def test_the_create_task_parameter_texts_match_the_field_texts_of_the_schema():
     # 2026-10-02: SectionId is required next to Title; the defaults the descriptions state are the schema's.
     fields = schema_fields("CreateTaskCommand")
     assert fields["SectionId"].endswith("Required.") and fields["Title"].endswith("Required.")
-    assert "Defaults to NotStarted" in fields["StatusId"] and "NotStarted=1, WorkingOnIt=2, OnHold=3, Done=4" in fields["StatusId"]
+    assert "Defaults to 1 Not started" in fields["StatusId"] and "1 Not started, 2 Working on it, 3 On hold, 4 Done" in fields["StatusId"]
     assert "Defaults to Normal" in fields["PriorityId"]
     assert fields["LeadAssigneeId"].endswith("Optional.")
     assert "Display name to record as the task creator" in fields["CreatedByName"]
@@ -633,7 +645,7 @@ async def test_list_project_tasks_an_empty_page_is_reported_as_zero_rows(server,
         ({"section_ids": [SECTION, "12"]}, "section_ids[1]: expected a GUID such as"),
         ({"status_ids": []}, "status_ids: expected at least one id, got an empty list"),
         # 0 is answered with the status scale, not with "a positive whole number such as 123" (123 is no status)
-        ({"status_ids": [0]}, "status_ids[0]: expected 1 NotStarted, 2 WorkingOnIt, 3 OnHold, 4 Done, got 0"),
+        ({"status_ids": [0]}, "status_ids[0]: expected 1 Not started, 2 Working on it, 3 On hold, 4 Done, got 0"),
         ({"assignee_ids": [-5]}, "assignee_ids[0]: expected a positive whole number"),
         ({"assignee_ids": [2**63]}, "assignee_ids[0]: expected a positive whole number such as 123, got a number above"),
         ({"assignee_ids": []}, "assignee_ids: expected at least one id, got an empty list"),
@@ -706,7 +718,7 @@ async def test_list_project_tasks_refuses_a_response_that_is_not_a_list(server, 
 def test_list_project_tasks_docstring_says_there_is_no_assigned_to_me_filter():
     doc = " ".join(specs()["list_project_tasks"].fn.__doc__.split())
     assert "There is no assigned-to-me filter: use assignee_ids" in doc
-    assert "1 NotStarted, 2 WorkingOnIt, 3 OnHold, 4 Done" in param_description("list_project_tasks", "status_ids")
+    assert "1 Not started, 2 Working on it, 3 On hold, 4 Done" in param_description("list_project_tasks", "status_ids")
 
 
 @needs_spec_text
@@ -864,7 +876,7 @@ async def test_create_project_task_never_sends_a_priority_the_caller_did_not_giv
         ({"assisting_assignee_ids": [0]}, "assisting_assignee_ids[0]: expected a positive whole number"),
         ({"watcher_ids": []}, "watcher_ids: expected at least one id, got an empty list"),
         ({"watcher_ids": [9202, -1]}, "watcher_ids[1]: expected a positive whole number"),
-        ({"status_id": 0}, "status_id: expected 1 NotStarted, 2 WorkingOnIt, 3 OnHold, 4 Done, got 0"),
+        ({"status_id": 0}, "status_id: expected 1 Not started, 2 Working on it, 3 On hold, 4 Done, got 0"),
         ({"due_date": "2026-11-30T17:00:00"}, "due_date: '2026-11-30T17:00:00' has no UTC offset"),
         ({"created_on": "2026-01-02"}, "created_on: '2026-01-02' has no UTC offset"),
         ({"updated_on": "tomorrow"}, "updated_on: 'tomorrow' is not an ISO 8601 datetime"),
@@ -958,7 +970,7 @@ def test_create_project_task_docstring_lists_the_required_fields_and_the_section
     section = param_description("create_project_task", "section_id")
     assert "list_project_sections" in section
     assert "Omit" not in section and "let Gorelo decide" not in section
-    assert "Omit and Gorelo uses NotStarted" in param_description("create_project_task", "status_id")
+    assert "Omit and Gorelo uses 1 Not started" in param_description("create_project_task", "status_id")
 
 
 def test_create_project_task_docstring_states_the_documented_side_effects():
@@ -1103,7 +1115,7 @@ async def test_update_project_task_false_for_clear_due_date_is_the_same_as_leavi
         ({"status_reason": ""}, "status_reason: must not be empty or whitespace only"),
         ({"title": "T", "updated_by_name": ""}, "updated_by_name: must not be empty or whitespace only"),
         ({"section_id": "backlog"}, "section_id: expected a GUID such as"),
-        ({"status_id": 0}, "status_id: expected 1 NotStarted, 2 WorkingOnIt, 3 OnHold, 4 Done, got 0"),
+        ({"status_id": 0}, "status_id: expected 1 Not started, 2 Working on it, 3 On hold, 4 Done, got 0"),
         ({"watcher_ids": [0]}, "watcher_ids[0]: expected a positive whole number"),
         ({"blocked_by_task_ids": ["x"]}, "blocked_by_task_ids[0]: expected a GUID such as"),
         ({"agent_asset_ids": [ASSET, "y"]}, "agent_asset_ids[1]: expected a GUID such as"),
@@ -1263,7 +1275,7 @@ async def test_update_project_task_maps_gorelo_errors_to_the_param(server, mock_
             ],
         ),
     )
-    # 3 OnHold is on the task scale, so it reaches Gorelo (the old 9 is refused locally, see the status section)
+    # 3 On hold is on the task scale, so it reaches Gorelo (the old 9 is refused locally, see the status section)
     text = await call_tool_error(server, "update_project_task", {"project_id": PROJECT, "task_id": TASK, "status_id": 3})
     assert text == (
         "Gorelo rejected update_project_task (HTTP 400, code 070101): blocking_task_ids: A blocking task is in "
@@ -1369,14 +1381,14 @@ async def test_a_task_update_sends_no_author_unless_the_caller_gave_one(server, 
 # the accepted values with their labels the way priority_id does. That includes 0 and the negative numbers, which
 # are answered with the scale too ("expected a positive whole number such as 123" would suggest that 123 is a status); a
 # value that is not a whole number (a boolean, a decimal, text) keeps the id message of positive_id.
-TASK_SCALE = "1 NotStarted, 2 WorkingOnIt, 3 OnHold, 4 Done"
+TASK_SCALE = "1 Not started, 2 Working on it, 3 On hold, 4 Done"
 TASK_EXPECTED = f"expected {TASK_SCALE}"
 ID_EXPECTED = "expected a positive whole number such as 123"
 
 
 def documented_scale(text):
-    """{id: label} of every "Label=N" pair of a spec text (spaces inside a label dropped: "Not Started" is NotStarted)."""
-    return {int(number): label.replace(" ", "") for label, number in re.findall(r"([A-Za-z][A-Za-z ]*)=(\d+)", text)}
+    """{id: label} of every "N Label" item of a spec text such as "1 Not started, 2 Working on it" (the label runs to the comma or the full stop)."""
+    return {int(number): label for number, label in re.findall(r"(\d+) ([A-Z][a-z]+(?: [a-z]+)*)", text)}
 
 
 @needs_spec_text
@@ -1388,7 +1400,7 @@ def test_the_task_status_scale_is_the_one_the_three_spec_texts_document():
     }
     for where, text in texts.items():
         assert documented_scale(text) == module.TASK_STATUS_LABELS, where
-    assert module.TASK_STATUS_LABELS == {1: "NotStarted", 2: "WorkingOnIt", 3: "OnHold", 4: "Done"}
+    assert module.TASK_STATUS_LABELS == {1: "Not started", 2: "Working on it", 3: "On hold", 4: "Done"}
 
 
 def test_the_task_status_text_the_model_reads_is_built_from_the_table_the_check_uses():
@@ -1949,5 +1961,6 @@ async def test_get_task_approval_unknown_approval_is_a_404(server, mock_gorelo):
 
 def test_get_task_approval_docstring_says_this_is_where_the_status_lives():
     doc = " ".join(specs()["get_task_approval"].fn.__doc__.split())
-    for fragment in ("This is where the approval status lives", "Disapproved as soon as anyone disapproves", "Approved once everyone approves", "Pending otherwise"):
+    for fragment in ("This is where the approval status lives", "Denied as soon as anyone denies", "Approved once everyone approves", "Pending otherwise"):
         assert fragment in doc, fragment
+    assert "Disapprove" not in doc  # Gorelo calls it Denied since 2026-10-17

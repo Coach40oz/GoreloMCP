@@ -1,7 +1,10 @@
 """tools/forms.py: list_forms, list_form_responses and create_form_submission_link.
 
-Offline only: an API key without the Forms scope gets a 403 (code 080203), so these tests
-are the only coverage. They include the missing-scope message for every tool."""
+Offline only. These tests include the missing-scope message (a 403 with code 080203) for every tool."""
+
+import json
+import re
+from pathlib import Path
 
 import httpx
 import pytest
@@ -12,10 +15,12 @@ from conftest import (
     envelope,
     error_envelope,
     list_tools,
+    make_ctx,
     paged_envelope,
     paged_responder,
     uid,
 )
+from fastmcp.exceptions import ToolError
 
 import tools  # noqa: F401  (importing the package registers every tool)
 from gorelo_client import FORBIDDEN_OPS, GoreloAPIError
@@ -34,6 +39,9 @@ EXPECTED_TOOLS = {
     "create_form_submission_link": ("write", ["POST /v1/forms/{formId}/submission-links"]),
 }
 SCOPE_NOTE = ("080203", "API key does not have 'Forms' scope")
+# The spec-text pins read the full published OpenAPI snapshot (spec/spec_index.json carries no description text).
+LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
+needs_spec_text = pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
 
 
 def form(form_id="aB3dE9", title="New starter checklist", **overrides):
@@ -100,6 +108,24 @@ def server(server_factory):
 
 def module_specs():
     return {spec.name: spec for spec in REGISTRY.specs if spec.fn.__module__ == "tools.forms"}
+
+
+def operation(method, path):
+    return json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["paths"][path][method]
+
+
+def param_text(method, path, name):
+    return " ".join(next(p["description"] for p in operation(method, path)["parameters"] if p["name"] == name).split())
+
+
+def scale_of(text):  # {id: label} from "1 Active, 2 Archived"
+    return {int(n): label for n, label in re.findall(r"(\d+) ([A-Z][a-z]+)", text)}
+
+
+async def call_directly(client_factory, tool, **kwargs):
+    """Call the decorated function itself (no pydantic in front of it): for the checks the schema normally pre-empts."""
+    async with client_factory() as client:
+        return await tool(make_ctx(client), **kwargs)
 
 
 # --------------------------------------------------------------------------
@@ -185,6 +211,10 @@ async def test_schemas_annotations_and_descriptions(server_factory):
         "ask the user before requesting another",
     ):
         assert fragment in create, fragment
+    assert listed["list_forms"].inputSchema["properties"]["status_ids"]["description"] == (
+        "1 Active, 2 Archived (deleted in the app, recoverable there). Omitted: Active only; archived forms are left out."
+    )
+    assert "Archived forms are left out unless status_ids includes 2" in " ".join(listed["list_forms"].description.split())
 
 
 # Every parameter that takes an id of another record names the tool that lists it (in the parameter text).
@@ -339,8 +369,9 @@ async def test_list_forms_maps_a_gorelo_400_to_the_snake_case_parameter(server, 
     "args, fragment",
     [
         ({"status_ids": []}, "status_ids: expected at least one id, got an empty list"),
-        ({"status_ids": [3]}, "status_ids: Gorelo form statuses are 1 (Active), 2 (Archived), got 3"),
-        ({"status_ids": [1, 0]}, "status_ids[1]: expected a positive whole number such as 123, got zero or a negative number"),
+        ({"status_ids": [3]}, "status_ids[0]: expected 1 Active, 2 Archived, got 3"),
+        ({"status_ids": [1, 0]}, "status_ids[1]: expected 1 Active, 2 Archived, got 0"),
+        ({"status_ids": [-4]}, "status_ids[0]: expected 1 Active, 2 Archived, got -4"),
         ({"status_ids": [MAX_ID + 1]}, "status_ids[0]: expected a positive whole number such as 123, got a number above"),
         ({"group_ids": []}, "group_ids: expected at least one id, got an empty list"),
         ({"group_ids": [0]}, "group_ids[0]: expected a positive whole number such as 123, got zero or a negative number"),
@@ -363,6 +394,34 @@ async def test_list_forms_rejects_bad_input_before_any_http_call(server, mock_go
     text = await call_tool_error(server, "list_forms", args)
     assert fragment in text
     assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("ids, sent", [([1], "1"), ([2], "2"), ([1, 2], "1,2")])
+async def test_list_forms_accepts_each_status_of_the_scale_and_both_together(server, mock_gorelo, ids, sent):
+    mock_gorelo.on("GET", "/v1/forms", paged_envelope([]))
+    result = await call_tool(server, "list_forms", {"status_ids": ids})
+    assert mock_gorelo.last.query == {"StatusIds": sent, "PageSize": "50"}
+    assert result["filters"] == {"status_ids": ids}
+
+
+@pytest.mark.parametrize("bad, kind", [(True, "a boolean"), (5.0, "a decimal number"), ("1", "a string"), (None, "null")])
+async def test_list_forms_direct_call_keeps_the_id_messages_for_what_is_not_a_whole_number(
+    client_factory, mock_gorelo, bad, kind
+):
+    with pytest.raises(ToolError) as info:
+        await call_directly(client_factory, forms.list_forms, status_ids=[bad])
+    assert str(info.value) == f"status_ids[0]: expected a positive whole number such as 123, got {kind}"
+    assert mock_gorelo.requests == []
+
+
+@needs_spec_text
+def test_the_form_status_scale_is_the_one_the_spec_text_documents():
+    text = param_text("get", "/v1/forms", "StatusIds")
+    assert scale_of(text) == forms.FORM_STATUSES
+    assert "Omitted returns Active only (archived excluded)" in text
+    assert "Any other id is a 400" in text
+    op = " ".join(operation("get", "/v1/forms")["description"].split())
+    assert "An archived form is" in op and "readable here by id" in op
 
 
 # (tool, the id parameter under test)
@@ -741,3 +800,10 @@ async def test_each_tool_sends_exactly_the_operations_it_declares(server, mock_g
         await call_tool(server, name, args)
         sent = {f"{r.method} {r.path}" for r in mock_gorelo.requests}
         assert sent == {op.replace("{formId}", "aB3dE9") for op in specs[name].ops}, name
+
+
+def test_the_forms_module_text_is_plain_ascii_without_dashes():
+    for path in (Path(forms.__file__), Path(__file__)):
+        source = path.read_text(encoding="utf-8")
+        assert source.isascii(), path.name
+        assert EM_DASH not in source and EN_DASH not in source, path.name

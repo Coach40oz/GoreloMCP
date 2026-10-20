@@ -14,8 +14,10 @@ from site_helper import REAL_VERIFY, site_config_env  # noqa: F401  (autouse: in
 
 from scripts import site_config
 from scripts.live import _env, cleanup, probes_20261001, smoke, write_matrix
+from scripts.live import guard as guard_module
 from scripts.live.manifest import Manifest
 from scripts.site_config import SiteConfigError
+from test_live_write_matrix import FakeGorelo
 
 pytestmark = pytest.mark.anyio
 
@@ -203,3 +205,135 @@ def test_probes_write_only_to_the_exact_test_client_or_records_they_created(monk
     assert not allowed("POST", "/tickets", {"ClientId": 9502}) and not allowed("PATCH", "/clients", {"Id": 9502})
     assert not allowed("DELETE", "/tickets/89", None) and not allowed("DELETE", "/clients/9501", None)
     assert not allowed("PATCH", "/contacts", {"ContactId": 78, "ClientId": 9501})
+
+
+# --- the status of the clients: a write run needs the test client Active (contract a7954b24844b: 1 Active, 3 Credit hold, 4 Archived) ---
+
+
+def gorelo_with_status(statuses, requests):
+    """Like gorelo(): every configured client exists under its name; `statuses` maps a client id to its Status object (or DROP)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        client_id = int(request.url.path.rsplit("/", 1)[1])
+        data = {"Id": client_id, "Name": NAMES[client_id]}
+        status = statuses.get(client_id, {"Id": 1, "Name": "Active"})
+        if status is not DROP:
+            data["Status"] = status
+        return httpx.Response(200, json={"IsSuccess": True, "Data": data})
+
+    return httpx.MockTransport(handler)
+
+
+DROP = object()
+ARCHIVED = {"Id": 4, "Name": "Archived"}
+
+
+async def test_the_check_returns_the_status_of_each_client_from_the_same_reads():
+    seen = []
+    facts = await REAL_VERIFY(TEST_API_KEY, transport=gorelo_with_status({9501: ARCHIVED}, seen))
+    assert [(r.method, r.url.path) for r in seen] == [("GET", "/v1/clients/9501"), ("GET", "/v1/clients/9502")]  # no extra request
+    assert facts[9501] == guard_module.ClientFacts(4, "Archived") and not facts[9501].active
+    assert facts[9502] == guard_module.ClientFacts(1, "Active") and facts[9502].active
+
+
+@pytest.mark.parametrize(
+    "status, expected",
+    [
+        (DROP, guard_module.ClientFacts(None, None)),
+        (None, guard_module.ClientFacts(None, None)),
+        ("Active", guard_module.ClientFacts(None, None)),
+        ({"Id": "1", "Name": "Active"}, guard_module.ClientFacts(None, "Active")),
+        ({"Id": True, "Name": "Active"}, guard_module.ClientFacts(None, "Active")),
+        ({"Id": 3, "Name": 5}, guard_module.ClientFacts(3, None)),
+        ({"Id": 3, "Name": "Credit hold"}, guard_module.ClientFacts(3, "Credit hold")),
+    ],
+)
+async def test_a_status_that_cannot_be_read_is_unknown_and_never_active(status, expected):
+    facts = await REAL_VERIFY(TEST_API_KEY, transport=gorelo_with_status({9501: status}, []))
+    assert facts[9501] == expected and not facts[9501].active
+
+
+def test_the_test_client_must_be_active_by_its_status_id():
+    cfg = site_config.load()
+    active, archived = guard_module.ClientFacts(1, "Active"), guard_module.ClientFacts(4, "Archived")
+    guard_module.require_active_test_client({9501: active, 9502: archived}, cfg)  # only the TEST client counts here
+    for facts, said in (
+        ({9501: archived}, "the test client 9501 is Archived (status 4), so a write run did not start and nothing but the two client reads was sent"),
+        ({9501: guard_module.ClientFacts(3, "Credit hold")}, "is Credit hold (status 3)"),
+        ({9501: guard_module.ClientFacts(None, None)}, "is of a status that could not be read"),
+        ({9502: active}, "the status of the test client 9501 was not read"),
+        ({}, "the status of the test client 9501 was not read"),
+        (None, "the status of the test client 9501 was not read"),
+        ({9501: guard_module.ClientFacts(1, "Archived")}, None),  # the id decides, never the name
+        ({9501: guard_module.ClientFacts(4, "Active")}, "is Active (status 4)"),
+    ):
+        if said is None:
+            guard_module.require_active_test_client(facts, cfg)
+            continue
+        with pytest.raises(guard_module.ClientNotActive) as refused:
+            guard_module.require_active_test_client(facts, cfg)
+        assert said in str(refused.value)
+        assert isinstance(refused.value, SiteConfigError)  # every entry point that prints "cannot start" and exits 2 handles it
+
+
+def test_the_refusal_tells_the_operator_what_to_do_and_that_the_harness_never_changes_a_client():
+    with pytest.raises(guard_module.ClientNotActive) as refused:
+        guard_module.require_active_test_client({9501: guard_module.ClientFacts(4, "Archived")}, site_config.load())
+    text = str(refused.value)
+    assert "The operator has to make the test client Active again in the Gorelo app" in text
+    assert "this harness never changes the status of a client itself" in text and "needs the test client Active (status 1)" in text
+    assert "Sandbox" not in text  # the name of the client is not repeated
+
+
+async def test_the_write_matrix_stops_on_an_archived_test_client_with_nothing_sent_and_no_manifest(make_settings, tmp_path, monkeypatch):
+    monkeypatch.setattr(write_matrix.live_guard, "verify_site_clients", REAL_VERIFY)
+    seen = []
+    with pytest.raises(guard_module.ClientNotActive, match="the test client 9501 is Archived"):
+        await write_matrix.run_matrix(
+            settings=make_settings(destructive=True), transport=gorelo_with_status({9501: ARCHIVED}, seen),
+            pace=0, directory=tmp_path / "runs", echo=lambda line: None,
+        )
+    assert [r.method for r in seen] == ["GET", "GET"] and not (tmp_path / "runs").exists()  # only the two reads of the check
+
+
+async def test_every_area_selection_needs_the_active_test_client_not_only_the_ones_that_name_it(make_settings, tmp_path, monkeypatch):
+    monkeypatch.setattr(write_matrix.live_guard, "verify_site_clients", REAL_VERIFY)
+    for only in (["clients"], ["email"], ["documents"], ["custom_assets"]):
+        with pytest.raises(guard_module.ClientNotActive):
+            await write_matrix.run_matrix(
+                settings=make_settings(destructive=True), transport=gorelo_with_status({9501: ARCHIVED}, []), pace=0,
+                directory=tmp_path / "runs", echo=lambda line: None, areas=only, with_documents=True, with_custom_assets=True,
+            )
+
+
+def test_the_write_matrix_main_exits_2_with_cannot_start_for_an_archived_test_client(monkeypatch, capsys):
+    async def refuse(**options):
+        raise guard_module.ClientNotActive("the test client 9501 is Archived (status 4), so a write run did not start")
+
+    monkeypatch.setattr(write_matrix, "run_matrix", refuse)
+    assert write_matrix.main([]) == 2
+    assert "cannot start: the test client 9501 is Archived (status 4)" in capsys.readouterr().err
+
+
+async def test_the_cleanup_does_not_refuse_an_archived_test_client_it_has_to_clean_up_what_a_run_left(make_settings, tmp_path, monkeypatch):
+    monkeypatch.setattr(cleanup.live_guard, "verify_site_clients", REAL_VERIFY)
+    manifest = Manifest("MCPTEST-20990101000000", tmp_path / "run.json")
+    seen = []
+    report = await cleanup.run_cleanup(
+        manifest, settings=make_settings(destructive=True), transport=gorelo_with_status({9501: ARCHIVED, 9502: ARCHIVED}, seen),
+        pace=0, echo=lambda line: None,
+    )
+    assert report.ok and [r.url.path for r in seen] == ["/v1/clients/9501", "/v1/clients/9502"]
+
+
+async def test_the_matrix_reads_a_second_client_that_is_not_active_as_no_move_not_as_a_refusal(make_settings, tmp_path, monkeypatch):
+    import site_helper
+
+    site_helper.CLIENT_STATUS[9502] = (4, "Archived")  # the stub of the check reports the second client archived
+    fake = FakeGorelo()
+    report = await write_matrix.run_matrix(
+        settings=make_settings(destructive=True), transport=fake.mock.transport, pace=0, directory=tmp_path / "runs",
+        echo=lambda line: None, areas=["clients"], lookup_wait=0,
+    )
+    assert report.ok  # a second client that is not Active stops nothing by itself: only the asset move needs it (see test_live_custom_assets)

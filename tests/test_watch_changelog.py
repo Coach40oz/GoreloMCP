@@ -2,8 +2,8 @@
 the exit codes, plus the systemd units in deploy/ that run it.
 
 The watcher talks to three things: the changelog feed (feedback.gorelo.io), the live OpenAPI spec and Gorelo's
-alert endpoint (api.usw.gorelo.io). Here all three are one httpx.MockTransport (the `world` fixture), so nothing
-touches a socket (conftest also blocks them) and no alert is ever really posted. Each test runs the watcher
+alert endpoint (api.usw.gorelo.io, or the host of GORELO_BASE_URL). Here all three are one httpx.MockTransport
+(the `world` fixture), so nothing touches a socket (conftest also blocks them) and no alert is ever really posted. Each test runs the watcher
 against a temp directory standing in for /opt/gorelo-mcp/app: its own spec/spec_index.json baseline and its own
 .state/.
 
@@ -33,6 +33,7 @@ import httpx
 import pytest
 from conftest import envelope, error_envelope
 from site_helper import site_config_env  # noqa: F401  (autouse: points GORELO_SITE_CONFIG at invented values)
+import settings as settings_module
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO_ROOT / "scripts"
@@ -103,6 +104,7 @@ class World:
         self.feed_reply = None  # None: the entries; else a Response, an exception or a function
         self.spec_reply = None
         self.alert_reply = None  # None: Gorelo confirms (200, IsSuccess true, Data true)
+        self.alert_host = "api.usw.gorelo.io"  # the host the alert goes to: the region of GORELO_BASE_URL in the run
         self.requests = []
         self.unmatched = []
 
@@ -113,7 +115,7 @@ class World:
             return reply_with(self.feed_reply, lambda: httpx.Response(200, json={"results": self.entries}))
         if route == ("GET", "api.usw.gorelo.io", "/swagger/v1/swagger.json"):
             return reply_with(self.spec_reply, lambda: httpx.Response(200, content=self.spec_bytes))
-        if route == ("POST", "api.usw.gorelo.io", "/v1/alerts"):
+        if route == ("POST", self.alert_host, "/v1/alerts"):
             return reply_with(self.alert_reply, lambda: httpx.Response(200, json=envelope(True)))
         self.unmatched.append(route)
         return httpx.Response(404, json={"error": "no such route in the test world"})
@@ -859,6 +861,131 @@ def test_the_api_key_goes_only_to_the_alert_request_and_never_into_output(world,
     for path in app.state_dir.rglob("*"):
         if path.is_file():
             assert API_KEY.encode() not in path.read_bytes(), path
+
+
+# --------------------------------------------------------------------------
+# The region of the alert
+# --------------------------------------------------------------------------
+
+AU_ALERT_URL = "https://api.aue.gorelo.io/v1/alerts"
+
+
+def aue_env(value="https://api.aue.gorelo.io"):
+    return {"GORELO_API_KEY": API_KEY, "GORELO_BASE_URL": value}
+
+
+def test_the_watcher_shares_the_servers_parser_and_keeps_the_us_alert_url_as_its_default():
+    assert watch.parse_base_url is settings_module.parse_base_url
+    assert watch.ALERT_URL == ALERT_URL == watch.alert_url({}) == watch.alert_url({"GORELO_BASE_URL": "  "})
+    assert watch.alert_url(aue_env("https://api.aue.gorelo.io/v1/")) == AU_ALERT_URL
+
+
+def test_alert_url_refuses_a_value_the_server_refuses_and_names_the_variable():
+    with pytest.raises(settings_module.SettingsError, match="GORELO_BASE_URL"):
+        watch.alert_url({"GORELO_BASE_URL": "http://api.aue.gorelo.io"})
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["https://api.aue.gorelo.io", "https://api.aue.gorelo.io/", "https://api.aue.gorelo.io/v1", "https://API.aue.gorelo.io/v1/"],
+)
+def test_the_alert_goes_to_the_configured_region_and_the_spec_is_still_read_from_the_us_host(world, app, value):
+    world.alert_host = "api.aue.gorelo.io"
+    baselined(world, app)
+    world.entries.insert(0, API_ENTRY)
+    assert run(world, app, env=aue_env(value)) == 1
+    (post,) = world.alert_posts
+    assert str(post.url) == AU_ALERT_URL and post.headers["X-API-Key"] == API_KEY
+    gets = [r for r in world.requests if r.method == "GET"]
+    assert {r.url.host for r in gets if r.url.path.endswith("swagger.json")} == {"api.usw.gorelo.io"}
+    assert all("X-API-Key" not in r.headers for r in gets)
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_an_unset_or_blank_base_url_posts_to_the_us_host(world, app, value):
+    baselined(world, app)
+    world.entries.insert(0, API_ENTRY)
+    env = {"GORELO_API_KEY": API_KEY} if value is None else {"GORELO_API_KEY": API_KEY, "GORELO_BASE_URL": value}
+    assert run(world, app, env=env) == 1
+    assert [str(p.url) for p in world.alert_posts] == [ALERT_URL]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://api.aue.gorelo.io", "https://evil.example", "https://api.aue.gorelo.io.evil.example/v1",
+        "https://user:hunter2@api.aue.gorelo.io", "https://api.aue.gorelo.io:8443", "https://api.aue.gorelo.io/v2",
+        "https://api.aue.gorelo.io/v1?x=1", "https://api.aue.gorelo.io/v1#x",
+    ],
+)
+def test_a_base_url_the_server_would_refuse_stops_the_run_before_any_request_and_the_key_goes_nowhere(world, app, capsys, value):
+    assert run(world, app, env=aue_env(value)) == 3
+    captured = capsys.readouterr()
+    assert "ERROR GORELO_BASE_URL " in captured.err and "/etc/gorelo-mcp/watcher.env" in captured.err
+    assert API_KEY not in captured.out + captured.err and "hunter2" not in captured.out + captured.err
+    assert world.requests == [] and not (app.app_dir / ".state").exists()
+
+
+def test_a_401_from_the_alert_endpoint_names_the_host_and_the_variable(world, app, capsys):
+    baselined(world, app)
+    capsys.readouterr()
+    world.entries.insert(0, API_ENTRY)
+    world.alert_reply = ALERT_FAILURES["http-401"]
+    assert run(world, app) == 1
+    err = capsys.readouterr().err
+    assert "ALERT NOT SENT" in err and "Gorelo answered HTTP 401 (Invalid API key" in err
+    assert (
+        "from api.usw.gorelo.io; check GORELO_API_KEY (the raw key, no Bearer prefix) and GORELO_BASE_URL in "
+        "/etc/gorelo-mcp/watcher.env: the host must be the region your Gorelo account is hosted in "
+        "(US api.usw.gorelo.io, Australia api.aue.gorelo.io)" in err
+    )
+    assert "the next run tries again" in err and API_KEY not in err
+
+
+def test_a_401_names_the_australian_host_when_that_is_where_the_alert_went(world, app, capsys):
+    world.alert_host = "api.aue.gorelo.io"
+    baselined(world, app)
+    capsys.readouterr()
+    world.entries.insert(0, API_ENTRY)
+    world.alert_reply = ALERT_FAILURES["http-401"]
+    assert run(world, app, env=aue_env()) == 1
+    err = capsys.readouterr().err
+    assert (
+        "from api.aue.gorelo.io; check GORELO_API_KEY (the raw key, no Bearer prefix) and GORELO_BASE_URL in "
+        "/etc/gorelo-mcp/watcher.env" in err
+    )
+    assert "from api.usw.gorelo.io" not in err
+
+
+GATEWAY_401 = {
+    "json": lambda: httpx.Response(401, json={"error": "Invalid or missing API key format", "timestamp": "2026-10-17T06:30:00Z"}),
+    "text": lambda: httpx.Response(401, text="Unauthorized", headers={"content-type": "text/plain"}),
+}
+
+
+@pytest.mark.parametrize("body", sorted(GATEWAY_401))
+def test_a_401_from_the_gateway_without_an_envelope_gets_the_hint_too(world, app, capsys, body):
+    baselined(world, app)
+    capsys.readouterr()
+    world.entries.insert(0, API_ENTRY)
+    world.alert_reply = GATEWAY_401[body]
+    assert run(world, app) == 1
+    err = capsys.readouterr().err
+    assert "ALERT NOT SENT" in err
+    assert (
+        "Gorelo answered HTTP 401 from api.usw.gorelo.io; check GORELO_API_KEY (the raw key, no Bearer prefix) and "
+        "GORELO_BASE_URL in /etc/gorelo-mcp/watcher.env" in err
+    )
+    assert API_KEY not in err
+
+
+def test_other_failures_do_not_get_the_region_text(world, app, capsys):
+    baselined(world, app)
+    capsys.readouterr()
+    world.entries.insert(0, API_ENTRY)
+    world.alert_reply = ALERT_FAILURES["http-500"]
+    assert run(world, app) == 1
+    assert "region" not in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------

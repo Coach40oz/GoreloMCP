@@ -17,7 +17,10 @@ Every API change gets ONE alert through the Gorelo API (POST /v1/alerts) against
 the only key of that file the watcher reads; the file is /opt/gorelo-mcp/app/site.local.toml, root:gorelo-mcp 0640),
 Resource "gorelo-mcp", Severity 2, with a short summary and the path of its report. The key comes from
 GORELO_API_KEY in the environment (the systemd unit loads /etc/gorelo-mcp/watcher.env) and is sent as
-X-API-Key to the alert request only, never to the changelog host.
+X-API-Key to the alert request only: the changelog fetch never carries it.
+The alert goes to GORELO_BASE_URL (the same variable the server reads, here from watcher.env; optional, unset means the US host
+https://api.usw.gorelo.io/v1; https and a host under gorelo.io only, or the run exits 3 before any request). The spec check
+reads the US host (SPEC_URL).
 
 Exit codes (a systemd timer or cron acts on them; the unit treats 0 and 2 as success):
     0  nothing new
@@ -58,6 +61,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -66,11 +70,16 @@ import spec_diff  # noqa: E402
 import site_config  # noqa: E402
 import spec_snapshot  # noqa: E402
 
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent))  # settings.py, the one parser of GORELO_BASE_URL, is at the repo root
+from settings import DEFAULT_BASE_URL, SettingsError, parse_base_url  # noqa: E402
+
 FEED = "https://feedback.gorelo.io/api/v1/changelog"
 CHANGELOG_PAGE = "https://feedback.gorelo.io/changelog"
 SPEC_URL = spec_snapshot.DEFAULT_SOURCE
-ALERT_URL = "https://api.usw.gorelo.io/v1/alerts"
+ALERT_PATH = "/alerts"
+ALERT_URL = DEFAULT_BASE_URL + ALERT_PATH  # the US default; the run uses alert_url(env)
 API_KEY_ENV = "GORELO_API_KEY"
+BASE_URL_ENV = "GORELO_BASE_URL"
 ALERT_RESOURCE = "gorelo-mcp"
 ALERT_SEVERITY = 2
 TIMEOUT = 30.0
@@ -488,9 +497,12 @@ def spec_change(drift: SpecDrift) -> Change:
     )
 
 
-def post_alert(http: httpx.Client, api_key: str, alert_client_id: int, name: str, description: str) -> tuple[bool, str]:
-    """POST one alert. (True, "") only when Gorelo answers 2xx with IsSuccess true and Data true; otherwise
-    (False, why). Never raises for a network or Gorelo problem, and never repeats the request."""
+def post_alert(
+    http: httpx.Client, api_key: str, alert_client_id: int, name: str, description: str, *, url: str = ALERT_URL
+) -> tuple[bool, str]:
+    """POST one alert to `url`, the alert endpoint of the region (see alert_url). (True, "") only when Gorelo answers 2xx
+    with IsSuccess true and Data true; otherwise (False, why). Never raises for a network or Gorelo problem, and never
+    repeats the request."""
     if not api_key:
         return False, f"{API_KEY_ENV} is not set in the environment"
     body = {
@@ -503,7 +515,7 @@ def post_alert(http: httpx.Client, api_key: str, alert_client_id: int, name: str
     try:
         # follow_redirects=False: a redirect must never carry the API key to another host
         response = http.post(
-            ALERT_URL, json=body, headers={"X-API-Key": api_key, "Accept": "application/json"}, follow_redirects=False
+            url, json=body, headers={"X-API-Key": api_key, "Accept": "application/json"}, follow_redirects=False
         )
     except httpx.TimeoutException:
         return False, "the alert request timed out (the alert may or may not exist)"
@@ -514,7 +526,14 @@ def post_alert(http: httpx.Client, api_key: str, alert_client_id: int, name: str
     except ValueError:
         payload = None
     if not 200 <= response.status_code < 300:
-        return False, f"Gorelo answered HTTP {response.status_code}{_notes(payload)}"
+        where = ""
+        if response.status_code == 401:  # the key goes to this host only: name it and the two settings to check
+            where = (
+                f" from {urlsplit(url).hostname}; check {API_KEY_ENV} (the raw key, no Bearer prefix) and "
+                f"{BASE_URL_ENV} in /etc/gorelo-mcp/watcher.env: the host must be the region your Gorelo account is "
+                "hosted in (US api.usw.gorelo.io, Australia api.aue.gorelo.io)"
+            )
+        return False, f"Gorelo answered HTTP {response.status_code}{_notes(payload)}{where}"
     if not (isinstance(payload, dict) and payload.get("IsSuccess") is True and payload.get("Data") is True):
         return False, f"Gorelo answered HTTP {response.status_code} but not with IsSuccess true and Data true{_notes(payload)}"
     return True, ""
@@ -537,6 +556,13 @@ def _notes(payload: Any) -> str:
     if trace:
         parts.append(f"trace {clean(trace, 80)}")
     return f" ({', '.join(parts)})" if parts else ""
+
+
+def alert_url(env: Mapping[str, str]) -> str:
+    """The alert endpoint of the region in `env`: GORELO_BASE_URL (the server's own setting, here read from watcher.env) or
+    the US default, plus /alerts. Raises settings.SettingsError for a value the server would refuse: the API key goes to this
+    address and to no other, and never to a host outside gorelo.io."""
+    return parse_base_url(env.get(BASE_URL_ENV)) + ALERT_PATH
 
 
 # --------------------------------------------------------------------------
@@ -566,6 +592,12 @@ def run(
         alert_client_id = site_config.watcher_alert_client()  # no site config, no run: the alert client must never be guessed
     except site_config.SiteConfigError as exc:
         print(f"ERROR {exc}", file=sys.stderr)
+        return EXIT_FAILURE
+
+    try:
+        url = alert_url(env)  # before any request or file: the key must not go to an address the server would refuse
+    except SettingsError as exc:
+        print(f"ERROR {exc} (the watcher reads it from its environment, /etc/gorelo-mcp/watcher.env)", file=sys.stderr)
         return EXIT_FAILURE
 
     try:
@@ -626,7 +658,9 @@ def run(
         # 4. The alerts: one per change, each recorded as soon as Gorelo confirms it.
         api_key = (env.get(API_KEY_ENV) or "").strip()
         for change in changes:
-            change.sent, change.detail = post_alert(http, api_key, alert_client_id, change.name, change.description)
+            change.sent, change.detail = post_alert(
+                http, api_key, alert_client_id, change.name, change.description, url=url
+            )
             if change.sent:
                 alerts[change.key] = {"alerted_at": clock().isoformat(), "name": change.name, "report": str(change.report)}
                 write_json(paths, paths.alerts_file, {"alerts": alerts})

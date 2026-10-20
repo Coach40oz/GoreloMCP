@@ -1,6 +1,9 @@
 """tools/contacts.py: list_contacts, get_contact, create_contact, update_contact."""
 
+import json
+import re
 import typing
+from pathlib import Path
 
 import httpx
 import pytest
@@ -23,6 +26,9 @@ from gorelo_client import FORBIDDEN_OPS
 from tools._common import REGISTRY
 
 pytestmark = pytest.mark.anyio
+
+LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
+CONTACT_SCALE = "1 Active, 3 Temporary, 4 Archived"
 
 CONTACTS = "/v1/contacts"
 CONTACT_5 = "/v1/contacts/5"  # update_contact: the id is in the path only (the command has no ContactId)
@@ -328,6 +334,44 @@ def test_the_create_docstring_says_nothing_is_inferred():
     assert "cannot delete contacts" in doc
 
 
+async def test_the_contact_status_texts_are_the_new_scale_in_every_contacts_tool(server):
+    listed = {tool.name: tool for tool in await list_tools(server) if tool.name in TOOLS}
+    assert set(listed) == set(TOOLS)
+    status = listed["list_contacts"].inputSchema["properties"]["status_ids"]["description"]
+    assert status == (
+        "1 Active, 3 Temporary, 4 Archived, up to 100. Omit it and Archived contacts are left out; give it and only those "
+        "are returned."
+    )
+    assert len(status) <= 160
+    listing = flat(listed["list_contacts"].description)
+    assert "Archived contacts are left out unless status_ids asks for status 4; deleted contacts are never listed." in listing
+    assert len(listing) <= 700
+    for tool in listed.values():  # no word of the old scale in any text the model reads
+        for text in [tool.description, *[p["description"] for p in tool.inputSchema["properties"].values()]]:
+            assert "Inactive" not in text and "Archive." not in text, tool.name
+
+
+@pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
+def test_the_contact_status_scale_is_the_one_in_the_spec_text():
+    # the StatusIds text of the full OpenAPI snapshot (contract a7954b24844b), read as the spec states it
+    spec = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))
+    parameters = spec["paths"][CONTACTS]["get"]["parameters"]
+    text = " ".join(next(p for p in parameters if p["name"] == "StatusIds")["description"].split())
+    assert text == (
+        "Comma-separated contact status ids to include: 1 Active, 3 Temporary, 4 Archived. Default excludes Archived; "
+        "when supplied, only the listed statuses are returned. Any other value is a 400. Up to 100 values. Deleted contacts "
+        "are never listed."
+    )
+    listed = text.split("include:")[1].split("Default")[0]
+    scale = {int(number): label for number, label in re.findall(r"(\d+) ([A-Za-z ]+?)(?:,|\.)", listed)}
+    assert scale == contacts_module.CONTACT_STATUS_LABELS and contacts_module.STATUS_IDS_MAX == 100
+
+
+def test_the_module_text_names_the_contact_status_scale():
+    doc = flat(contacts_module.__doc__)
+    assert "1 Active, 3 Temporary, 4 Archived" in doc and "2 Inactive is gone" in doc
+
+
 # --------------------------------------------------------------------------
 # list_contacts
 # --------------------------------------------------------------------------
@@ -438,6 +482,36 @@ async def test_list_contacts_reports_an_empty_page_as_an_empty_page(server, mock
     assert result["items"] == [] and result["count"] == 0 and result["total_count"] == 0
 
 
+@pytest.mark.parametrize("statuses, sent", [([1], "1"), ([3], "3"), ([4], "4"), ([1, 3, 4], "1,3,4"), ([4, 4], "4,4")])
+async def test_list_contacts_accepts_each_status_of_the_scale_and_sends_it_comma_joined(server, mock_gorelo, statuses, sent):
+    mock_gorelo.on("GET", CONTACTS, paged_envelope([contact_record()]))
+    result = await call_tool(server, "list_contacts", {"status_ids": statuses})
+    assert mock_gorelo.last.query == {"StatusIds": sent, "PageSize": "200"}
+    assert result["filters"] == {"status_ids": statuses}
+
+
+@pytest.mark.parametrize(
+    "statuses, fragment",
+    [
+        ([2], f"status_ids[0]: expected {CONTACT_SCALE}, got 2"),
+        ([1, 5], f"status_ids[1]: expected {CONTACT_SCALE}, got 5"),
+        ([0], f"status_ids[0]: expected {CONTACT_SCALE}, got 0"),
+        ([-4], f"status_ids[0]: expected {CONTACT_SCALE}, got -4"),
+        ([2**63], "status_ids[0]: expected a positive whole number such as 123, got a number above "),
+        ([3] * 101, "status_ids: at most 100 values, got 101"),
+    ],
+)
+async def test_list_contacts_refuses_a_status_off_the_scale_or_too_many_before_any_http(server, mock_gorelo, statuses, fragment):
+    assert fragment in await call_tool_error(server, "list_contacts", {"status_ids": statuses})
+    assert mock_gorelo.requests == []
+
+
+async def test_list_contacts_accepts_exactly_100_status_values(server, mock_gorelo):
+    mock_gorelo.on("GET", CONTACTS, paged_envelope([contact_record()]))
+    await call_tool(server, "list_contacts", {"status_ids": [1] * 100})
+    assert mock_gorelo.last.query["StatusIds"] == ",".join(["1"] * 100)
+
+
 @pytest.mark.parametrize(
     "arguments, fragment",
     [
@@ -446,7 +520,7 @@ async def test_list_contacts_reports_an_empty_page_as_an_empty_page(server, mock
         ({"client_ids": [9101, 0]}, "client_ids[1]: expected a positive whole number"),
         ({"client_ids": [-1]}, "client_ids[0]: expected a positive whole number"),
         ({"status_ids": []}, "status_ids: expected at least one id, got an empty list"),
-        ({"status_ids": [1, 0]}, "status_ids[1]: expected a positive whole number"),
+        ({"status_ids": [1, 0]}, f"status_ids[1]: expected {CONTACT_SCALE}, got 0"),
         ({"query": ""}, "query: must not be empty or whitespace only"),
         ({"created_since": "2026-01-01T00:00:00"}, "created_since: '2026-01-01T00:00:00' has no UTC offset"),
         ({"updated_before": "last week"}, "updated_before: 'last week' is not an ISO 8601 datetime"),
@@ -549,7 +623,7 @@ async def test_create_contact_sends_exactly_the_four_required_fields_and_nothing
 
 async def test_create_contact_infers_nothing_and_reads_nothing_first(server, mock_gorelo):
     # The legacy tool fetched the client and its locations and filled in a time zone, regions and a
-    # location. Gorelo accepts the four fields (probe 2026-10-01), so exactly one request is made.
+    # location. Gorelo accepts the four fields, so exactly one request is made.
     mock_gorelo.on("POST", CONTACTS, envelope(contact_record()))
     await call_tool(server, "create_contact", REQUIRED_FOUR)
     assert [(r.method, r.path) for r in mock_gorelo.requests] == [("POST", CONTACTS)]
@@ -799,7 +873,7 @@ async def test_update_contact_preserves_every_value_it_was_not_told_to_change(se
     body = patched(mock_gorelo)[0].json
     expected = command(FirstName="Janet")
     assert body == expected
-    # the probe: a PATCH with only the required fields wiped the phones and the job title
+    # a PATCH with only the required fields clears the phones and the job title, so the update sends their current values too
     for kept in ("MobilePhone", "MobilePhoneCountryCode", "OfficePhone", "JobTitle", "Department", "TimeZone", "Description", "LocationId"):
         assert body[kept] == contact_record()[kept]
 

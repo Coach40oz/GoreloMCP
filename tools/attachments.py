@@ -1,8 +1,9 @@
 """Attachment upload, multipart (toolset "tickets").
 
-upload_attachment stores a file against an existing ticket, task or project and returns the
+upload_attachment stores a file against an existing ticket, task, project or document and returns the
 {name, url} pair that a comment takes in its attachments (create_ticket_comment for a ticket,
-create_project_comment for a task or a project: the note in the result names the right one). The file
+create_project_comment for a task or a project) or that update_document takes in its attachments (a document; the
+url can also go in an img tag in the body of the document): the note in the result names the right one. The file
 arrives inline (base64 or UTF-8 text): the tool never fetches a URL, so it cannot be used to make the
 server request an address of the caller's choosing.
 
@@ -11,15 +12,17 @@ Ops used by this module:
     POST /v1/attachments
 
 Uses GoreloClient.post_multipart (multipart/form-data with the parts file, itemType and itemId). Gorelo
-accepts uploads up to 44 MB; this tool caps the decoded file at 10 MB (10485760 bytes) because MCP payloads
-are text.
+accepts uploads up to 44 MB, and 25 MB for a document (the published text of POST /v1/attachments, contract
+a7954b24844b); this tool caps the decoded file at 10 MB (10485760 bytes) for every item type, because MCP payloads
+are text. That cap is below both Gorelo limits, so there is no separate check for a document.
 
 Two rules that only this tool can state:
 
 * A task or project upload is refused locally, with no HTTP call, unless the "projects" toolset is enabled on
-  this server (server_info_of(ctx)["toolsets"]; the message names GORELO_TOOLSETS). The file can only be
-  attached through create_project_comment, a projects tool, and an uploaded file can neither be listed nor
-  deleted through the API, so an upload that nothing can attach would stay orphaned for good.
+  this server, and a document upload unless the "documents" toolset is (server_info_of(ctx)["toolsets"]; the
+  message names GORELO_TOOLSETS). The file can only be attached through create_project_comment, a projects tool,
+  or through update_document, a documents tool, and an uploaded file can neither be listed nor deleted through
+  the API, so an upload that nothing can attach would stay orphaned for good.
 * An upload whose outcome is unknown (timeout, connection failure, 5xx, an unusable answer) is reported
   with upload-specific advice instead of the generic "verify with a read before retrying", which is
   impossible here: the file may already be stored, it cannot be listed or deleted through the API, so the
@@ -44,9 +47,14 @@ UPLOAD = "POST /v1/attachments"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # decoded size; Gorelo itself accepts up to 44 MB
 FILENAME_MAX = 255
 DEFAULT_CONTENT_TYPE = "application/octet-stream"
-ITEM_TYPES = {"ticket": "Ticket", "task": "Task", "project": "Project"}
-# The item types whose file can only be attached through a projects tool (create_project_comment).
-PROJECT_ITEM_TYPES = ("task", "project")
+ITEM_TYPES = {"ticket": "Ticket", "task": "Task", "project": "Project", "document": "Document"}
+# The item types whose file can only be attached through a tool of another toolset: {item_type: (toolset, how the
+# file gets attached)}. The second text completes "the file could not be attached ..." in the refusal.
+NEEDS_TOOLSET = {
+    "task": ("projects", "through a comment (create_project_comment is a projects tool)"),
+    "project": ("projects", "through a comment (create_project_comment is a projects tool)"),
+    "document": ("documents", "to the document (update_document is a documents tool)"),
+}
 
 # Gorelo reports a bad part by its form field name; the file part has three tool parameters behind it.
 UPLOAD_FIELDS = {
@@ -57,13 +65,18 @@ UPLOAD_FIELDS = {
     "content_text": "file",
 }
 
-# The comment tool that takes the {name, url} pair for each item_type (a task and a project are commented on
-# through the project comment tool, which needs the project id, and the task id for a task).
+# The tool that takes the {name, url} pair for each item_type (a task and a project are commented on through the
+# project comment tool, which needs the project id, and the task id for a task; a document takes its files in the
+# attachments of update_document), and what carries the file in the last sentence of the note.
 NEXT_STEP = {
     "ticket": "create_ticket_comment",
     "task": "create_project_comment with project_id and task_id",
     "project": "create_project_comment with project_id",
+    "document": "update_document (that list is the complete new list: keep the current attachments in it)",
 }
+CARRIER = {"ticket": "a comment", "task": "a comment", "project": "a comment", "document": "update_document"}
+# Only a document body shows an image: the spec says to upload each image and use the url it returns.
+DOCUMENT_IMAGE_NOTE = " For an image in the body, use the url in an img tag in the body of update_document instead."
 
 _MEDIA_TYPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*")
 
@@ -73,7 +86,8 @@ def next_step_note(item_type: str) -> str:
     return (
         "The url carries a time-limited access token. Pass name and url together, unchanged, as one entry of the "
         f"attachments of {NEXT_STEP[item_type]}; do not store the url. "
-        "Until a comment carries it the file stays orphaned on the record."
+        f"Until {CARRIER[item_type]} carries it the file stays orphaned on the record."
+        + (DOCUMENT_IMAGE_NOTE if item_type == "document" else "")
     )
 
 
@@ -92,21 +106,23 @@ def _item_type(value: Any) -> str:
     return ITEM_TYPES[value]
 
 
-def _projects_toolset_on(ctx: Context, item_type: str) -> None:
-    """A task or project upload needs the projects toolset (create_project_comment is the only way to attach it).
+def _toolset_on(ctx: Context, item_type: str) -> None:
+    """A task or project upload needs the projects toolset (create_project_comment is the only way to attach it) and a
+    document upload the documents toolset (update_document is).
 
-    Refused locally, before the file is decoded or any HTTP call, when server_info_of(ctx) does not list
-    "projects" (a ctx that carries no toolsets counts as "not enabled": nothing is assumed).
+    Refused locally, before the file is decoded or any HTTP call, when server_info_of(ctx) does not list the toolset
+    (a ctx that carries no toolsets counts as "not enabled": nothing is assumed).
     """
-    if item_type not in PROJECT_ITEM_TYPES:
+    needed = NEEDS_TOOLSET.get(item_type)
+    if needed is None:
         return
+    toolset, how = needed
     enabled = {str(name).lower() for name in server_info_of(ctx)["toolsets"] or ()}
-    if "projects" not in enabled:
+    if toolset not in enabled:
         raise ValueError(
-            f"item_type: a {item_type} upload needs the projects toolset, which is not enabled on this server (add it "
-            "to GORELO_TOOLSETS). Without it the file could not be attached through a comment (create_project_comment "
-            "is a projects tool) and an uploaded file cannot be deleted through the API, so nothing was uploaded. "
-            "Tell the user."
+            f"item_type: a {item_type} upload needs the {toolset} toolset, which is not enabled on this server (add it "
+            f"to GORELO_TOOLSETS). Without it the file could not be attached {how} and an uploaded file cannot be "
+            "deleted through the API, so nothing was uploaded. Tell the user."
         )
 
 
@@ -249,14 +265,14 @@ def _usable_text(value: Any) -> bool:
 async def upload_attachment(
     ctx: Context,
     item_type: Annotated[
-        Literal["ticket", "task", "project"],
-        Field(description="What the file belongs to. task and project need the projects toolset."),
+        Literal["ticket", "task", "project", "document"],
+        Field(description="What the file belongs to. task and project need the projects toolset, document the documents toolset."),
     ],
     item_id: Annotated[
         str,
         Field(
             description="UUID of that record (get_ticket, list_tickets; list_project_tasks, list_projects with the "
-            "projects toolset)."
+            "projects toolset; list_documents with the documents toolset)."
         ),
     ],
     filename: Annotated[str, Field(description="Name with extension, no path, max 255 characters.")],
@@ -268,9 +284,9 @@ async def upload_attachment(
     ] = None,
     content_type: Annotated[str | None, Field(description="Media type; omit to guess from the filename.")] = None,
 ) -> dict:
-    """Upload a file to a ticket, task or project; returns name and url to pass, together and unchanged, in a comment's attachments (the result's note names the tool). Give exactly one of content_base64 or content_text (max 10 MB decoded); URLs are never fetched. The url has a time-limited token: attach soon, do not store it. An unattached file stays orphaned (no API delete). Nothing is emailed. If a call fails or times out the file may already be stored: do not upload again without asking the user."""
+    """Upload a file to a ticket, task, project or document; returns name and url to pass, together and unchanged, in a comment's attachments (update_document's for a document; the result's note names the tool). Give exactly one of content_base64 or content_text (max 10 MB decoded); URLs are never fetched. The url has a time-limited token: attach soon, do not store it. An unattached file stays orphaned (no API delete). Nothing is emailed. If a call fails or times out the file may already be stored: do not upload again without asking the user."""
     kind = _item_type(item_type)
-    _projects_toolset_on(ctx, item_type)
+    _toolset_on(ctx, item_type)
     item = guid("item_id", item_id)
     name = _filename(filename)
     data = _file_bytes(content_base64, content_text)

@@ -33,6 +33,7 @@ pytestmark = pytest.mark.anyio
 CLIENTS = "/v1/clients"
 CLIENT_9101 = "/v1/clients/9101"  # update_client: the id is in the path only (the command has no Id)
 LOCATIONS = "/v1/clients/9101/locations"
+CLIENT_SCALE = "1 Active, 3 Credit hold, 4 Archived"
 
 TOOLS = {
     # name: (kind, ops, destructive_hint, parameters in order, required parameters)
@@ -232,63 +233,81 @@ def test_the_single_client_is_the_list_row_plus_custom_properties_in_the_spec(sp
     custom = record["CustomProperties"]
     assert (custom["type"], custom["items"]["ref"], custom["nullable"]) == ("array", "CustomPropertyValue", False)
     value = spec_index.schema("CustomPropertyValue")
-    assert set(value["fields"]) == {"Id", "Variable", "Name", "Type", "Value", "IsSet"} and not value["additional_properties"]
+    assert set(value["fields"]) == {"Id", "Variable", "Name", "Type", "Value", "IsSet", "IsHidden"} and not value["additional_properties"]
     assert value["fields"]["Value"]["nullable"] is True and value["fields"]["IsSet"]["type"] == "boolean"
+    # contract a7954b24844b: IsHidden is a plain boolean that an older rendering may lack (the schema has no required list)
+    assert value["fields"]["IsHidden"] == {"type": "boolean", "nullable": False} and value["required"] == []
     doc = flat(clients_module.__doc__)
     assert "ClientListItemResponse" in doc and "the same fields as the single record" not in doc
     assert "is that list shape PLUS CustomProperties, which the list deliberately leaves out" in doc
-    assert "CustomPropertyValue {Id, Variable, Name, Type, Value, IsSet}" in doc
+    assert "CustomPropertyValue {Id, Variable, Name, Type, Value, IsSet, IsHidden}" in doc
 
 
 def test_the_docstrings_carry_the_documented_facts():
     listing = flat(clients_module.list_clients.__doc__)
     # contract e15cb5a18ec2: "when omitted, inactive (2) clients are excluded, and when supplied only the listed statuses are returned"
-    assert "Inactive clients are left out unless status_ids asks for the inactive status" in listing
-    assert "never listed" not in listing
-    assert "fit in one page" not in listing
+    assert "Archived clients are left out unless status_ids asks for status 4; deleted clients are never listed" in listing
     create = flat(clients_module.create_client.__doc__)
     assert "creates a real client" in create and "cannot delete clients" in create
     update = flat(clients_module.update_client.__doc__)
-    assert "only custom fields can be cleared through the API" in update and "overwrites current values" in update
+    assert "only custom fields can be cleared" in update and "overwrites current values" in update
     assert "Custom fields: ids from get_client's CustomProperties, values are text whatever the Type" in update
     # a field that already held a value read IsSet true before the update, so the answer cannot prove an ignored one:
     # the model compares the returned Values itself (there is no read before the write)
-    assert "Compare each returned CustomProperties Value with what you sent; tell the user if one differs (Gorelo may reformat)" in update
+    assert "Compare each returned CustomProperties Value with what you sent; tell the user if one differs" in update
+    assert "A hidden field (IsHidden) shows no Value: only IsSet is checked (see warning)" in update
+    assert "status_id 4 (Archived) hides the client from default lists" in update
     assert "Update a client's name, status, billing name, alternate name or custom fields" in update
     # contract 1b1c0cec0e9a: the single record has the custom fields, the list rows leave them out
     assert "Rows leave out CustomProperties: get_client has them" in listing
     record = flat(clients_module.get_client.__doc__)
     assert "The record includes CustomProperties (each client custom field: Id, Name, Type, Value, IsSet" in record
+    assert "IsHidden true when the Value is hidden from the API and always null" in record
+    assert "A deleted client is a 404 like an unknown id; an Archived client is returned" in record
 
 
 LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
 
 
 @pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
-def test_the_inactive_client_promise_is_the_one_in_the_spec_text():
-    """spec/spec_index.json keeps no description text, so what list_clients promises about inactive clients is pinned
-    to the StatusIds text of the full OpenAPI snapshot. On 2026-10-01 it said "Inactive clients are excluded either way";
-    since contract e15cb5a18ec2 it says they are excluded only when StatusIds is omitted."""
-    parameters = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["paths"]["/v1/clients"]["get"]["parameters"]
+def test_the_client_status_scale_and_filter_promises_are_the_ones_in_the_spec_text():
+    """spec/spec_index.json keeps no description text, so the scale list_clients and update_client check locally is pinned
+    to the texts of the full OpenAPI snapshot (contract a7954b24844b). On 2026-10-14 the filter said inactive (2) clients are
+    excluded when StatusIds is omitted; since 2026-10-17 the scale is 1 Active, 3 Credit hold, 4 Archived and Archived is the
+    status the default leaves out."""
+    spec = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))
+    parameters = spec["paths"]["/v1/clients"]["get"]["parameters"]
     text = " ".join(next(p for p in parameters if p["name"] == "StatusIds")["description"].split())
-    assert "when omitted, inactive (2) clients are excluded, and when supplied only the listed statuses are returned" in text
-    assert "either way" not in text
+    assert text == (
+        "Comma-separated client status ids to include: 1 Active, 3 Credit hold, 4 Archived. Default excludes Archived; "
+        "when supplied, only the listed statuses are returned. Any other value is a 400. Up to 100 values. Deleted clients "
+        "are never listed."
+    )
+    scale = {int(n): label for n, label in re.findall(r"(\d+) ([A-Za-z ]+?)(?:,|\.)", text.split("include:")[1].split("Default")[0])}
+    assert scale == clients_module.CLIENT_STATUS_LABELS and clients_module.STATUS_IDS_MAX == 100
+    update = " ".join(spec["components"]["schemas"]["UpdateClientCommand"]["properties"]["StatusId"]["description"].split())
+    assert update == (
+        "New status id: 1 Active, 3 Credit hold, 4 Archived. Leave null to keep the current value. Any other value is a 400; "
+        "to delete a client use DELETE /v1/clients/{clientId}."
+    )
+    one = " ".join(spec["paths"]["/v1/clients/{clientId}"]["get"]["description"].split())
+    assert "A deleted client is not found (404), the same as an id that does not exist. An Archived client is returned." in one
 
 
-async def test_the_status_ids_description_says_what_omitting_it_does(server):
+async def test_the_status_ids_description_gives_the_scale_and_says_what_omitting_it_does(server):
     tool = next(t for t in await list_tools(server) if t.name == "list_clients")
     text = flat(tool.inputSchema["properties"]["status_ids"]["description"])
-    assert "Omit it and inactive clients (status 2) are left out; give it and only those statuses are returned." in text
-    assert "no lookup tool" in text
+    assert text == ("1 Active, 3 Credit hold, 4 Archived, up to 100. Omit it and Archived clients are left out; "
+                    "give it and only those are returned.")
+    assert "inactive" not in text.lower() and "status 2" not in text and len(text) <= 160
 
 
-async def test_the_status_id_description_says_an_inactive_status_hides_the_client_like_a_delete(server):
-    #
+async def test_the_status_id_description_gives_the_scale_and_says_archived_hides_the_client(server):
     tool = next(t for t in await list_tools(server) if t.name == "update_client")
     text = flat(tool.inputSchema["properties"]["status_id"]["description"])
-    assert "An inactive status hides the client from default lists like a delete does" in text
-    assert "its devices drop out of list_agents" in text
-    assert "Status.Id" in text and "no lookup tool" in text
+    assert text == ("1 Active, 3 Credit hold, 4 Archived; any other value is refused. Archived hides the client from "
+                    "default lists.")
+    assert "list_agents" not in text and "like a delete" not in text and len(text) <= 160
 
 
 async def test_the_custom_property_parameters_are_advertised_with_the_shape_of_their_entries(server):
@@ -316,6 +335,7 @@ async def test_the_custom_property_texts_say_where_ids_come_from_how_to_clear_an
     clearing = flat(props["clear_custom_property_ids"]["description"])
     assert "[{id, value}]" in saving and "non-blank text" in saving
     assert "To remove a value use clear_custom_property_ids" in saving
+    assert "each id once" in saving and "Gorelo checks Number, Checkbox, Dropdown values" in saving
     assert "the saved value goes and the field shows its default again" in clearing
     assert "A required field cannot be cleared to nothing" in clearing
     # core tool texts stay short (tests/test_tools_meta.py caps a parameter at 160 and a tool at 700 characters)
@@ -385,6 +405,28 @@ def test_the_custom_property_promises_are_the_ones_in_the_spec_text():
     ]["properties"]
 
 
+@pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
+def test_the_hidden_custom_field_promises_are_the_ones_in_the_spec_text():
+    """IsHidden (contract a7954b24844b, 2026-10-17): the provider hides a field's value from the API, Value is then always
+    null, and IsSet is still reported. The texts of this module rely on that, and on the rule that a repeated id in
+    CustomProperties is a 400. The release notes of 2026-10-16 also say Gorelo checks Number, Checkbox and Dropdown values;
+    the spec text does not, so no local rule is pinned to it, and the word Checkbox must stay out of these two schemas
+    until Gorelo publishes the check (then this fails on purpose and the texts are re-read)."""
+    schemas = ("components", "schemas")
+    hidden = raw_text(*schemas, "CustomPropertyValue", "properties", "IsHidden", "description")
+    assert "True when the service provider has hidden this field's value from the API" in hidden
+    assert "`Value` is then always null, whether or not a value is saved" in hidden
+    assert "The value can still be written through the API" in hidden
+    assert "Reported for hidden fields too" in raw_text(*schemas, "CustomPropertyValue", "properties", "IsSet", "description")
+    assert "Always null when `IsHidden` is true" in raw_text(*schemas, "CustomPropertyValue", "properties", "Value", "description")
+    assert "Each custom field id may appear once; a repeated id is a 400" in raw_text(
+        *schemas, "UpdateClientCommand", "properties", "CustomProperties", "description"
+    )
+    spec = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["components"]["schemas"]
+    assert "Checkbox" not in json.dumps(spec["UpdateClientCommand"]["properties"]["CustomProperties"])
+    assert "Checkbox" not in json.dumps(spec["CustomPropertyUpdate"])
+
+
 # --------------------------------------------------------------------------
 # list_clients
 # --------------------------------------------------------------------------
@@ -415,7 +457,7 @@ async def test_list_clients_sends_every_filter_under_its_spec_name(server, mock_
         "list_clients",
         {
             "query": "acme",
-            "status_ids": [1, 2],
+            "status_ids": [1, 3],
             "created_since": "2026-01-01T00:00:00Z",
             "created_before": "2026-02-01T09:00:00-05:00",
             "updated_since": "2026-03-01T00:00:00+00:00",
@@ -426,7 +468,7 @@ async def test_list_clients_sends_every_filter_under_its_spec_name(server, mock_
     )
     assert mock_gorelo.last.query == {
         "Query": "acme",
-        "StatusIds": "1,2",
+        "StatusIds": "1,3",
         "CreatedSince": "2026-01-01T00:00:00Z",
         "CreatedBefore": "2026-02-01T14:00:00Z",
         "UpdatedSince": "2026-03-01T00:00:00Z",
@@ -438,7 +480,7 @@ async def test_list_clients_sends_every_filter_under_its_spec_name(server, mock_
     assert result["total_count"] == 60
     assert result["filters"] == {
         "query": "acme",
-        "status_ids": [1, 2],
+        "status_ids": [1, 3],
         "created_since": "2026-01-01T00:00:00Z",
         "created_before": "2026-02-01T14:00:00Z",
         "updated_since": "2026-03-01T00:00:00Z",
@@ -483,13 +525,44 @@ async def test_list_clients_reports_an_empty_page_as_an_empty_page(server, mock_
     assert result["filters"] == {"query": "nobody"}
 
 
+@pytest.mark.parametrize("statuses, sent", [([1], "1"), ([3], "3"), ([4], "4"), ([1, 3, 4], "1,3,4"), ([4, 4], "4,4")])
+async def test_list_clients_accepts_each_status_of_the_scale_and_sends_it_comma_joined(server, mock_gorelo, statuses, sent):
+    mock_gorelo.on("GET", CLIENTS, paged_envelope([client_record()]))
+    result = await call_tool(server, "list_clients", {"status_ids": statuses})
+    request = mock_gorelo.last
+    assert (request.method, request.path, request.query) == ("GET", CLIENTS, {"StatusIds": sent, "PageSize": "200"})
+    assert result["filters"] == {"status_ids": statuses}
+
+
+@pytest.mark.parametrize(
+    "statuses, fragment",
+    [
+        ([2], f"status_ids[0]: expected {CLIENT_SCALE}, got 2"),
+        ([1, 5], f"status_ids[1]: expected {CLIENT_SCALE}, got 5"),
+        ([0], f"status_ids[0]: expected {CLIENT_SCALE}, got 0"),
+        ([-3], f"status_ids[0]: expected {CLIENT_SCALE}, got -3"),
+        ([2**63], "status_ids[0]: expected a positive whole number such as 123, got a number above "),
+        ([1] * 101, "status_ids: at most 100 values, got 101"),
+    ],
+)
+async def test_list_clients_refuses_a_status_off_the_scale_or_too_many_before_any_http(server, mock_gorelo, statuses, fragment):
+    assert fragment in await call_tool_error(server, "list_clients", {"status_ids": statuses})
+    assert mock_gorelo.requests == []
+
+
+async def test_list_clients_accepts_exactly_100_status_values(server, mock_gorelo):
+    mock_gorelo.on("GET", CLIENTS, paged_envelope([client_record()]))
+    await call_tool(server, "list_clients", {"status_ids": [1] * 100})
+    assert mock_gorelo.last.query["StatusIds"] == ",".join(["1"] * 100)
+
+
 @pytest.mark.parametrize(
     "arguments, fragment",
     [
         ({"query": "  "}, "query: must not be empty or whitespace only"),
         ({"status_ids": []}, "status_ids: expected at least one id, got an empty list"),
-        ({"status_ids": [3, 0]}, "status_ids[1]: expected a positive whole number such as 123, got zero or a negative number"),
-        ({"status_ids": [-2]}, "status_ids[0]: expected a positive whole number"),
+        ({"status_ids": [3, 0]}, "status_ids[1]: expected 1 Active, 3 Credit hold, 4 Archived, got 0"),
+        ({"status_ids": [-2]}, "status_ids[0]: expected 1 Active, 3 Credit hold, 4 Archived, got -2"),
         ({"created_since": "2026-01-01T00:00:00"}, "created_since: '2026-01-01T00:00:00' has no UTC offset"),
         ({"created_before": "2026-01-01"}, "created_before: '2026-01-01' has no UTC offset"),
         ({"updated_since": "yesterday"}, "updated_since: 'yesterday' is not an ISO 8601 datetime"),
@@ -847,9 +920,9 @@ async def test_update_client_sends_all_four_changes_under_their_pascal_names(ser
     await call_tool(
         server,
         "update_client",
-        {"client_id": 9101, "name": "N", "status_id": 2, "billing_name": "B", "alternate_name": "A"},
+        {"client_id": 9101, "name": "N", "status_id": 3, "billing_name": "B", "alternate_name": "A"},
     )
-    assert mock_gorelo.last.json == {"Name": "N", "StatusId": 2, "BillingName": "B", "AlternateName": "A"}
+    assert mock_gorelo.last.json == {"Name": "N", "StatusId": 3, "BillingName": "B", "AlternateName": "A"}
 
 
 @pytest.mark.parametrize(
@@ -904,10 +977,9 @@ async def test_update_client_rejects_a_client_id_that_cannot_exist(server, mock_
 
 
 @pytest.mark.parametrize("bad", [0, -1, -999])
-async def test_update_client_validates_status_id_with_positive_id_and_sends_nothing(server, mock_gorelo, bad):
-    #
+async def test_update_client_refuses_zero_and_negative_status_ids_with_the_scale_and_sends_nothing(server, mock_gorelo, bad):
     text = await call_tool_error(server, "update_client", {"client_id": 9101, "name": "N", "status_id": bad})
-    assert text.startswith("status_id: expected a positive whole number such as 123, got zero or a negative number")
+    assert text == f"status_id: expected {CLIENT_SCALE}, got {bad}"
     assert mock_gorelo.requests == []
 
 
@@ -917,11 +989,18 @@ async def test_update_client_rejects_a_status_id_above_the_largest_gorelo_id(ser
     assert mock_gorelo.requests == []
 
 
-async def test_update_client_leaves_status_ids_to_gorelo_since_they_are_tenant_data(server, mock_gorelo):
-    mock_gorelo.on("PATCH", CLIENT_9101, error_envelope(400, [("070101", "Unknown status.", "StatusId")]))
-    text = await call_tool_error(server, "update_client", {"client_id": 9101, "status_id": 999})
-    assert mock_gorelo.last.json == {"StatusId": 999}
-    assert text == trace("Gorelo rejected update_client (HTTP 400, code 070101): status_id: Unknown status.")
+@pytest.mark.parametrize("status", [1, 3, 4])
+async def test_update_client_sends_each_status_of_the_scale(server, mock_gorelo, status):
+    mock_gorelo.on("PATCH", CLIENT_9101, envelope(client_record()))
+    await call_tool(server, "update_client", {"client_id": 9101, "status_id": status})
+    assert mock_gorelo.last.json == {"StatusId": status} and len(mock_gorelo.requests) == 1
+
+
+@pytest.mark.parametrize("bad", [2, 5, 999, 10**6])
+async def test_update_client_refuses_a_status_off_the_scale_before_any_http(server, mock_gorelo, bad):
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, "status_id": bad})
+    assert text == f"status_id: expected {CLIENT_SCALE}, got {bad}"
+    assert mock_gorelo.requests == []
 
 
 @pytest.mark.parametrize(
@@ -1081,13 +1160,13 @@ async def test_update_client_with_only_custom_properties_works_and_is_not_nothin
 
 async def test_update_client_sends_custom_properties_beside_the_four_plain_fields(server, mock_gorelo):
     arguments = {
-        "name": "N", "status_id": 2, "billing_name": "B", "alternate_name": "A",
+        "name": "N", "status_id": 3, "billing_name": "B", "alternate_name": "A",
         "custom_properties": [{"id": 5, "value": "v"}], "clear_custom_property_ids": [7],
     }
     route_update(mock_gorelo, arguments, envelope(client_with_custom_properties(saved=[5], cleared=[7], Name="N")))
     result = await call_tool(server, "update_client", {"client_id": 9101, **arguments})
     assert mock_gorelo.calls("PATCH")[-1].json == {
-        "Name": "N", "StatusId": 2, "BillingName": "B", "AlternateName": "A",
+        "Name": "N", "StatusId": 3, "BillingName": "B", "AlternateName": "A",
         "CustomProperties": [{"Id": 5, "Value": "v"}, {"Id": 7, "Value": None}],
     }
     assert result["Name"] == "N" and [r.method for r in mock_gorelo.requests] == ["GET", "PATCH", "GET"]  # one write
@@ -1515,7 +1594,7 @@ async def test_the_second_read_is_what_the_tool_returns_not_the_patch_answer(ser
 
 
 async def test_a_wipe_that_the_patch_answer_does_not_show_is_found_by_the_second_read(server, mock_gorelo):
-    # production applied the PATCH as a replace; its answer still lists everything as it was
+    # a replace can wipe a field while the PATCH answer still lists everything as it was
     arguments = {"custom_properties": [{"id": 41, "value": "Gold"}]}
     still_there = answer_after(SAVED_41)
     wiped = answer_after({**SAVED_41, 42: {"IsSet": False, "Value": None}, 44: {"IsSet": False, "Value": None}})
@@ -1528,7 +1607,7 @@ async def test_a_wipe_that_the_patch_answer_does_not_show_is_found_by_the_second
 # -- Gorelo's own errors: the tool names the parameter, the item and the custom field, then Gorelo's own name ---------------
 #
 # Gorelo counts the items of the one CustomProperties array that was sent: the saved entries first, then the cleared ones.
-# That its number is the 0-based position in the array that was sent was never probed, so every label ends with Gorelo's own
+# Whether its number is the 0-based position in the array that was sent is not known, so every label ends with Gorelo's own
 # name, without brackets ("; Gorelo: CustomProperties 1 Value"), so that a reader can see Gorelo's own PropertyName. The field
 # map cannot know which list an item belongs to, so update_client relabels the PropertyName itself. A value is never named
 # (SAVE_5 carries one that must not show up), a custom field id is.
@@ -1820,8 +1899,8 @@ async def test_update_client_on_a_missing_client_with_custom_properties_fails_at
 
 # -- the read before the write: ids must be listed there, other custom fields must come back unchanged ------------------------
 #
-# The published text says CustomProperties is an upsert (a field left out keeps its value), but no live call has shown it: if
-# production applied it as a replace, an update of one field would silently wipe the others. So update_client reads the client
+# The published text says CustomProperties is an upsert (a field left out keeps its value); if Gorelo applied it as a
+# replace, an update of one field would silently wipe the others. So update_client reads the client
 # first (only when it is about to write a custom field), refuses an id the client does not have before anything is sent, and
 # compares the answer with what it read. The previous values are shown on purpose when something else changed (they are the
 # user's own data and are needed to restore them); the values the caller sent are never echoed (SAVE_41 carries one).
@@ -1850,6 +1929,12 @@ def route_read(mock_gorelo, spec, client_id=9101):
     mock_gorelo.on("GET", f"/v1/clients/{client_id}", spec)
 
 
+async def test_a_bad_status_id_is_refused_before_the_client_is_read_for_custom_fields(server, mock_gorelo):
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, "status_id": 2, **SAVE_41})
+    assert text == f"status_id: expected {CLIENT_SCALE}, got 2"
+    assert mock_gorelo.requests == []
+
+
 async def test_custom_properties_are_written_between_two_reads_of_the_client_and_the_second_read_is_returned(server, mock_gorelo):
     arguments = {"custom_properties": [{"id": 41, "value": "Gold"}], "clear_custom_property_ids": [44]}
     after = answer_after({41: SAVED_41[41], 44: {"IsSet": False, "Value": None}})
@@ -1865,7 +1950,7 @@ async def test_custom_properties_are_written_between_two_reads_of_the_client_and
 
 @pytest.mark.parametrize(
     "arguments",
-    [{"name": "N"}, {"status_id": 2}, {"billing_name": "B", "alternate_name": "A"}, {"name": "N", "custom_properties": None}],
+    [{"name": "N"}, {"status_id": 3}, {"billing_name": "B", "alternate_name": "A"}, {"name": "N", "custom_properties": None}],
 )
 async def test_a_plain_update_sends_no_read(server, mock_gorelo, arguments):
     mock_gorelo.on("PATCH", CLIENT_9101, envelope(client_record()))
@@ -1946,6 +2031,9 @@ UNREADABLE_CLIENTS = [
     pytest.param(envelope(client_record(CustomProperties=[custom_property(41, value=42)])), "custom field 41 has a Value that is neither text nor null", id="value-a-number"),
     pytest.param(envelope(client_record(CustomProperties=[custom_property(41, value=True)])), "custom field 41 has a Value that is neither text nor null", id="value-true"),
     pytest.param(envelope(client_record(CustomProperties=[custom_property(41, value=["x"])])), "custom field 41 has a Value that is neither text nor null", id="value-a-list"),
+    pytest.param(envelope(client_record(CustomProperties=[custom_property(41, IsHidden=None)])), "custom field 41 has an IsHidden that is neither true nor false", id="is-hidden-null"),
+    pytest.param(envelope(client_record(CustomProperties=[custom_property(41, IsHidden="true")])), "custom field 41 has an IsHidden that is neither true nor false", id="is-hidden-text"),
+    pytest.param(envelope(client_record(CustomProperties=[custom_property(41, IsHidden=1)])), "custom field 41 has an IsHidden that is neither true nor false", id="is-hidden-one"),
 ]
 
 
@@ -1967,6 +2055,25 @@ async def test_an_unusable_read_is_a_shape_error_that_is_not_write_unconfirmed(c
     assert isinstance(cause, GoreloAPIError)
     assert (cause.kind, cause.write_unconfirmed, cause.status, cause.op_key) == ("shape", False, 200, "GET /v1/clients/{clientId}")
     assert "applied" not in str(caught.value) and "nothing was written" in str(caught.value)
+
+
+def test_a_record_without_is_hidden_reads_as_not_hidden_and_a_boolean_is_taken_as_it_is():
+    # IsHidden is optional (an older rendering has none, so absent means not hidden); when it is present it is a boolean,
+    # and the Value of a hidden field is dropped whatever it is
+    fields = clients_module._custom_fields_of(
+        client_record(
+            CustomProperties=[
+                custom_property(1),
+                custom_property(2, IsHidden=False),
+                custom_property(3, value="LEAK", IsHidden=True),
+                custom_property(4, is_set=False, value=None, IsHidden=True),
+            ]
+        )
+    )
+    assert [(identifier, field.hidden) for identifier, field in fields.items()] == [(1, False), (2, False), (3, True), (4, True)]
+    assert fields[1].value == "x"
+    assert fields[3].value is None and fields[3].is_set is True  # the out-of-contract text is dropped
+    assert fields[4].is_set is False
 
 
 async def test_a_client_with_no_custom_fields_has_an_empty_list_and_every_id_is_unknown(server, mock_gorelo):
@@ -2003,7 +2110,7 @@ UNKNOWN_ID = "custom field {id} is not a custom field of client 9101 (get_client
             id="every-unknown-id-in-one-message",
         ),
         pytest.param(
-            {"name": "N", "status_id": 2, "custom_properties": [{"id": 98, "value": "x"}]},
+            {"name": "N", "status_id": 3, "custom_properties": [{"id": 98, "value": "x"}]},
             "custom_properties (item 1, id): " + UNKNOWN_ID.format(id=98),
             id="the-plain-fields-are-not-written-either",
         ),
@@ -2052,10 +2159,11 @@ ALSO = "The read after the update also does not confirm the fields that were sen
 ANSWER_ALSO = "The answer to the update also cannot be used as the client record: {detail}. "
 
 
-def advice(set_before, unset_before, empty_before, *, from_the_first_read):
+def advice(set_before, unset_before, empty_before, *, from_the_first_read, hidden_before=()):
     """What follows the order to ask first: the ONE call (previous values filled in) and the notes for the Gorelo app.
-    `set_before` is [(id, previous text)], `unset_before` and `empty_before` are lists of ids; `from_the_first_read` is
-    true when it is not known which of those fields changed (the read after the update failed)."""
+    `set_before` is [(id, previous text)], `unset_before`, `empty_before` and `hidden_before` (the fields that held a value
+    Gorelo hides from the API) are lists of ids; `from_the_first_read` is true when it is not known which of those fields
+    changed (the read after the update failed)."""
     arguments = []
     if set_before:
         entries = ", ".join('{"id": %d, "value": %s}' % (identifier, json.dumps(text)) for identifier, text in set_before)
@@ -2069,6 +2177,11 @@ def advice(set_before, unset_before, empty_before, *, from_the_first_read):
     if empty_before:
         text += EMPTY_NOTE.format(
             ids=", ".join(str(identifier) for identifier in empty_before),
+            fix="if they differ, fix them" if from_the_first_read else "fix them",
+        )
+    if hidden_before:
+        text += HIDDEN_RESTORE_NOTE.format(
+            ids=", ".join(str(identifier) for identifier in hidden_before),
             fix="if they differ, fix them" if from_the_first_read else "fix them",
         )
     if unset_before:
@@ -2093,12 +2206,28 @@ BEFORE_STATES = (  # BEFORE, as the error lists it
 )
 
 
-def unchecked(why, *, set_before=(), unset_before=(), empty_before=(), answer=None, unsent=True, states=BEFORE_STATES):
+def unchecked(
+    why,
+    *,
+    set_before=(),
+    unset_before=(),
+    empty_before=(),
+    answer=None,
+    unsent=True,
+    states=BEFORE_STATES,
+    hidden_before=(),
+    unseen=None,
+):
     """The whole text for a read after the update that failed or cannot be used, by default for the client of BEFORE.
-    `unsent` is false when every custom field of the client was in the call (nothing else to put back)."""
+    `unsent` is false when every custom field of the client was in the call (nothing else to put back). `unseen` is the
+    ids that the hidden-field note names: the note comes before the restore, and is written whether or not unsent is true."""
     restore = ""
     if unsent:
-        restore = IF_CHANGED + advice(set_before, unset_before, empty_before, from_the_first_read=True)
+        restore = IF_CHANGED + advice(
+            set_before, unset_before, empty_before, from_the_first_read=True, hidden_before=hidden_before
+        )
+    if unseen:
+        restore = HIDDEN_NOTE.format(ids=unseen) + restore
     return UNCHECKED.format(
         why=why,
         answer=ANSWER_ALSO.format(detail=answer) if answer else "",
@@ -2359,11 +2488,27 @@ NOT_CONFIRMED = (
 )
 
 
-def not_confirmed(why, *, trace="", set_before=(), unset_before=(), empty_before=(), unsent=True, states=BEFORE_STATES):
-    """The whole text for a PATCH that ended in a failure Gorelo did not settle, for the client of BEFORE by default."""
+def not_confirmed(
+    why,
+    *,
+    trace="",
+    set_before=(),
+    unset_before=(),
+    empty_before=(),
+    unsent=True,
+    states=BEFORE_STATES,
+    hidden_before=(),
+    unseen=None,
+):
+    """The whole text for a PATCH that ended in a failure Gorelo did not settle, for the client of BEFORE by default.
+    `unseen` is the ids that the hidden-field note names (see unchecked)."""
     restore = ""
     if unsent:
-        restore = IF_CHANGED + advice(set_before, unset_before, empty_before, from_the_first_read=True)
+        restore = IF_CHANGED + advice(
+            set_before, unset_before, empty_before, from_the_first_read=True, hidden_before=hidden_before
+        )
+    if unseen:
+        restore = HIDDEN_NOTE.format(ids=unseen) + restore
     return NOT_CONFIRMED.format(why=why, states=states, restore=restore, trace=trace)
 
 
@@ -2990,6 +3135,280 @@ async def test_the_description_says_the_client_is_read_first(server):
     assert "GET" not in text  # the operation is declared, not explained to the model
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"custom_properties": [{"id": 5, "value": "a"}, {"id": 5, "value": "c"}]},
+        {"clear_custom_property_ids": [5, 5]},
+        {"custom_properties": [{"id": 5, "value": "a"}], "clear_custom_property_ids": [5]},
+    ],
+    ids=["repeated-saved", "repeated-cleared", "saved-and-cleared"],
+)
+async def test_the_repeated_id_messages_say_gorelo_refuses_it_too(server, mock_gorelo, arguments):
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, **arguments})
+    assert text.endswith("(Gorelo refuses a repeated id with a 400 too)")
+    assert mock_gorelo.requests == []
+
+
+def test_the_module_text_names_the_hidden_rules_and_the_status_scale():
+    doc = flat(clients_module.__doc__)
+    assert "IsHidden (contract a7954b24844b" in doc
+    assert "is confirmed by IsSet alone" in doc
+    assert "Gorelo refuses a repeated id with a 400 as well" in doc
+    assert "1 Active, 3 Credit hold, 4 Archived" in doc
+    assert "release notes of 2026-10-16" in doc
+
+
+async def test_the_update_description_stays_within_the_core_cap_and_names_the_hidden_rule(server):
+    tool = next(t for t in await list_tools(server) if t.name == "update_client")
+    text = flat(tool.description)
+    assert len(text) <= 700
+    assert "A hidden field (IsHidden) shows no Value: only IsSet is checked (see warning)." in text
+    assert "GET" not in text
+
+
+# -- hidden custom fields (contract a7954b24844b): IsHidden true, Value always null, IsSet still reported ----------------------
+
+LICENCE = "Licence"
+HIDDEN_STATE = "was set (its value is hidden from the API and could not be read)"
+HIDDEN_NOTE = (
+    "Custom field(s) {ids} are hidden from the API (IsHidden true): only whether they hold a value (IsSet) can be read, "
+    "so a change of their value cannot be seen; check them in the Gorelo app if it matters. "
+)
+HIDDEN_RESTORE_NOTE = (
+    "Custom field(s) {ids} were set to a value that Gorelo hides from the API, which this tool could not read, so it cannot "
+    "offer it back: {fix} in the Gorelo app, or ask the user for the value and write it with update_client. "
+)
+UNREAD_WARNING = (
+    "custom field(s) {ids} are hidden from the API (IsHidden true): Gorelo confirms that a value is saved (IsSet true) but "
+    "never shows it, so the value you sent was not read back and could not be checked. Check it in the Gorelo app if it matters."
+)
+
+
+def hidden(field_id, *, is_set=True, **extra):
+    """A hidden custom field as Gorelo shows it: IsHidden true and Value null whether or not a value is saved."""
+    return custom_property(field_id, is_set=is_set, value=None, IsHidden=True, **extra)
+
+
+HIDDEN_BEFORE = [  # 41 unset (sent by SAVE_41), 42 set, 45 hidden and set
+    custom_property(41, is_set=False, value=None, Name="Region"),
+    custom_property(42, value="Alpha", Name=OWNER),
+    hidden(45, Name=LICENCE),
+]
+HIDDEN_STATES = (  # HIDDEN_BEFORE, as an error that lists the states puts it
+    f'custom field 41 ("Region") was unset; custom field 42 ("{OWNER}") was set to "Alpha"; '
+    f'custom field 45 ("{LICENCE}") {HIDDEN_STATE}'
+)
+
+
+async def test_a_saved_hidden_field_is_confirmed_by_is_set_alone_and_the_result_says_its_value_was_not_read_back(
+    server, mock_gorelo
+):
+    prior = [hidden(41, is_set=False), custom_property(42, value="Alpha", Name=OWNER)]
+    after = client_record(CustomProperties=[hidden(41), custom_property(42, value="Alpha", Name=OWNER)])
+    route_update(mock_gorelo, SAVE_41, envelope({"Id": 9101}), prior=prior, after=after)
+    result = await call_tool(server, "update_client", {"client_id": 9101, **SAVE_41})
+    assert result == {**after, "warning": UNREAD_WARNING.format(ids="41")}
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH", "GET"]
+    # a hidden field can be written: the value goes to Gorelo, and neither the record nor the warning repeats it
+    assert mock_gorelo.calls("PATCH")[-1].json == {"CustomProperties": [{"Id": 41, "Value": "SECRET-VALUE"}]}
+    assert "SECRET-VALUE" not in json.dumps(result)
+
+
+async def test_a_saved_hidden_field_that_was_set_before_is_not_called_unchanged(server, mock_gorelo):
+    # an update that Gorelo ignored looks the same as one that wrote the value: the warning says that only IsSet is seen
+    prior = [hidden(41)]
+    after = client_record(CustomProperties=[hidden(41)])
+    route_update(mock_gorelo, SAVE_41, envelope({"Id": 9101}), prior=prior, after=after)
+    result = await call_tool(server, "update_client", {"client_id": 9101, **SAVE_41})
+    assert result == {**after, "warning": UNREAD_WARNING.format(ids="41")}
+
+
+async def test_a_saved_hidden_field_that_is_not_set_is_reported_by_is_set_only(server, mock_gorelo):
+    after = client_record(CustomProperties=[hidden(41, is_set=False)])
+    route_update(mock_gorelo, SAVE_41, envelope({"Id": 9101}), after=after)
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, **SAVE_41})
+    assert text == UNCONFIRMED_TEXT.format(detail="IsSet is not true for custom field(s) 41, which were sent with a value")
+    assert "no text value" not in text  # a hidden field is never judged by its Value
+
+
+async def test_a_hidden_saved_field_does_not_excuse_a_plain_one_with_no_value(server, mock_gorelo):
+    arguments = {"custom_properties": [{"id": 41, "value": "a"}, {"id": 43, "value": "b"}]}
+    prior = [hidden(41, is_set=False), custom_property(43, is_set=False, value=None)]
+    after = client_record(CustomProperties=[hidden(41), custom_property(43, value=None)])
+    route_update(mock_gorelo, arguments, envelope({"Id": 9101}), prior=prior, after=after)
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, **arguments})
+    assert text == UNCONFIRMED_TEXT.format(detail="custom field(s) 43 show no text value, although they were sent with one")
+
+
+async def test_a_cleared_hidden_field_is_confirmed_by_is_set_false_and_needs_no_warning(server, mock_gorelo):
+    prior = [hidden(7)]
+    after = client_record(CustomProperties=[hidden(7, is_set=False)])
+    route_update(mock_gorelo, CLEAR_7, envelope({"Id": 9101}), prior=prior, after=after)
+    result = await call_tool(server, "update_client", {"client_id": 9101, **CLEAR_7})
+    assert result == after
+    assert "warning" not in result  # nothing is saved, so there is nothing to read back: IsSet false is the whole fact
+
+
+async def test_a_cleared_hidden_field_that_is_still_set_is_not_confirmed(server, mock_gorelo):
+    after = client_record(CustomProperties=[hidden(7)])
+    route_update(mock_gorelo, CLEAR_7, envelope({"Id": 9101}), after=after)
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, **CLEAR_7})
+    assert text == UNCONFIRMED_TEXT.format(detail="IsSet is not false for custom field(s) 7, which were sent to be cleared")
+
+
+async def test_an_unsent_hidden_field_that_is_unchanged_is_no_problem_and_adds_no_warning(server, mock_gorelo):
+    after = client_record(
+        CustomProperties=[custom_property(41, Name="Region"), custom_property(42, value="Alpha", Name=OWNER), hidden(45, Name=LICENCE)]
+    )
+    route_update(mock_gorelo, SAVE_41, envelope({"Id": 9101}), prior=HIDDEN_BEFORE, after=after)
+    result = await call_tool(server, "update_client", {"client_id": 9101, **SAVE_41})
+    assert result == after
+    assert "warning" not in result  # 45 was not sent and shows the same IsSet, so there is nothing to say about it
+
+
+async def test_a_value_that_gorelo_shows_for_a_hidden_field_is_ignored_and_never_quoted_in_an_error(server, mock_gorelo):
+    prior = [hidden(41, is_set=False), custom_property(45, value="LEAK-1", IsHidden=True, Name=LICENCE)]
+    after = client_record(CustomProperties=[custom_property(41), custom_property(45, value="LEAK-2", IsHidden=True, Name=LICENCE)])
+    route_update(mock_gorelo, SAVE_41, envelope({"Id": 9101}), prior=prior, after=after)
+    # the second read is Gorelo's own record: it passes through unchanged, and a hidden field that is not saved adds no warning
+    assert await call_tool(server, "update_client", {"client_id": 9101, **SAVE_41}) == after
+
+
+async def test_a_value_that_gorelo_shows_for_a_hidden_field_is_not_echoed_in_an_error(server, mock_gorelo):
+    prior = [hidden(41, is_set=False), custom_property(45, value="LEAK-1", IsHidden=True, Name=LICENCE)]
+    route_update(mock_gorelo, SAVE_41, envelope({"Id": 9101}), prior=prior, second=httpx.ReadTimeout("slow"))
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, **SAVE_41})
+    assert "LEAK-1" not in text and HIDDEN_STATE in text
+
+
+async def test_an_older_answer_without_is_hidden_behaves_exactly_as_before(server, mock_gorelo):
+    # rows with no IsHidden key at all (an older rendering): the same success as before, and no warning
+    prior = [custom_property(41, is_set=False, value=None)]
+    after = client_record(CustomProperties=[custom_property(41)])
+    route_update(mock_gorelo, SAVE_41, envelope({"Id": 9101}), prior=prior, after=after)
+    assert await call_tool(server, "update_client", {"client_id": 9101, **SAVE_41}) == after
+
+
+async def test_get_client_returns_hidden_fields_unchanged(server, mock_gorelo):
+    record = client_record(CustomProperties=[hidden(5), hidden(7, is_set=False)])
+    mock_gorelo.on("GET", CLIENT_9101, envelope(record))
+    result = await call_tool(server, "get_client", {"client_id": 9101})
+    assert result == record
+    assert [(row["Id"], row["IsHidden"], row["Value"]) for row in result["CustomProperties"]] == [(5, True, None), (7, True, None)]
+
+
+async def test_an_unsent_hidden_field_that_lost_its_value_is_reported_without_a_value_to_put_back(server, mock_gorelo):
+    after = client_record(
+        CustomProperties=[
+            custom_property(41),
+            custom_property(42, value="Alpha", Name=OWNER),
+            hidden(45, is_set=False, Name=LICENCE),
+        ]
+    )
+    route_update(mock_gorelo, SAVE_41, envelope({"Id": 9101}), prior=HIDDEN_BEFORE, after=after)
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, **SAVE_41})
+    shown = f'custom field 45 ("{LICENCE}") {HIDDEN_STATE}, now reads unset'
+    restore = HIDDEN_RESTORE_NOTE.format(ids="45", fix="fix them") + HIDDEN_NOTE.format(ids="45")
+    assert text == COLLATERAL.format(shown=shown, restore=restore, also="")
+    assert '"id": 45' not in text and "update_client(client_id=9101," not in text  # there is no value to put back
+
+
+async def test_an_unsent_unset_hidden_field_that_became_set_may_be_cleared_back(server, mock_gorelo):
+    prior = [custom_property(41, is_set=False, value=None, Name="Region"), hidden(45, is_set=False, Name=LICENCE)]
+    after = client_record(CustomProperties=[custom_property(41), hidden(45, Name=LICENCE)])
+    route_update(mock_gorelo, SAVE_41, envelope({"Id": 9101}), prior=prior, after=after)
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, **SAVE_41})
+    shown = f'custom field 45 ("{LICENCE}") was unset, now reads set'
+    restore = advice([], [45], [], from_the_first_read=False) + HIDDEN_NOTE.format(ids="45")
+    assert text == COLLATERAL.format(shown=shown, restore=restore, also="")
+
+
+async def test_the_error_for_a_second_read_that_fails_lists_a_hidden_field_without_a_value(server, mock_gorelo):
+    route_update(mock_gorelo, SAVE_41, envelope({"Id": 9101}), prior=HIDDEN_BEFORE, second=httpx.ReadTimeout("slow"))
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, **SAVE_41})
+    assert text == unchecked(
+        "the read of the client after it timed out",
+        states=HIDDEN_STATES,
+        set_before=[(42, "Alpha")],
+        hidden_before=[45],
+        unseen="45",
+    )
+    assert '"id": 45' not in text
+
+
+async def test_the_error_for_a_patch_that_is_not_confirmed_lists_a_hidden_field_without_a_value(server, mock_gorelo):
+    route_update(mock_gorelo, SAVE_41, httpx.ReadTimeout("slow"), prior=HIDDEN_BEFORE)
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, **SAVE_41})
+    assert text == not_confirmed(
+        "the request timed out",
+        states=HIDDEN_STATES,
+        set_before=[(42, "Alpha")],
+        hidden_before=[45],
+        unseen="45",
+    )
+
+
+async def test_the_log_text_of_a_hidden_field_error_holds_no_state_and_no_value(client_factory, mock_gorelo):
+    after = client_record(
+        CustomProperties=[
+            custom_property(41),
+            custom_property(42, value="Alpha", Name=OWNER),
+            hidden(45, is_set=False, Name=LICENCE),
+        ]
+    )
+    route_update(mock_gorelo, SAVE_41, envelope({"Id": 9101}), prior=HIDDEN_BEFORE, after=after)
+    with pytest.raises(ToolError) as caught:
+        await call_update_directly(client_factory, client_id=9101, **SAVE_41)
+    cause = caught.value.__cause__
+    assert isinstance(cause, clients_module.CollateralChangeError)
+    assert cause.log_summary == (
+        "PATCH /v1/clients/{clientId} on client 9101: custom field(s) 45 changed without being sent; "
+        "previous values withheld from the log"
+    )
+    assert "hidden" not in cause.log_summary
+
+
+def test_a_hidden_field_is_compared_on_is_set_alone():
+    F = clients_module._CustomField
+    before = {
+        1: F("A", True, None, True),  # hidden, set
+        2: F("B", True, None, True),  # hidden, set
+        3: F("C", True, "x"),  # shown, set
+        4: F("D", True, "x"),  # shown, set
+        5: F("E", True, None, True),  # hidden, set
+    }
+    after = {
+        1: F("A", True, None, True),  # unchanged
+        2: F("B", False, None, True),  # IsSet changed
+        3: F("C", True, None, True),  # now hidden: its value is not compared
+        4: F("D", True, "y"),  # the value changed
+        5: F("E", True, "ignored", False),  # hidden before: its value is not compared
+    }
+    changes = clients_module._collateral_changes(before, after, set())
+    assert [(identifier, now) for identifier, _, now in changes] == [(2, "now reads unset"), (4, "now shows a different value")]
+    # a field that the read after does not list at all is still a change, hidden or not
+    missing = {identifier: field for identifier, field in after.items() if identifier != 5}
+    changes = clients_module._collateral_changes(before, missing, set())
+    assert [(identifier, now) for identifier, _, now in changes] == [
+        (2, "now reads unset"),
+        (4, "now shows a different value"),
+        (5, "now missing from that read"),
+    ]
+
+
+def test_held_words_a_hidden_field_without_its_value():
+    F = clients_module._CustomField
+    assert clients_module._held(F("A", True, None, True)) == (HIDDEN_STATE, "hidden")
+    assert clients_module._held(F("A", False, None, True)) == ("was unset", "unset")
+    assert clients_module._held(F("A", True, "x")) == ('was set to "x"', "text")
+
+
+def test_the_hidden_notes_are_one_neutral_sentence_each():
+    assert clients_module._hidden_note([45, 46]) == HIDDEN_NOTE.format(ids="45, 46")
+    assert clients_module._unread_warning([41]) == UNREAD_WARNING.format(ids="41")
+
+
 # -- the records the other tools return carry (or leave out) the custom properties as Gorelo sends them ----------------
 
 
@@ -3076,7 +3495,7 @@ STRICT_CASES = [
     ("get_client", {"client_id": 9101}, "client_id"),
     ("list_client_locations", {"client_id": 9101}, "client_id"),
     ("update_client", {"client_id": 9101, "name": "N"}, "client_id"),
-    ("update_client", {"client_id": 9101, "status_id": 2}, "status_id"),
+    ("update_client", {"client_id": 9101, "status_id": 3}, "status_id"),
 ]
 
 

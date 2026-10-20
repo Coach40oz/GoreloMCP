@@ -8,8 +8,8 @@ The tools in this module (9):
 Task comments are posted, read and deleted with the comment tools in tools/projects.py (give them
 task_id); the side conversation or approval created here supplies their conversation_id.
 
-An API key without the Project scope gets a 403 (code 080203), so these tools are covered by
-offline tests only. A 403 reaches the model through format_gorelo_error's missing-scope message.
+An API key without the Project scope gets a 403 (code 080203), which reaches the model through
+format_gorelo_error's missing-scope message. The offline tests cover these tools.
 
 Contract e15cb5a18ec2 (2026-10-02) changed tasks as follows, and this module follows it: CreateTaskCommand now
 requires SectionId (create_project_task has a required section_id), and task rows (list and detail) carry IsUnread and
@@ -22,8 +22,8 @@ The same contract documents every request field for the first time, and the tool
   empty list or a bare 0 is refused and points to clear_fields. Gorelo documents the lead removal; it has not been
   probed live. A task's due date is removed with clear_due_date, never by omission.
 * status_reason is read by Gorelo only when status_id is sent, so it is refused without status_id.
-* status_id and the status_ids filter are checked against the task scale (1 NotStarted to 4 Done) before any request. The
-  project scale is another one (it adds InProgress, Completed and Closed), so a project status such as 5 Closed is
+* status_id and the status_ids filter are checked against the task scale (1 Not started to 4 Done) before any request. The
+  project scale is another one (it adds In progress, Completed and Closed), so a project status such as 5 Closed is
   refused here instead of being sent to a task. The scale is the one CreateTaskCommand.StatusId, UpdateTaskCommand.StatusId
   and the StatusIds filter of the task list document.
 * section_id of an update must be an active section of the same project (text only: it needs a read to check).
@@ -173,9 +173,9 @@ TASK_CLEAR_VALUES: dict[str, Any] = {
 SIDE_CONVERSATION_MAP = {"name": "Name", "email": "Email", "cc_emails": "CcEmails"}
 APPROVAL_MAP = {"name": "Name", "contact_ids": "ContactIds"}
 
-# The task status scale ("NotStarted=1, WorkingOnIt=2, OnHold=3, Done=4"): StatusId of a task create and update, and the
+# The task status scale ("1 Not started, 2 Working on it, 3 On hold, 4 Done"): StatusId of a task create and update, and the
 # StatusIds filter of the task list. A project has its own scale (see tools/projects.py), which a task never takes.
-TASK_STATUS_LABELS = {1: "NotStarted", 2: "WorkingOnIt", 3: "OnHold", 4: "Done"}
+TASK_STATUS_LABELS = {1: "Not started", 2: "Working on it", 3: "On hold", 4: "Done"}
 TASK_STATUS_SCALE = ", ".join(f"{status} {label}" for status, label in TASK_STATUS_LABELS.items())
 TASK_STATUSES = f"{TASK_STATUS_SCALE}."
 SIDE_CONVERSATION_NOTE = (
@@ -211,9 +211,9 @@ def _priority(value: Any) -> int | None:
 
 
 def _status(param: str, value: Any) -> int:
-    """One status of a task: 1 NotStarted to 4 Done. A caller's None means "not given", so wrap it with _given.
+    """One status of a task: 1 Not started to 4 Done. A caller's None means "not given", so wrap it with _given.
 
-    The project scale is another one (it adds InProgress, Completed and Closed), so a project status such as 5 is refused
+    The project scale is another one (it adds In progress, Completed and Closed), so a project status such as 5 is refused
     here, with zero HTTP calls, instead of being sent to a task. Every whole number outside the scale is answered with the
     scale and quoted back (it is not caller data worth hiding), 0 and the negative numbers included: positive_id's
     "expected a positive whole number such as 123" would suggest that any id will do. Whatever else is not an id (a
@@ -324,7 +324,9 @@ async def list_project_tasks(
     section_ids: Annotated[
         list[str] | None, Field(description="Section ids (list_project_sections).")
     ] = None,
-    status_ids: Annotated[list[StrictId] | None, Field(description=TASK_STATUSES)] = None,
+    status_ids: Annotated[
+        list[StrictId] | None, Field(description=f"{TASK_STATUSES} Omit for every status.")
+    ] = None,
     assignee_ids: Annotated[
         list[StrictId] | None, Field(description="Technician ids (list_org_users); matches lead OR assisting.")
     ] = None,
@@ -344,7 +346,7 @@ async def list_project_tasks(
     page_size: Annotated[int, Field(description="Rows per page, 1-200 (clamped).")] = 50,
     cursor: Annotated[str | None, Field(description="next_cursor from the previous page.")] = None,
 ) -> dict:
-    """List a project's tasks, in the board's own order by default, and return one page. Rows carry IsUnread and IsWaitingOnThem (true while the task waits on the client rather than on the service provider). Rows also carry BlockedByTaskIds and BlockingTaskIds (the tasks that must finish before this one, and the tasks it blocks); get_project_task adds the linked assets, status details, recorded time, products and banner. There is no assigned-to-me filter: use assignee_ids.
+    """List a project's tasks, in the board's own order by default, and return one page. Rows carry IsUnread and IsWaitingOnThem (true while the task waits on the client rather than on the service provider). Rows also carry BlockedByTaskIds and BlockingTaskIds (the tasks that must finish before this one, and the tasks it blocks), and LastUpdate, whose UpdateType is one of a fixed set of event names (it and Summary are empty for any other recorded event); get_project_task adds the linked assets, status details, recorded time, products and banner. There is no assigned-to-me filter: use assignee_ids.
     Paging: pass next_cursor back as cursor with the SAME filters until has_more is false.
     """
     pid = guid("project_id", project_id)
@@ -378,7 +380,7 @@ async def get_project_task(
     project_id: Annotated[str, Field(description="Project id (list_projects).")],
     task_id: Annotated[str, Field(description="Task id (list_project_tasks).")],
 ) -> dict:
-    """Get one task in full: linked assets and uptime checks, blocking relationships (both directions), status reason and details, recorded time, products and banner, plus the IsUnread and IsWaitingOnThem flags."""
+    """Get one task in full: linked assets and uptime checks, blocking relationships (both directions), status reason and details, recorded time, products and banner, plus the IsUnread and IsWaitingOnThem flags. LastUpdate.UpdateType is one of a fixed set of event names (it and Summary are empty for any other recorded event)."""
     data = await client_of(ctx).get_one(
         GET_TASK, path_params=_task_ids(project_id, task_id), tool="get_project_task"
     )
@@ -404,7 +406,7 @@ async def create_project_task(
         StrictId | None, Field(description=f"{PRIORITIES}. Omit and Gorelo uses Normal.")
     ] = None,
     status_id: Annotated[
-        StrictId | None, Field(description=f"{TASK_STATUSES} Omit and Gorelo uses NotStarted.")
+        StrictId | None, Field(description=f"{TASK_STATUSES} Omit and Gorelo uses 1 Not started.")
     ] = None,
     due_date: Annotated[str | None, Field(description="Due date (ISO 8601 with UTC offset).")] = None,
     created_by_name: Annotated[
@@ -694,7 +696,7 @@ async def get_task_approval(
         str, Field(description="Id of an Approval row in list_task_conversations.")
     ],
 ) -> dict:
-    """Get one approval on a task with its approvers. This is where the approval status lives: Disapproved as soon as anyone disapproves, Approved once everyone approves, Pending otherwise. list_task_conversations does not carry it."""
+    """Get one approval on a task with its approvers. This is where the approval status lives: Denied as soon as anyone denies, Approved once everyone approves, Pending otherwise. list_task_conversations does not carry it."""
     ids = {**_task_ids(project_id, task_id), "approvalId": guid("approval_id", approval_id)}
     data = await client_of(ctx).get_one(GET_APPROVAL, path_params=ids, tool="get_task_approval")
     return expect_object(data, GET_APPROVAL, tool="get_task_approval")

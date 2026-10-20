@@ -1,5 +1,9 @@
 """tools/org.py: list_org_groups, list_org_users."""
 
+import json
+import re
+from pathlib import Path
+
 import httpx
 import pytest
 from conftest import (
@@ -9,16 +13,22 @@ from conftest import (
     envelope,
     error_envelope,
     list_tools,
+    make_ctx,
     paged_envelope,
     paged_responder,
     pagination,
 )
+from fastmcp.exceptions import ToolError
 
 import tools.org as org_module
 from gorelo_client import FORBIDDEN_OPS
-from tools._common import REGISTRY
+from tools._common import MAX_ID, REGISTRY
 
 pytestmark = pytest.mark.anyio
+
+EM_DASH, EN_DASH = chr(0x2014), chr(0x2013)
+LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
+needs_spec_text = pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
 
 GROUPS = "/v1/organization/groups"
 USERS = "/v1/organization/users"
@@ -70,6 +80,12 @@ def flat(text):
     return " ".join(text.split())
 
 
+async def call_directly(client_factory, tool, **kwargs):
+    """Call the decorated function itself (no pydantic in front of it): for the checks the schema normally pre-empts."""
+    async with client_factory() as client:
+        return await tool(make_ctx(client), **kwargs)
+
+
 # --------------------------------------------------------------------------
 # Declarations
 # --------------------------------------------------------------------------
@@ -82,11 +98,22 @@ def test_each_tool_is_declared_as_a_core_read_tool_over_its_op(name, spec_index)
     assert all(op in spec_index.ops for op in spec.ops) and not set(spec.ops) & FORBIDDEN_OPS
 
 
-@pytest.mark.parametrize("name", sorted(TOOLS))
-async def test_neither_tool_takes_a_parameter(name, server):
-    tool = next(t for t in await list_tools(server) if t.name == name)
+async def test_list_org_groups_takes_no_parameter(server):
+    tool = next(t for t in await list_tools(server) if t.name == "list_org_groups")
     assert tool.inputSchema.get("properties", {}) == {}
     assert not tool.inputSchema.get("required")
+    assert (tool.annotations.readOnlyHint, tool.annotations.destructiveHint) == (True, False)
+
+
+async def test_list_org_users_takes_only_status_ids(server):
+    tool = next(t for t in await list_tools(server) if t.name == "list_org_users")
+    schema = tool.inputSchema
+    assert set(schema["properties"]) == {"status_ids"}
+    status = schema["properties"]["status_ids"]
+    assert status["type"] == "array" and status["items"]["type"] == "integer"
+    assert status["description"] == org_module.USER_STATUSES
+    assert "given, only those statuses" in status["description"]
+    assert "status_ids" not in (schema.get("required") or [])
     assert (tool.annotations.readOnlyHint, tool.annotations.destructiveHint) == (True, False)
 
 
@@ -111,6 +138,9 @@ def test_the_groups_docstring_says_it_is_not_paged_and_the_users_docstring_says_
     users = flat(org_module.list_org_users.__doc__)
     assert "all pages are read for you" in users and "truncated is false when the list is complete" in users
     assert "technician id other tools take" in users
+    assert "without status_ids Gorelo lists Pending and Active" in users
+    assert "status_ids=[1, 2, 3] for every user" in users
+    assert "List every user" not in users
 
 
 # --------------------------------------------------------------------------
@@ -264,3 +294,92 @@ async def test_list_org_users_maps_a_page_size_rejection_to_the_page_size_name(s
     text = await call_tool_error(server, "list_org_users")
     # the tool has no page_size parameter, so Gorelo's own name is kept
     assert text == trace("Gorelo rejected list_org_users (HTTP 400, code 070101): PageSize: PageSize must be between 1 and 200.")
+
+
+async def test_list_org_users_sends_status_ids_on_every_page_and_echoes_them(server, mock_gorelo):
+    mock_gorelo.on("GET", USERS, paged_responder([[user_record(1)], [user_record(2)]], total_count=2))
+    result = await call_tool(server, "list_org_users", {"status_ids": [2, 3]})
+    assert [r.query for r in mock_gorelo.requests] == [
+        {"StatusIds": "2,3", "PageSize": "200"},
+        {"StatusIds": "2,3", "PageSize": "200", "Cursor": "c1"},
+    ]
+    assert result["filters"] == {"status_ids": [2, 3]}
+    assert result["count"] == 2 and result["total_count"] == 2
+    assert (result["truncated"], result["complete_scan"], result["count_mismatch"]) == (False, True, False)
+
+
+@pytest.mark.parametrize("status", [1, 2, 3])
+async def test_list_org_users_accepts_each_status_of_the_scale(server, mock_gorelo, status):
+    mock_gorelo.on("GET", USERS, paged_envelope([user_record(9201)], total_count=1))
+    result = await call_tool(server, "list_org_users", {"status_ids": [status]})
+    assert mock_gorelo.last.query == {"StatusIds": str(status), "PageSize": "200"}
+    assert result["filters"] == {"status_ids": [status]}
+
+
+@pytest.mark.parametrize(
+    ("status_ids", "fragment"),
+    [
+        ([0], "status_ids[0]: expected 1 Pending, 2 Active, 3 Disabled, got 0"),
+        ([4], "status_ids[0]: expected 1 Pending, 2 Active, 3 Disabled, got 4"),
+        ([1, -1], "status_ids[1]: expected 1 Pending, 2 Active, 3 Disabled, got -1"),
+        ([2, 9], "status_ids[1]: expected 1 Pending, 2 Active, 3 Disabled, got 9"),
+        ([MAX_ID], "status_ids[0]: expected 1 Pending, 2 Active, 3 Disabled, got 9223372036854775807"),
+        ([], "status_ids: expected at least one id, got an empty list"),
+        ([MAX_ID + 1], "status_ids[0]: expected a positive whole number such as 123, got a number above"),
+    ],
+)
+async def test_list_org_users_refuses_a_status_outside_the_scale_before_any_http_call(
+    server, mock_gorelo, status_ids, fragment
+):
+    text = await call_tool_error(server, "list_org_users", {"status_ids": status_ids})
+    assert fragment in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("bad", [True, "5", 5.0, "abc"])
+async def test_list_org_users_status_ids_refuse_json_true_text_and_floats(server, mock_gorelo, bad):
+    text = await call_tool_error(server, "list_org_users", {"status_ids": [bad]})
+    assert "status_ids" in text and "valid integer" in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    ("bad", "kind"),
+    [(True, "a boolean"), (5.0, "a decimal number"), ("5", "a string"), (None, "null")],
+)
+async def test_list_org_users_direct_call_keeps_the_id_messages(client_factory, mock_gorelo, bad, kind):
+    with pytest.raises(ToolError) as info:
+        await call_directly(client_factory, org_module.list_org_users, status_ids=[bad])
+    assert str(info.value) == f"status_ids[0]: expected a positive whole number such as 123, got {kind}"
+    assert mock_gorelo.requests == []
+
+
+async def test_list_org_users_maps_a_status_ids_rejection_to_the_snake_case_name(server, mock_gorelo):
+    mock_gorelo.on("GET", USERS, error_envelope(400, [("070101", "Not valid.", "StatusIds")]))
+    text = await call_tool_error(server, "list_org_users", {"status_ids": [2]})
+    assert text == trace("Gorelo rejected list_org_users (HTTP 400, code 070101): status_ids: Not valid.")
+
+
+def operation(method, path):
+    return json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["paths"][path][method]
+
+
+def param_text(method, path, name):
+    return " ".join(next(p["description"] for p in operation(method, path)["parameters"] if p["name"] == name).split())
+
+
+@needs_spec_text
+def test_the_user_status_scale_is_the_one_the_spec_text_documents():
+    text = param_text("get", "/v1/organization/users", "StatusIds")
+    assert {int(n): label for label, n in re.findall(r"([A-Z][a-z]+)=(\d)", text)} == org_module.USER_STATUS_LABELS
+    assert org_module.USER_STATUS_LABELS == {1: "Pending", 2: "Active", 3: "Disabled"}
+    assert "Omit for Pending and Active" in text
+    assert "disabled users are listed only when 3 is named" in text
+    assert "Any other id is a 400" in text
+
+
+def test_the_org_module_text_is_plain_ascii_without_dashes():
+    for path in (Path(__file__).resolve().parent.parent / "tools" / "org.py", Path(__file__)):
+        source = path.read_text(encoding="utf-8")
+        assert source.isascii(), path.name
+        assert EM_DASH not in source and EN_DASH not in source, path.name

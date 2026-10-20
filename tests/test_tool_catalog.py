@@ -33,7 +33,7 @@ sys.path.insert(0, str(SCRIPTS))
 import gen_tool_catalog as gen  # noqa: E402
 
 EM_DASH, EN_DASH = chr(0x2014), chr(0x2013)
-MARK = "only when GORELO_ENABLE_DESTRUCTIVE=1"
+MARK = "only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name"
 
 
 def parse_catalog(text):
@@ -216,7 +216,7 @@ def test_the_first_sentence_is_what_the_model_is_shown():
 
 def test_the_optional_toolsets_say_which_api_key_scope_they_need():
     text = CATALOG.read_text(encoding="utf-8")
-    assert "Needs the `Project` scope" in text and "Needs the `Forms` scope" in text
+    assert "Needs the `Project` scope" in text and "Needs the `Forms` scope" in text and "Needs the `Documents` scope" in text
     assert text.count("In the default set.") == len(DEFAULT_TOOLSETS)
 
 

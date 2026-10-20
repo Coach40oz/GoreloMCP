@@ -4,26 +4,29 @@ The fake (FakeGorelo) sits behind httpx.MockTransport and answers the envelopes 
 flow: ids are handed out and remembered, PATCH /v1/clients/{clientId} is a partial update and PATCH /v1/contacts/{contactId}
 replaces the contact (the id is in the path: the collection forms answer 405 live), a ticket's BillingOverride resets
 the parts a PATCH leaves out, a time entry can answer Reopened, projects and forms can answer the missing-scope 403.
-It also behaves like production where live runs (2026-10-02) found the published spec wrong: a technician
+It also answers the way Gorelo does where the published spec is wrong: a technician
 cannot be lead or assisting and watcher of one ticket ("Technician already exists"), a maintenance window needs its
 StartDateTime and an approver needs the approver contact tag. Time entries are served in the PUBLISHED shape by default
-(User {Id, Name}, Ticket {Id, Number, Title}, Task null for a ticket entry), which production answers again since the
-probe of 2026-10-03; on 2026-10-02 it answered the flat ids UserId, TicketId and TaskId instead, which a test serves by
-reshaping the entry reads (make_flat).
+(User {Id, Name}, Ticket {Id, Number, Title}, Task null for a ticket entry), which is the published shape Gorelo answers;
+the older flat ids UserId, TicketId and TaskId are served by reshaping the entry reads (make_flat).
 A test can also make the fake STORE a ticket with a contact or CCs the request never carried, or an approval with
 other approvers: the cases where the matrix must stop before it emails anybody.
 For invoices the fake keeps a catalog (products of another client, of nobody and of the test client), numbers the invoices,
-answers the dates as plain calendar dates like production, deletes a Draft (answer StatusId 6) and voids an Approved
+answers the dates as plain calendar dates like Gorelo, deletes a Draft (answer StatusId 6) and voids an Approved
 invoice (StatusId 4; deleting an invoice that is already void is a success, as the spec says), counts the PDF export
 events, and lets a test change the STORED invoice (a Reference, a status, no Number) or make the create answer get lost
 after the invoice was made. An Approved invoice whose total is exactly 0 is created as Paid (3, which cannot be deleted
 or voided: a 409), and an Approved invoice reaches the accounting system: its ExternalId (and a payment link) appear
 after as many reads as the test asks for (none by default: it is set at once), or never.
-For the approved invoice area it also lists the contacts of the test client (all Inactive by default, a test may
-add an Active one) and gives every location a BillingContactIds, the text "[]" by default (production's answer for none). An invoice carries the published totals
+For the approved invoice area it also lists the contacts of the test client (all Archived by default, a test may
+add an Active one) and gives every location a BillingContactIds, the text "[]" by default (Gorelo's answer for none). An invoice carries the published totals
 (SubTotal, TotalDiscount, TotalTax 0.0 and Total), and a test may put a tax on the STORED invoice with on_invoice_created.
 The REAL LiveGuard (write mode, require_intents=True) and the real cleanup run in front of it, so a create without
 an intent, a request outside the allowlist or a record that is not cleaned up fails these tests like it would live.
+For documents (contract a7954b24844b) it keeps versions (a changed title or body is a new version, a restore moves a version to the
+top), attachments (the whole list is replaced), related items, a tree (a move, an archive that takes the documents below it, a
+restore that puts a document at the top level) and the sharing flags, lists documents Active-only unless StatusIds says 2, answers a
+duplicate of an archived document with a 409 and serves the PDF as a file. Its clients have a Status (Active by default).
 Nothing touches the network or the app's .env.
 """
 
@@ -72,7 +75,7 @@ CONTACT_FIELDS = (
 
 @pytest.fixture(autouse=True)
 def _never_read_the_real_env(monkeypatch, tmp_path):
-    """Whatever a test does, the live service's .env is not the file that gets opened."""
+    """Whatever a test does, the service's .env is not the file that gets opened."""
     monkeypatch.setattr(_env, "ENV_FILE", tmp_path / "no-such-dir" / ".env")
 
 
@@ -132,9 +135,10 @@ def make_test_client_contact(n: int, status: dict | None, **extra) -> dict:
     return {key: value for key, value in row.items() if value is not DROP}
 
 
-def inactive_test_client_contacts(count: int = 4) -> list[dict]:
-    """Contacts of a test client whose contacts are all Inactive (so nobody can be emailed)."""
-    return [make_test_client_contact(n, {"Id": 2, "Name": "Inactive"}) for n in range(1, count + 1)]
+def archived_test_client_contacts(count: int = 4) -> list[dict]:
+    """Contacts of a test client whose contacts are all Archived (4), the state the tests treat as proven not to be emailed (see the
+    `approved` fixture, which names it in UNEMAILABLE_CONTACT_STATUS_IDS: the constant is empty in the code)."""
+    return [make_test_client_contact(n, {"Id": 4, "Name": "Archived"}) for n in range(1, count + 1)]
 
 
 DROP = object()  # a key a row does not have
@@ -151,6 +155,7 @@ DEFAULT_PROJECT_TYPES = (
     {"Id": project_type_guid(2), "Name": "Migration", "Description": "y"},
 )
 PDF_BYTES = b"%PDF-1.7 fake invoice"
+DOCUMENT_PDF_BYTES = b"%PDF-1.7 fake document"
 
 
 # --------------------------------------------------------------------------
@@ -165,11 +170,13 @@ class FakeGorelo:
     stored_approvers (the approvers an approval is STORED with, whatever contacts were asked for), reopens (how many
     delete_time_entry calls answer Reopened first), other_tickets (tickets of the test client that exist before the run),
     oldest_first (list tickets oldest first, so a big client hides the run's tickets behind the first 500),
-    lookup_lag (searches by text that come back empty before the new ticket is found), status_names (the tenant's
-    ticket statuses), catalog (the rows of GET /v1/items), project_types (the rows of GET /v1/projects/types),
+    lookup_lag (searches by text that come back empty before the new ticket is found), status_names (the ticket statuses
+    the fake answers), catalog (the rows of GET /v1/items), project_types (the rows of GET /v1/projects/types),
     sync_after (how many reads of an Approved invoice answer without ExternalId before it appears: 0, the default, sets it
     at once; None never sets it), payment_link (False: the synced invoice has no PaymentLink), test_client_contacts (the contact rows
-    GET /v1/contacts answers for the test client besides the ones a run created: Inactive contacts by default).
+    GET /v1/contacts answers for the test client besides the ones a run created: Archived contacts by default), documents_scope
+    (False answers the 403 with code 080203 on every document route) and keeps_attachments (False: a changed title or body makes a
+    new version WITHOUT the attachments, the case the update_document tool must report).
     on_ticket_created(hook) lets a test change the STORED ticket after a POST /v1/tickets (a tenant automation that
     sets a contact or CCs the request never carried), and on_invoice_created(hook) does the same for the STORED invoice.
     There is deliberately no route for GET /v1/tickets/tags: the matrix applies no tenant tag, so such a request would
@@ -192,6 +199,8 @@ class FakeGorelo:
         sync_after: int | None = 0,
         payment_link: bool = True,
         test_client_contacts: list | None = None,
+        documents_scope: bool = True,
+        keeps_attachments: bool = True,
     ) -> None:
         self.status_names = dict(STATUS_NAMES if status_names is None else status_names)
         self.catalog = [dict(row) if isinstance(row, dict) else row for row in (DEFAULT_CATALOG if catalog is None else catalog)]
@@ -210,9 +219,14 @@ class FakeGorelo:
         self.oldest_first, self.lookup_lag = oldest_first, lookup_lag
         self.sync_after, self.payment_link = sync_after, payment_link
         self.test_client_contacts = [
-            dict(row) if isinstance(row, dict) else row for row in (inactive_test_client_contacts() if test_client_contacts is None else test_client_contacts)
+            dict(row) if isinstance(row, dict) else row for row in (archived_test_client_contacts() if test_client_contacts is None else test_client_contacts)
         ]
+        self.documents_scope, self.keeps_attachments = documents_scope, keeps_attachments
         self._ids = itertools.count(1)
+        self._doc_ids = itertools.count(1)
+        self._version_ids = itertools.count(1)
+        self._link_ids = itertools.count(100)
+        self._tokens = itertools.count(1)
         self._numbers = itertools.count(3000)
         self._conversation_ids = itertools.count(700)
         self._entry_ids = itertools.count(5000)
@@ -221,16 +235,20 @@ class FakeGorelo:
         self._invoice_ids = itertools.count(1)
         self._invoice_numbers = itertools.count(1042)
         self.deleted: set[tuple[str, object]] = set()
+        active = {"Id": 1, "Name": "Active"}
         self.clients = {
-            TEST_CLIENT: {"Id": TEST_CLIENT, "Name": "the test client", "AlternateName": "the test client alt", "BillingName": "the test client"},
-            SECOND: {"Id": SECOND, "Name": "Second", "AlternateName": "Second alt", "BillingName": "Second"},
+            TEST_CLIENT: {
+                "Id": TEST_CLIENT, "Name": "the test client", "AlternateName": "the test client alt", "BillingName": "the test client",
+                "Status": dict(active),
+            },
+            SECOND: {"Id": SECOND, "Name": "Second", "AlternateName": "Second alt", "BillingName": "Second", "Status": dict(active)},
         }
         self.locations = {
             TEST_CLIENT: [
                 {
                     "Id": 9001, "ClientId": TEST_CLIENT, "Name": "the test client HQ", "IsDefault": True, "PhoneCountryCode": "US",
-                    # the spec calls it comma separated ids, but production answers the TEXT of an empty JSON list when there
-                    # are none (seen on a live location)
+                    # the spec calls it comma separated ids, but Gorelo answers the TEXT of an empty JSON list when there
+                    # are none
                     "BillingContactIds": "[]",
                 }
             ],
@@ -257,6 +275,7 @@ class FakeGorelo:
         self.task_comments: dict[str, dict] = {}
         self.attachments: list[dict] = []
         self.invoices: dict[str, dict] = {}
+        self.documents: dict[str, dict] = {}
         self.exports: list[str] = []  # the invoice of every PDF export event
         self.emailed: list = []  # every RecipientEmails entry a create body carried (the matrix sends none)
         for n in range(other_tickets):
@@ -274,6 +293,10 @@ class FakeGorelo:
 
     def missing(self, what: str) -> dict:
         return error_envelope(404, [("070404", f"{what} not found")])
+
+    def missing_custom_asset(self) -> dict:
+        """The 404 of a custom asset that does not exist, as the live API answers it (2026-10-17: code 070202, no property name)."""
+        return error_envelope(404, [("070202", "The requested resource was not found.")])
 
     def paged(self, rows: list, request) -> dict:
         size = int(request.query.get("PageSize", 50))
@@ -390,6 +413,18 @@ class FakeGorelo:
         r("GET", "/v1/tickets/{ticketId}/comments/{commentId}", self.get_comment)
         r("DELETE", "/v1/tickets/{ticketId}/comments/{commentId}", self.delete_comment)
         r("POST", "/v1/attachments", self.post_attachment)
+        r("GET", "/v1/documents", self.doc_scoped(self.list_documents))
+        r("POST", "/v1/documents", self.doc_scoped(self.post_document))
+        r("GET", "/v1/documents/{documentId}", self.doc_scoped(self.get_document))
+        r("PATCH", "/v1/documents/{documentId}", self.doc_scoped(self.patch_document))
+        r("POST", "/v1/documents/{documentId}/duplicate", self.doc_scoped(self.duplicate_document))
+        r("GET", "/v1/documents/{documentId}/pdf", self.doc_scoped(self.get_document_pdf))
+        r("GET", "/v1/documents/{documentId}/versions", self.doc_scoped(self.list_document_versions))
+        r("GET", "/v1/documents/{documentId}/versions/{versionId}", self.doc_scoped(self.get_document_version))
+        r("POST", "/v1/documents/{documentId}/versions/{versionId}/restore", self.doc_scoped(self.restore_document_version))
+        r("GET", "/v1/documents/{documentId}/related-items", self.doc_scoped(self.list_document_links))
+        r("POST", "/v1/documents/{documentId}/related-items", self.doc_scoped(self.post_document_links))
+        r("DELETE", "/v1/documents/{documentId}/related-items/{relatedItemId}", self.doc_scoped(self.delete_document_link))
         r("POST", "/v1/tickets/{ticketId}/conversations/side-conversation", self.post_side)
         r("POST", "/v1/tickets/{ticketId}/conversations/approval", self.post_approval)
         r("GET", "/v1/tickets/{ticketId}/approvals/{approvalId}", self.get_approval)
@@ -666,9 +701,9 @@ class FakeGorelo:
         no_service_line = "ServiceLineId" in body and body["ServiceLineId"] is None
         self.time_entries[ident] = {
             "Id": ident,
-            # the PUBLISHED TimeEntryModel (production answers it since 2026-10-03): the user is {Id, Name}, the
+            # the PUBLISHED TimeEntryModel (the shape Gorelo answers): the user is {Id, Name}, the
             # ticket and the task are {Id, Number, Title} and the one the entry was not logged against is null.
-            # On 2026-10-02 production answered the flat UserId, TicketId and TaskId instead (see make_flat).
+            # the flat UserId, TicketId and TaskId are the older shape (see make_flat).
             "Ticket": self.reference(body.get("TicketId"), self.tickets),
             "Task": self.reference(body.get("TaskId"), self.tasks),
             "User": {"Id": body["UserId"], "Name": "Operator"},
@@ -936,7 +971,7 @@ class FakeGorelo:
         ident = self.guid()
         self.projects[ident] = {
             "Id": ident, "Title": body["Title"], "ClientId": body.get("ClientId"), "TypeId": body["TypeId"],
-            "GroupId": body["GroupId"], "LocationId": body["LocationId"], "Status": {"Id": 1, "Name": "NotStarted"},
+            "GroupId": body["GroupId"], "LocationId": body["LocationId"], "Status": {"Id": 1, "Name": "Not started"},
         }
         return envelope({"Id": ident})
 
@@ -949,7 +984,7 @@ class FakeGorelo:
         ident = self.guid()
         self.tasks[ident] = {
             "Id": ident, "Title": q.json["Title"], "ProjectId": self.part(q, 3), "SectionId": q.json.get("SectionId"),
-            "Status": {"Id": 1, "Name": "NotStarted"},
+            "Status": {"Id": 1, "Name": "Not started"},
         }
         return envelope({"Id": ident})
 
@@ -959,6 +994,249 @@ class FakeGorelo:
             "Id": ident, "BodyHtml": q.json["Body"], "ConversationType": {"Id": q.json["ConversationTypeId"], "Name": "Private"},
         }
         return envelope({"Id": ident})
+
+    # documents (contract a7954b24844b). A document is kept as a dict with the private keys _versions (newest first) and _links.
+
+    def doc_scoped(self, handler):
+        def serve(request):
+            if not self.documents_scope:
+                return error_envelope(403, [("080203", "API key does not have 'Documents' write access")])
+            return handler(request)
+
+        return serve
+
+    def doc_url(self, name: str) -> str:
+        return f"https://files.example.invalid/{name}?token=t{next(self._tokens)}"  # a fresh access token on every read
+
+    def live_doc(self, q, index: int = 3):
+        return self.documents.get(self.part(q, index))
+
+    def doc_children(self, doc: dict) -> list[dict]:
+        return [row for row in self.documents.values() if row["ParentDocumentId"] == doc["Id"]]
+
+    def doc_depth(self, doc: dict) -> int:
+        depth, parent = 0, doc["ParentDocumentId"]
+        while parent is not None:
+            depth, parent = depth + 1, self.documents[parent]["ParentDocumentId"]
+        return depth
+
+    def doc_root(self, doc: dict) -> str:
+        while doc["ParentDocumentId"] is not None:
+            doc = self.documents[doc["ParentDocumentId"]]
+        return doc["Id"]
+
+    def doc_row(self, doc: dict) -> dict:
+        """A row of GET /v1/documents (DocumentListItemModel)."""
+        return {
+            "Id": doc["Id"], "Title": doc["Title"], "ParentDocumentId": doc["ParentDocumentId"], "RootDocumentId": self.doc_root(doc),
+            "Depth": self.doc_depth(doc), "ChildCount": len(self.doc_children(doc)), "DocumentOrder": doc["DocumentOrder"],
+            "ClientId": doc["ClientId"], "IsStarred": doc["IsStarred"], "PublicLinkEnabled": doc["PublicLinkEnabled"],
+            "PublishToPortalEnabled": doc["PublishToPortalEnabled"], "AlternateName": doc["AlternateName"],
+            "Status": {"Id": doc["StatusId"], "Name": "Active" if doc["StatusId"] == 1 else "Archived"},
+            "CreatedOn": doc["CreatedOn"], "CreatedById": 0, "UpdatedOn": doc["UpdatedOn"], "UpdatedById": 0,
+        }
+
+    def doc_detail(self, doc: dict) -> dict:
+        """The DocumentDetailModel: the list row plus Body, Children, PublicLinkUrl, Attachments and RelatedItems."""
+        names = {1: "Document", 2: "Custom asset", 3: "Contact", 4: "Device", 5: "Structured document", 6: "Password"}
+        return {
+            **self.doc_row(doc),
+            "Body": doc["Body"],
+            "Children": [{"Id": c["Id"], "Title": c["Title"], "ChildCount": len(self.doc_children(c))} for c in self.doc_children(doc)],
+            "PublicLinkUrl": f"https://docs.example.invalid/public/{doc['Id']}" if doc["PublicLinkEnabled"] else None,
+            "Attachments": [{"Name": a["Name"], "Url": self.doc_url(a["Name"])} for a in doc["Attachments"]],
+            "RelatedItems": [
+                {"Id": link["Id"], "ItemId": link["ItemId"], "ItemType": {"Id": link["ItemTypeId"], "Name": names[link["ItemTypeId"]]}}
+                for link in doc["_links"]
+            ],
+        }
+
+    def new_version(self, doc: dict) -> None:
+        for version in doc["_versions"]:
+            version["IsCurrent"] = False
+        doc["_versions"].insert(
+            0,
+            {
+                "VersionId": f"{next(self._version_ids):08d}-eeee-4fff-8aaa-{len(doc['_versions']):012d}", "IsCurrent": True,
+                "Title": doc["Title"], "Body": doc["Body"], "EditedById": 0, "EditedOn": now_text(),
+                "Attachments": [dict(a) for a in doc["Attachments"]] if self.keeps_attachments else [],
+            },
+        )
+        if not self.keeps_attachments:
+            doc["Attachments"] = []
+
+    def add_document(self, body: dict, *, parent: dict | None, client: int | None) -> dict:
+        n = next(self._doc_ids)
+        siblings = [row for row in self.documents.values() if row["ParentDocumentId"] == (parent["Id"] if parent else None)]
+        doc = {
+            "Id": f"{n:08d}-dddd-4eee-8fff-{n:012d}", "Title": body["Title"], "Body": body.get("Body") or "",
+            "ParentDocumentId": parent["Id"] if parent else None, "ClientId": client, "IsStarred": False, "PublicLinkEnabled": False,
+            "PublishToPortalEnabled": False, "AlternateName": None, "StatusId": 1, "Attachments": [], "DocumentOrder": len(siblings) + 1,
+            "CreatedOn": now_text(), "UpdatedOn": None, "_versions": [], "_links": [],
+        }
+        self.documents[doc["Id"]] = doc
+        self.new_version(doc)
+        return doc
+
+    def list_documents(self, q):
+        wanted_status = {int(x) for x in q.query["StatusIds"].split(",")} if "StatusIds" in q.query else {1}
+        if wanted_status - {1, 2}:
+            return error_envelope(400, [("070101", f"Status id {sorted(wanted_status - {1, 2})[0]} is invalid.", "StatusIds")])
+        rows = [d for d in self.documents.values() if d["StatusId"] in wanted_status]
+        if "ClientIds" in q.query:
+            clients = {int(x) for x in q.query["ClientIds"].split(",")}
+            rows = [d for d in rows if d["ClientId"] in clients]
+        if "Query" in q.query:
+            rows = [d for d in rows if q.query["Query"].casefold() in d["Title"].casefold()]
+        if "ParentDocumentId" in q.query:
+            rows = [d for d in rows if d["ParentDocumentId"] == q.query["ParentDocumentId"].lower()]
+        return self.paged([self.doc_row(d) for d in reversed(rows)], q)  # newest first, like the default createdOn desc
+
+    def post_document(self, q):
+        body = q.json
+        title = body.get("Title")
+        if not isinstance(title, str) or not title.strip() or len(title) > 200:
+            return error_envelope(400, [("070101", "Title is required, max 200 characters.", "Title")])
+        parent_id = body.get("ParentDocumentId")
+        parent = self.documents.get(parent_id.lower()) if parent_id else None
+        if parent_id and (parent is None or parent["StatusId"] != 1):
+            return error_envelope(400, [("070101", "The parent has to exist and not be archived.", "ParentDocumentId")])
+        if parent is not None and body.get("ClientId") not in (None, parent["ClientId"]):
+            return error_envelope(400, [("070101", "A different client than the parent's is rejected.", "ClientId")])
+        client = parent["ClientId"] if parent is not None else body.get("ClientId")
+        return envelope(self.doc_detail(self.add_document(body, parent=parent, client=client)))
+
+    def get_document(self, q):
+        doc = self.live_doc(q)
+        return envelope(self.doc_detail(doc)) if doc else self.missing("document")
+
+    def patch_document(self, q):
+        doc = self.live_doc(q)
+        if doc is None:
+            return self.missing("document")
+        body = q.json
+        if not body:
+            return error_envelope(400, [("070101", "The request must contain at least one field to update.")])
+        changed = False
+        if body.get("Title") is not None:
+            if not body["Title"].strip() or len(body["Title"]) > 200:
+                return error_envelope(400, [("070101", "Title cannot be blank, max 200 characters.", "Title")])
+            changed = changed or body["Title"] != doc["Title"]
+            doc["Title"] = body["Title"]
+        if body.get("Body") is not None:
+            changed = changed or body["Body"] != doc["Body"]
+            doc["Body"] = body["Body"]
+        for key in ("IsStarred", "PublicLinkEnabled", "PublishToPortalEnabled"):
+            if body.get(key) is not None:
+                doc[key] = body[key]
+        if "AlternateName" in body and body["AlternateName"] is not None:
+            doc["AlternateName"] = body["AlternateName"] or None  # an empty string clears it
+        if body.get("Attachments") is not None:  # the whole list, replacing the current one
+            doc["Attachments"] = [{"Name": a["Name"], "Url": a["Url"].split("?")[0]} for a in body["Attachments"]]
+            doc["_versions"][0]["Attachments"] = [dict(a) for a in doc["Attachments"]]
+        if body.get("StatusId") is not None:
+            if body["StatusId"] == 2:  # the document and everything below it
+                stack = [doc]
+                while stack:
+                    row = stack.pop()
+                    row["StatusId"] = 2
+                    stack.extend(self.doc_children(row))
+            elif body["StatusId"] == 1:  # an archived document goes back at the TOP level, as the app does
+                doc["StatusId"], doc["ParentDocumentId"] = 1, None
+            else:
+                return error_envelope(400, [("070101", "Status id is invalid.", "StatusId")])
+        if "Move" in body:
+            move = body["Move"] or {}
+            parent_id = move.get("ParentDocumentId")
+            if parent_id:
+                parent = self.documents.get(parent_id.lower())
+                if parent is None or parent["StatusId"] != 1 or parent["Id"] == doc["Id"]:
+                    return error_envelope(400, [("070101", "The new parent has to exist, not be archived and not be this document.", "Move.ParentDocumentId")])
+                if move.get("ClientId") not in (None, parent["ClientId"]):
+                    return error_envelope(400, [("070101", "A different client than the parent's is rejected.", "Move.ClientId")])
+                doc["ParentDocumentId"], doc["ClientId"] = parent["Id"], parent["ClientId"]
+            else:
+                doc["ParentDocumentId"], doc["ClientId"] = None, move.get("ClientId")  # null here means INTERNAL
+            for row in self.documents.values():  # everything nested under it takes the same client
+                if row is not doc and self.doc_root(row) == self.doc_root(doc):
+                    row["ClientId"] = doc["ClientId"]
+        if changed:
+            self.new_version(doc)
+        doc["UpdatedOn"] = now_text()
+        return envelope(self.doc_detail(doc))
+
+    def duplicate_document(self, q):
+        doc = self.live_doc(q)
+        if doc is None:
+            return self.missing("document")
+        if doc["StatusId"] != 1:
+            return error_envelope(409, [("070901", "An archived document cannot be duplicated.")])
+        body = q.json if q.content else {}
+        title = body.get("Title") or f"{doc['Title']} clone"
+        parent = self.documents.get(doc["ParentDocumentId"]) if doc["ParentDocumentId"] else None
+        copy = self.add_document({"Title": title, "Body": doc["Body"]}, parent=parent, client=doc["ClientId"])
+        copy["Attachments"] = [dict(a) for a in doc["Attachments"]]
+        return envelope(self.doc_detail(copy))
+
+    def get_document_pdf(self, q):
+        doc = self.live_doc(q)
+        if doc is None:
+            return httpx.Response(404, json=self.missing("document"))
+        return httpx.Response(
+            200, content=DOCUMENT_PDF_BYTES,
+            headers={"content-type": "application/pdf", "content-disposition": 'attachment; filename="document.pdf"'},
+        )
+
+    def list_document_versions(self, q):
+        doc = self.live_doc(q)
+        if doc is None:
+            return self.missing("document")
+        return self.paged([{k: v for k, v in version.items() if k not in ("Body", "Attachments")} for version in doc["_versions"]], q)
+
+    def get_document_version(self, q):
+        doc = self.live_doc(q)
+        version = next((v for v in doc["_versions"] if v["VersionId"] == self.part(q, 5)), None) if doc else None
+        if version is None:
+            return self.missing("document version")
+        return envelope({**version, "Attachments": [{"Name": a["Name"], "Url": self.doc_url(a["Name"])} for a in version["Attachments"]]})
+
+    def restore_document_version(self, q):
+        doc = self.live_doc(q)
+        version = next((v for v in doc["_versions"] if v["VersionId"] == self.part(q, 5)), None) if doc else None
+        if version is None:
+            return self.missing("document version")
+        if not version["IsCurrent"]:
+            doc["_versions"].remove(version)
+            for other in doc["_versions"]:
+                other["IsCurrent"] = False
+            version["IsCurrent"], version["EditedOn"] = True, now_text()
+            doc["_versions"].insert(0, version)
+            doc["Title"], doc["Body"] = version["Title"], version["Body"]
+            doc["Attachments"] = [dict(a) for a in version["Attachments"]]
+        return envelope(self.doc_detail(doc))
+
+    def list_document_links(self, q):
+        doc = self.live_doc(q)
+        return envelope(self.doc_detail(doc)["RelatedItems"]) if doc else self.missing("document")
+
+    def post_document_links(self, q):
+        doc = self.live_doc(q)
+        if doc is None:
+            return self.missing("document")
+        for item in q.json["RelatedItems"]:
+            if item["ItemTypeId"] == 1 and item["ItemId"].lower() not in self.documents:
+                return error_envelope(400, [("070101", "The record has to exist in your account.", "RelatedItems[0].ItemId")])
+            if not any(l["ItemTypeId"] == item["ItemTypeId"] and l["ItemId"].lower() == item["ItemId"].lower() for l in doc["_links"]):
+                doc["_links"].append({"Id": next(self._link_ids), "ItemId": item["ItemId"].lower(), "ItemTypeId": item["ItemTypeId"]})
+        return envelope(self.doc_detail(doc)["RelatedItems"])
+
+    def delete_document_link(self, q):
+        doc = self.live_doc(q)
+        link = next((l for l in doc["_links"] if l["Id"] == int(self.part(q, 5))), None) if doc else None
+        if link is None:
+            return self.missing("related item")
+        doc["_links"].remove(link)
+        return envelope({"Id": link["Id"]})
 
     # -- inspection ----------------------------------------------------------
 
@@ -975,12 +1253,16 @@ class FakeGorelo:
             ("task", list(self.tasks)),
             # a voided invoice cannot be removed: it stays listed as Void, a known residue and not a leftover (see residue())
             ("invoice", [i for i, row in self.invoices.items() if row["Status"]["Id"] != 4]),
+            # a document cannot be removed: an ARCHIVED one is a known residue, an Active one was missed by the run (see residue())
+            ("document", [i for i, row in self.documents.items() if row["StatusId"] != 2]),
         )
         return [f"{kind} {ident}" for kind, idents in stores for ident in idents if (kind, ident) not in self.deleted]
 
     def residue(self) -> list[str]:
-        """The invoices that were voided: they stay in Gorelo, listed as Void, and nobody can remove them."""
-        return [f"invoice {i}" for i, row in self.invoices.items() if row["Status"]["Id"] == 4 and ("invoice", i) not in self.deleted]
+        """The invoices that were voided and the documents that were archived: they stay in Gorelo and nobody can remove them."""
+        return [f"invoice {i}" for i, row in self.invoices.items() if row["Status"]["Id"] == 4 and ("invoice", i) not in self.deleted] + [
+            f"document {i}" for i, row in self.documents.items() if row["StatusId"] == 2
+        ]
 
 
 # --------------------------------------------------------------------------
@@ -1026,7 +1308,7 @@ def area_ops(fake: FakeGorelo, report) -> dict[str, list[str]]:
 
 
 def make_flat(record: dict) -> None:
-    """In place: the time entry as production answered on 2026-10-02, with the flat UserId, TicketId and TaskId (the Id
+    """In place: the time entry in the older flat shape, with UserId, TicketId and TaskId (the Id
     of the User, Ticket and Task object, None where there is no object) and no objects."""
     user, ticket, task = (record.pop(key, None) for key in ("User", "Ticket", "Task"))
     record.update(UserId=(user or {}).get("Id"), TicketId=(ticket or {}).get("Id"), TaskId=(task or {}).get("Id"))
@@ -1182,12 +1464,67 @@ GOLDEN_CUSTOM_ASSETS = [
     "GET /v1/assets/custom/hardware-types",
     "GET /v1/clients/{clientId}/locations",
     "POST /v1/assets/custom",
-    "GET /v1/assets/custom",
+    "GET /v1/assets/custom/{customAssetId}",  # create_custom_asset reads the asset back by id
+    "GET /v1/assets/custom/{customAssetId}",  # get_custom_asset: a fresh read
+    "PATCH /v1/assets/custom/{customAssetId}",  # update_custom_asset without client_id
+    "GET /v1/assets/custom/{customAssetId}",
+    "GET /v1/assets/custom/{customAssetId}",  # update_custom_asset with client_id = the current client reads the asset first
     "PATCH /v1/assets/custom/{customAssetId}",
-    "GET /v1/assets/custom",
-    "PATCH /v1/assets/custom/{customAssetId}",
-    "GET /v1/assets/custom",
-    "PATCH /v1/assets/custom/{customAssetId}",
+    "GET /v1/assets/custom/{customAssetId}",
+    "GET /v1/assets/custom/{customAssetId}",  # the negative check: the second client without location_id, refused locally after this read
+]
+# --with-asset-move: the move to the second client and back, after the eleven requests above
+GOLDEN_ASSET_MOVE = [
+    "GET /v1/clients/{clientId}/locations",  # the second client's location
+    "GET /v1/assets/custom/{customAssetId}",  # update_custom_asset reads the asset first
+    "PATCH /v1/assets/custom/{customAssetId}",  # ClientId = the second client, LocationId = its location
+    "GET /v1/assets/custom/{customAssetId}",  # read-back by id
+    "GET /v1/assets/custom/{customAssetId}",  # get_custom_asset
+    "GET /v1/assets/custom/{customAssetId}",  # the way back reads the asset first
+    "PATCH /v1/assets/custom/{customAssetId}",  # ClientId = the test client, LocationId = the location it was created at
+    "GET /v1/assets/custom/{customAssetId}",  # read-back by id
+    "GET /v1/assets/custom/{customAssetId}",  # get_custom_asset
+]
+# The documents area (--with-documents) in the happy path, scope probe first. A document write that changes the title, the body or
+# the attachments is preceded by update_document's read of the document; the module docstring lists the same requests.
+GOLDEN_DOCUMENTS = [
+    "GET /v1/documents",  # the scope probe
+    "POST /v1/documents",
+    "GET /v1/documents/{documentId}",
+    "PATCH /v1/documents/{documentId}",
+    "GET /v1/documents/{documentId}",
+    "POST /v1/documents/{documentId}/duplicate",
+    "GET /v1/documents",
+    "POST /v1/attachments",
+    "GET /v1/documents/{documentId}",
+    "PATCH /v1/documents/{documentId}",
+    "GET /v1/documents/{documentId}",  # the negative check: refused locally after this read
+    "GET /v1/documents/{documentId}",
+    "PATCH /v1/documents/{documentId}",
+    "PATCH /v1/documents/{documentId}",  # clear_fields attachments: no read first
+    "GET /v1/documents/{documentId}/pdf",
+    "GET /v1/documents/{documentId}/versions",
+    "GET /v1/documents/{documentId}/versions/{versionId}",
+    "POST /v1/documents/{documentId}/versions/{versionId}/restore",
+    "GET /v1/documents/{documentId}/versions",
+    "GET /v1/documents/{documentId}",
+    "POST /v1/documents/{documentId}/related-items",
+    "GET /v1/documents/{documentId}/related-items",  # the full list add_document_related_items reads after its POST
+    "GET /v1/documents/{documentId}/related-items",
+    "DELETE /v1/documents/{documentId}/related-items/{relatedItemId}",
+    "GET /v1/documents/{documentId}/related-items",
+    "PATCH /v1/documents/{documentId}",
+    "GET /v1/documents/{documentId}",
+    "PATCH /v1/documents/{documentId}",
+    "GET /v1/documents/{documentId}",
+    "PATCH /v1/documents/{documentId}",
+    "PATCH /v1/documents/{documentId}",
+    "GET /v1/documents/{documentId}",
+    "PATCH /v1/documents/{documentId}",
+    "PATCH /v1/documents/{documentId}",
+    "PATCH /v1/documents/{documentId}",
+    "GET /v1/documents",
+    "GET /v1/documents",
 ]
 # The custom_properties area (--with-custom-properties) in the happy path: update_client reads the client before every write of a
 # custom field, sends the PATCH and reads the client again (a GET, the PATCH, a GET), and checks the fields on that second read;
@@ -1241,10 +1578,12 @@ async def test_a_full_run_passes_and_leaves_nothing_behind(run, lines):
     report = await run(fake, with_items=True, with_invoices=True)
     assert report.ok and report.exit_code == 0, "\n".join(lines)
     assert [r.area for r in report.results] == [a.key for a in write_matrix.AREAS]
-    assert [r.area for r in report.results][6:11] == ["items", "custom_assets", "custom_properties", "invoices", "approved_invoice"]
-    # every area passes but the custom assets (--with-custom-assets), the custom properties (--with-custom-properties) and the
-    # approved invoice, which only its own flag (and then it runs alone) opens
-    assert all(r.status == "pass" for r in report.results if r.area not in ("approved_invoice", "custom_assets", "custom_properties")), [
+    assert [r.area for r in report.results][6:12] == ["items", "custom_assets", "custom_properties", "documents", "invoices", "approved_invoice"]
+    # every area passes but the custom assets (--with-custom-assets), the custom properties (--with-custom-properties), the documents
+    # (--with-documents) and the approved invoice, which only its own flag (and then it runs alone) opens
+    assert all(
+        r.status == "pass" for r in report.results if r.area not in ("approved_invoice", "custom_assets", "custom_properties", "documents")
+    ), [
         (r.area, r.status, r.detail) for r in report.results
     ]
     assert results(report)["approved_invoice"].status == "skipped" and results(report)["approved_invoice"].requests == 0
@@ -1260,7 +1599,9 @@ async def test_the_requests_of_every_area_are_exactly_the_documented_ones(run):
     fake = FakeGorelo()
     report = await run(fake, with_items=True, with_invoices=True)
     assert report.ok
-    assert area_ops(fake, report) == {**GOLDEN, "approved_invoice": [], "custom_assets": [], "custom_properties": []}  # skipped: not a request
+    assert area_ops(fake, report) == {
+        **GOLDEN, "approved_invoice": [], "custom_assets": [], "custom_properties": [], "documents": [],
+    }  # skipped: not a request
 
 
 async def test_the_module_docstring_lists_exactly_these_requests():
@@ -1282,8 +1623,9 @@ async def test_the_module_docstring_lists_exactly_these_requests():
         **GOLDEN,
         "projects": GOLDEN_PROJECTS_ALONE,
         "approved_invoice": GOLDEN_APPROVED,
-        "custom_assets": GOLDEN_CUSTOM_ASSETS,
+        "custom_assets": [*GOLDEN_CUSTOM_ASSETS, *GOLDEN_ASSET_MOVE],
         "custom_properties": GOLDEN_CUSTOM_PROPERTIES,
+        "documents": GOLDEN_DOCUMENTS,
     }
 
 
@@ -1395,15 +1737,18 @@ async def test_nothing_outside_test_client_second_the_operator_and_the_run_is_ev
             assert request.path not in (f"/v1/clients/{TEST_CLIENT}", f"/v1/clients/{SECOND}", f"/v1/contacts/{OPERATOR_CONTACT}")
     # the test client itself is neither read nor changed: not even a GET of the client, and no PATCH of it
     assert not any(r.path == f"/v1/clients/{TEST_CLIENT}" for r in fake.mock.requests)
-    assert fake.clients[TEST_CLIENT] == {"Id": TEST_CLIENT, "Name": "the test client", "AlternateName": "the test client alt", "BillingName": "the test client"}
+    assert fake.clients[TEST_CLIENT] == {
+        "Id": TEST_CLIENT, "Name": "the test client", "AlternateName": "the test client alt", "BillingName": "the test client",
+        "Status": {"Id": 1, "Name": "Active"},
+    }
     assert not any(r.path == "/v1/tickets/tags" for r in fake.mock.requests)  # no tenant tag is looked up or applied
     deleted_tickets = {t for kind, t in fake.deleted if kind == "ticket"}
     assert deleted_tickets == {t["Id"] for t in fake.tickets.values() if t["Title"].startswith(RUN)}
 
 
-def test_the_matrix_sends_everything_through_tools_there_is_no_raw_client_and_no_unassign_probe():
+def test_the_matrix_sends_everything_through_tools_and_has_no_raw_client():
     assert "raw" not in inspect.signature(write_matrix.Matrix).parameters
-    assert not hasattr(write_matrix.Matrix, "probe_unassign") and not hasattr(write_matrix, "httpx")
+    assert not hasattr(write_matrix, "httpx")
     assert "AsyncClient" not in inspect.getsource(write_matrix)
 
 
@@ -1479,8 +1824,8 @@ async def test_a_failing_area_fails_alone_the_rest_runs_and_the_cleanup_still_ha
     found = results(report)
     assert found["tickets"].status == "FAIL" and "update_ticket" in found["tickets"].detail
     others = [r for r in report.results if r.area != "tickets"]
-    assert [r.status for r in others] == ["pass"] * 6 + ["skipped", "skipped", "pass", "skipped"] + ["pass"] * 2  # custom assets, custom properties, approved invoice off
-    assert [r.area for r in others if r.status == "skipped"] == ["custom_assets", "custom_properties", "approved_invoice"]
+    assert [r.status for r in others] == ["pass"] * 6 + ["skipped", "skipped", "skipped", "pass", "skipped"] + ["pass"] * 2  # custom assets, custom properties, documents, approved invoice off
+    assert [r.area for r in others if r.status == "skipped"] == ["custom_assets", "custom_properties", "documents", "approved_invoice"]
     assert not report.ok and report.exit_code == 1
     assert fake.leftovers() == [] and report.cleanup.ok  # everything it had created is gone
     assert lines[-1] == "result: FAILED"
@@ -1592,7 +1937,7 @@ async def test_skip_email_leaves_the_email_area_out_and_never_touches_second(run
     fake = FakeGorelo()
     report = await run(fake, skip_email=True)
     assert report.ok and "email" not in results(report)
-    assert len(report.results) == 12  # items, custom_assets, custom_properties, invoices and approved_invoice are skipped by default, and email is left out
+    assert len(report.results) == 13  # items, custom_assets, custom_properties, documents, invoices and approved_invoice are skipped by default, and email is left out
     for request in fake.mock.requests:
         body = request.json or {}
         assert body.get("ClientId") != SECOND and body.get("ContactId") != OPERATOR_CONTACT
@@ -1632,13 +1977,16 @@ def test_unknown_areas_and_empty_selections_are_usage_errors():
     assert [a.key for a in write_matrix.select_areas(["uptime", "approved_invoice", "invoices"], False)] == [
         "invoices", "approved_invoice", "uptime",
     ]  # and the approved invoice right after the invoices
+    assert [a.key for a in write_matrix.select_areas(["invoices", "Documents", "custom_properties"], False)] == [
+        "custom_properties", "documents", "invoices",
+    ]  # and the documents right after the custom properties
     assert [a.key for a in write_matrix.AREAS] == [
         "clients", "contacts", "tickets", "comments", "email", "time", "items", "custom_assets", "custom_properties",
-        "invoices", "approved_invoice", "uptime", "projects",
+        "documents", "invoices", "approved_invoice", "uptime", "projects",
     ]
     areas = (
-        "clients, contacts, tickets, comments, email, time, items, custom_assets, custom_properties, invoices, approved_invoice, "
-        "uptime, projects"
+        "clients, contacts, tickets, comments, email, time, items, custom_assets, custom_properties, documents, invoices, "
+        "approved_invoice, uptime, projects"
     )
     with pytest.raises(write_matrix.UsageError, match=f"the areas are {areas}"):
         write_matrix.select_areas(["bogus"], False)
@@ -1700,7 +2048,6 @@ async def test_the_summary_names_every_area_the_notes_the_counts_and_the_scopes(
     ) in lines
     assert "scopes missing: Forms, Project" in text
     assert "watchers: the operator user 9700 set, then cleared with clear_fields (no tenant tag is touched)" in text
-    assert "unassign probe" not in text
     assert re.search(r"^requests: \d+ sent by the matrix, 0 refused by the guard$", text, re.MULTILINE)
     assert "result: nothing left over" not in lines  # an uploaded file stays in Gorelo: never claimed to be gone
     assert lines[-1] == "result: PASSED"
@@ -1710,7 +2057,9 @@ async def test_a_leftover_fails_the_run_even_when_every_area_passed(run, lines):
     fake = FakeGorelo()
     fake.fail("DELETE /v1/contacts/{contactId}", error_envelope(409, [("070901", "The contact has open tickets.")]))
     report = await run(fake, with_items=True, with_invoices=True)
-    assert all(r.status == "pass" for r in report.results if r.area not in ("approved_invoice", "custom_assets", "custom_properties"))
+    assert all(
+        r.status == "pass" for r in report.results if r.area not in ("approved_invoice", "custom_assets", "custom_properties", "documents")
+    )
     assert not report.ok and report.exit_code == 1 and report.summary["leftovers"] == 1
     assert any("LEFTOVER   contact" in line for line in lines) and lines[-1] == "result: FAILED"
     assert not any(line.startswith("an Approved invoice is left over") for line in lines)  # only for an Approved invoice
@@ -1738,7 +2087,10 @@ async def test_clients_only_the_temporary_client_is_created_with_the_region_and_
     assert len(patches) == 1 and set(patches[0]) == {"AlternateName"} and patches[0]["AlternateName"].startswith(RUN)
     # the id is in the path only: UpdateClientCommand has no Id (contract e15cb5a18ec2)
     assert [r.path for r in fake.mock.requests if r.method == "PATCH"] == ["/v1/clients/8200"]
-    assert fake.clients[TEST_CLIENT] == {"Id": TEST_CLIENT, "Name": "the test client", "AlternateName": "the test client alt", "BillingName": "the test client"}
+    assert fake.clients[TEST_CLIENT] == {
+        "Id": TEST_CLIENT, "Name": "the test client", "AlternateName": "the test client alt", "BillingName": "the test client",
+        "Status": {"Id": 1, "Name": "Active"},
+    }
     assert not any(r.path == f"/v1/clients/{TEST_CLIENT}" for r in fake.mock.requests)
     post = next(r.json for r in fake.mock.requests if r.method == "POST")
     assert post["Name"] == f"{RUN} temporary client"
@@ -1849,7 +2201,7 @@ async def test_tickets_the_watcher_is_set_then_cleared_with_clear_fields_and_onl
     assert any("lead assignee: the operator user 9700 set in a later update, after the watcher was cleared" in n for n in notes)
 
 
-async def test_tickets_the_fake_refuses_a_technician_who_is_lead_and_watcher_like_production_does(run):
+async def test_tickets_the_fake_refuses_a_technician_who_is_lead_and_watcher_like_gorelo_does(run):
     # the fake models the live rule, so the passing runs above prove the matrix keeps the two roles apart
     fake = FakeGorelo()
     ticket = fake.add_ticket({"Title": "t", "ClientId": TEST_CLIENT, "StatusId": 1, "TypeId": 7101, "GroupId": 7201})
@@ -1885,7 +2237,7 @@ async def test_tickets_a_technician_conflict_from_gorelo_fails_the_area_after_th
     assert fake.leftovers() == []  # the cleanup still ran
 
 
-async def test_tickets_no_tenant_tag_and_no_unassign_probe_are_ever_sent(run):
+async def test_tickets_send_no_tenant_tag_and_name_only_the_operator_as_lead(run):
     fake = FakeGorelo()
     report = await run(fake, areas=["tickets"])
     assert report.ok
@@ -1893,8 +2245,6 @@ async def test_tickets_no_tenant_tag_and_no_unassign_probe_are_ever_sent(run):
     assert all("TagIds" not in (r.json or {}) for r in fake.mock.requests)
     assert all((r.json or {}).get("LeadAssigneeId") in (None, OPERATOR_USER) for r in fake.mock.requests)
     assert not fake.mock.unmatched
-    notes = " | ".join(results(report)["tickets"].notes)
-    assert "unassign probe" not in notes and "tags:" not in notes
 
 
 async def test_tickets_a_watcher_that_did_not_stick_is_caught_before_the_clear(run):
@@ -2363,7 +2713,7 @@ async def test_time_the_entry_is_created_for_the_operator_without_a_service_line
 
 
 async def test_time_the_published_shape_passes_with_no_note_about_drift(run):
-    # production answers the published TimeEntryModel since 2026-10-03, and the fake serves it by default: the
+    # Gorelo answers the published TimeEntryModel, and the fake serves it by default: the
     # user is {Id, Name}, the ticket {Id, Number, Title} (the run ticket), the task null for a ticket entry, and there
     # is no flat UserId, TicketId or TaskId
     fake = FakeGorelo()
@@ -2504,7 +2854,7 @@ async def test_items_are_skipped_by_default_with_the_reason_and_nothing_is_sent_
     assert "result: PASSED" in lines[-1]
 
 
-async def test_a_default_full_run_skips_only_the_items_custom_assets_custom_properties_invoices_and_approved_invoice_areas_and_never_touches_them(run):
+async def test_a_default_full_run_skips_only_the_items_custom_assets_custom_properties_documents_invoices_and_approved_invoice_areas_and_never_touches_them(run):
     fake = FakeGorelo()
     report = await run(fake)
     found = results(report)
@@ -2515,17 +2865,19 @@ async def test_a_default_full_run_skips_only_the_items_custom_assets_custom_prop
     assert found["custom_assets"].status == "skipped" and found["custom_assets"].detail == write_matrix.CUSTOM_ASSETS_SKIP_REASON
     assert found["custom_properties"].status == "skipped" and found["custom_properties"].requests == 0
     assert found["custom_properties"].detail == write_matrix.CUSTOM_PROPERTIES_SKIP_REASON
+    assert found["documents"].status == "skipped" and found["documents"].requests == 0
+    assert found["documents"].detail == write_matrix.DOCUMENTS_SKIP_REASON
     assert all(
         result.status == "pass"
         for area, result in found.items()
-        if area not in ("items", "custom_assets", "custom_properties", "invoices", "approved_invoice")
+        if area not in ("items", "custom_assets", "custom_properties", "documents", "invoices", "approved_invoice")
     )
     assert not any("/assets/custom" in r.path for r in fake.mock.requests)
     assert report.ok and fake.items == {} and fake.invoices == {}
     assert not any("/items" in r.path or "/invoices" in r.path for r in fake.mock.requests)
     assert not any(r.method == "GET" and r.path == "/v1/contacts" for r in fake.mock.requests)  # not the precondition read
     assert area_ops(fake, report) == {
-        **GOLDEN, "items": [], "custom_assets": [], "custom_properties": [], "invoices": [], "approved_invoice": []
+        **GOLDEN, "items": [], "custom_assets": [], "custom_properties": [], "documents": [], "invoices": [], "approved_invoice": []
     }
     assert not any(r.method == "PATCH" and r.path == f"/v1/clients/{TEST_CLIENT}" for r in fake.mock.requests)  # never written
     assert report.summary["created"] == 19  # the 21 records of a run with both flags, less the product and the invoice
@@ -3268,6 +3620,14 @@ def void_command(report) -> str:
     return f"python -m scripts.live.cleanup {report.manifest_path} --void-approved ({GORELO_ONLY})"
 
 
+@pytest.fixture(autouse=True)
+def _the_gate_of_the_approved_invoice_is_open(monkeypatch):
+    """The gate of the approved_invoice area is CLOSED in the code (UNEMAILABLE_CONTACT_STATUS_IDS is empty: no published contact
+    status says that a contact cannot be emailed), so the tests of the area itself open it the way the operator's decision would:
+    it names Archived (4). The tests of the closed gate set it back to () themselves."""
+    monkeypatch.setattr(write_matrix, "UNEMAILABLE_CONTACT_STATUS_IDS", (4,))
+
+
 @pytest.fixture
 def approved(run):
     """run_matrix for the approved invoice area alone (--with-approved-invoice --only approved_invoice), without waiting."""
@@ -3324,7 +3684,10 @@ async def test_approved_invoice_the_happy_path_creates_waits_voids_and_leaves_on
     assert [(r.kind, r.id, r.outcome) for r in report.cleanup.undeletable] == [("invoice", invoice["Id"], VOIDED_OUTCOME)]
     assert report.cleanup.cleaned == [] and report.cleanup.leftovers == [] and report.cleanup.ok and report.refused == 0
     notes = found.notes
-    assert "nobody could be emailed: all 4 contacts of client 9501 are Inactive and none of its 1 locations names a billing contact" in notes
+    assert (
+        "nobody could be emailed: all 4 contacts of client 9501 are in a state that cannot be emailed (status ids 4) and none of its "
+        "1 locations names a billing contact"
+    ) in notes
     assert (
         "approved invoice number consumed: Number 1042, DisplayNumber 'INV-1042' (an Approved invoice cannot be removed, "
         "only voided, and it stays listed as Void)"
@@ -3444,13 +3807,13 @@ async def test_approved_invoice_is_announced_first_and_recorded_with_the_status_
 
 
 async def test_approved_invoice_an_active_contact_skips_the_area_after_one_read_and_nothing_is_written(approved):
-    fake = FakeGorelo(test_client_contacts=[*inactive_test_client_contacts(), make_test_client_contact(9, {"Id": 1, "Name": "Active"})])
+    fake = FakeGorelo(test_client_contacts=[*archived_test_client_contacts(), make_test_client_contact(9, {"Id": 1, "Name": "Active"})])
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     assert found.status == "skipped" and found.requests == 1
     assert found.detail == (
-        "precondition not met: 1 of the 5 contacts of client 9501 are not Inactive (ids 9109), so an Approved invoice "
-        "might be emailed to one of them; nothing was sent"
+        "precondition not met: 1 of the 5 contacts of client 9501 are not in a state that cannot be emailed (status ids 4; contacts 9109), "
+        "so an Approved invoice might be emailed to one of them; nothing was sent"
     )
     assert [(r.method, r.path) for r in fake.mock.requests] == [("GET", "/v1/contacts")]
     assert fake.invoices == {} and report.ok and report.summary["created"] == 0 and report.summary["unresolved_intents"] == 0
@@ -3460,48 +3823,59 @@ async def test_approved_invoice_an_active_contact_skips_the_area_after_one_read_
     "status",
     [
         {"Id": 1, "Name": "Active"},
-        {"Id": 2},  # the status is matched by its name: the spec publishes no scale for contacts
-        {"Name": ""},
+        {"Id": 3, "Name": "Temporary"},
+        {"Name": "Archived"},  # the status is matched by its id, never by its name
+        {"Id": "4", "Name": "Archived"},
+        {"Id": True},
         {"Name": 5},
         None,
-        "Inactive",
+        "Archived",
         DROP,
     ],
 )
-async def test_approved_invoice_a_contact_that_is_not_provably_inactive_stops_the_area(approved, status):
-    fake = FakeGorelo(test_client_contacts=[*inactive_test_client_contacts(2), make_test_client_contact(9, status)])
+async def test_approved_invoice_a_contact_that_is_not_provably_unemailable_stops_the_area(approved, status):
+    fake = FakeGorelo(test_client_contacts=[*archived_test_client_contacts(2), make_test_client_contact(9, status)])
     report = await approved(fake)
     found = results(report)["approved_invoice"]
-    assert found.status == "skipped" and found.requests == 1 and "1 of the 3 contacts of client 9501 are not Inactive (ids 9109)" in found.detail
+    assert found.status == "skipped" and found.requests == 1 and "1 of the 3 contacts of client 9501 are not in a state that cannot be emailed" in found.detail
+    assert "contacts 9109)" in found.detail
     assert fake.invoices == {} and all(r.method == "GET" for r in fake.mock.requests)
 
 
 async def test_approved_invoice_a_row_that_is_not_a_contact_stops_the_area_too(approved):
-    fake = FakeGorelo(test_client_contacts=[*inactive_test_client_contacts(2), "not a row", {"FirstName": "no id", "ClientId": TEST_CLIENT}])
+    fake = FakeGorelo(test_client_contacts=[*archived_test_client_contacts(2), "not a row", {"FirstName": "no id", "ClientId": TEST_CLIENT}])
     report = await approved(fake)
     found = results(report)["approved_invoice"]
-    assert found.status == "skipped" and "2 of the 4 contacts of client 9501 are not Inactive (ids ?, ?)" in found.detail
+    assert found.status == "skipped" and "2 of the 4 contacts of client 9501 are not in a state that cannot be emailed" in found.detail
+    assert "contacts ?, ?)" in found.detail
 
 
-async def test_approved_invoice_the_inactive_status_is_read_ignoring_case_and_no_contact_at_all_is_fine(approved):
-    fake = FakeGorelo(test_client_contacts=[make_test_client_contact(1, {"Id": 2, "Name": "INACTIVE"}), make_test_client_contact(2, {"Id": 2, "Name": " inactive "})])
+async def test_approved_invoice_the_status_is_read_by_its_id_and_no_contact_at_all_proves_nothing(approved):
+    fake = FakeGorelo(test_client_contacts=[make_test_client_contact(1, {"Id": 4, "Name": "Archived"}), make_test_client_contact(2, {"Id": 4, "Name": "anything"})])
     assert results(await approved(fake))["approved_invoice"].status == "pass"
-    nobody = FakeGorelo(test_client_contacts=[])
+    nobody = FakeGorelo(test_client_contacts=[])  # an empty list proves nothing: contacts in a status that no StatusIds value lists are not returned
     report = await approved(nobody, started=datetime(2099, 10, 2, 10, 16, 0, tzinfo=timezone.utc))
-    assert results(report)["approved_invoice"].status == "pass"
+    found = results(report)["approved_invoice"]
+    assert found.status == "skipped" and found.requests == 1 and nobody.invoices == {}
+    assert found.detail == (
+        "precondition not met: list_contacts lists no contact of client 9501, which proves nothing: contacts in a status that no "
+        "StatusIds value lists are not returned, so it cannot be said that nobody could be "
+        "emailed; nothing was sent"
+    )
 
 
 async def test_approved_invoice_only_the_contacts_of_test_client_are_asked_for(approved):
     # a contact of another client is no business of the check (and the run's own contacts are listed too, if any exist)
     other = make_test_client_contact(1, {"Id": 1, "Name": "Active"}, ClientId=SECOND)
-    fake = FakeGorelo(test_client_contacts=[*inactive_test_client_contacts(2), other])
+    fake = FakeGorelo(test_client_contacts=[*archived_test_client_contacts(2), other])
     report = await approved(fake)
     assert results(report)["approved_invoice"].status == "pass"
     assert fake.mock.requests[0].query["ClientIds"] == "9501"
+    assert fake.mock.requests[0].query["StatusIds"] == "1,3,4"  # every status of the scale, so an archived contact is listed too
 
 
 async def test_approved_invoice_a_second_page_of_contacts_is_read_and_an_active_contact_on_it_stops_the_area(approved):
-    rows = [make_test_client_contact(n, {"Id": 2, "Name": "Inactive"}, Id=200000 + n) for n in range(250)]
+    rows = [make_test_client_contact(n, {"Id": 4, "Name": "Archived"}, Id=200000 + n) for n in range(250)]
     fake = FakeGorelo(test_client_contacts=rows)
     report = await approved(fake)
     assert results(report)["approved_invoice"].status == "pass"
@@ -3512,17 +3886,17 @@ async def test_approved_invoice_a_second_page_of_contacts_is_read_and_an_active_
     other = FakeGorelo(test_client_contacts=rows)
     skipped = await approved(other, started=datetime(2099, 10, 2, 10, 16, 0, tzinfo=timezone.utc))
     found = results(skipped)["approved_invoice"]
-    assert found.status == "skipped" and found.requests == 2 and "(ids 200240)" in found.detail and other.invoices == {}
+    assert found.status == "skipped" and found.requests == 2 and "contacts 200240)" in found.detail and other.invoices == {}
 
 
 async def test_approved_invoice_too_many_contacts_to_check_is_a_skip(approved, monkeypatch):
     monkeypatch.setattr(write_matrix, "CONTACT_PAGES", 1)
-    fake = FakeGorelo(test_client_contacts=[make_test_client_contact(n, {"Id": 2, "Name": "Inactive"}, Id=200000 + n) for n in range(250)])
+    fake = FakeGorelo(test_client_contacts=[make_test_client_contact(n, {"Id": 4, "Name": "Archived"}, Id=200000 + n) for n in range(250)])
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     assert found.status == "skipped" and found.requests == 1
     assert found.detail == (
-        "precondition not met: client 9501 has more than 200 contacts, too many to check that every one is Inactive; "
+        "precondition not met: client 9501 has more than 200 contacts, too many to check that every one cannot be emailed; "
         "nothing was sent"
     )
 
@@ -3538,7 +3912,7 @@ async def test_approved_invoice_a_contact_list_that_cannot_be_read_fails_the_are
 
 @pytest.mark.parametrize(
     "billing",
-    # ids in any form (the spec's comma separated text, production's JSON list text, a real list, a number), text that is not
+    # ids in any form (the spec's comma separated text, Gorelo's JSON list text, a real list, a number), text that is not
     # an empty list however it is written, and no key at all: none of these proves that nobody is named
     [
         "9600", "1,2", " 5 ", ["5"], 5, True, "[9600]", "[1, 2]", " [ 5 ] ", "[[]]", "[]x", "{}", "null",
@@ -3565,7 +3939,7 @@ async def test_approved_invoice_a_location_with_billing_contacts_stops_the_area_
 
 @pytest.mark.parametrize("billing", ["", "  ", None, [], "[]", " [ ] ", "[]\n", "[\t]"])
 async def test_approved_invoice_an_empty_or_null_billing_contact_list_is_fine(approved, billing):
-    # "[]" is what production answers for a location that names nobody; the other spellings are the published
+    # "[]" is what Gorelo answers for a location that names nobody; the other spellings are the published
     # text (blank), null, a real empty list, and the same JSON list written with spaces
     fake = FakeGorelo()
     fake.locations[TEST_CLIENT][0]["BillingContactIds"] = billing
@@ -4935,7 +5309,7 @@ def test_the_summary_ends_with_one_reminder_per_voided_invoice_just_before_the_r
 
 
 def test_voided_invoices_names_the_invoices_the_manifest_records_as_void(tmp_path):
-    manifest = Manifest.start(RUN_START, directory=tmp_path)
+    manifest = Manifest.start(RUN_START, directory=tmp_path, api_host="api.usw.gorelo.io")
 
     def invoice(n: int, **details) -> None:
         manifest.created("invoice", invoice_guid(n), manifest.label(f"invoice {n}"), details)
@@ -4950,7 +5324,8 @@ def test_voided_invoices_names_the_invoices_the_manifest_records_as_void(tmp_pat
     invoice(8, number=1048, display_number="INV-1048")  # no status recorded
     manifest.created("contact", 9101, manifest.label("contact"), {"client_id": TEST_CLIENT, "status_id": 4})  # not an invoice
     assert write_matrix.voided_invoices(manifest) == ["INV-1042", "1043", invoice_guid(3)]
-    assert write_matrix.voided_invoices(Manifest.start(datetime(2099, 10, 2, 10, 16, 0, tzinfo=timezone.utc), directory=tmp_path)) == []
+    later = Manifest.start(datetime(2099, 10, 2, 10, 16, 0, tzinfo=timezone.utc), directory=tmp_path, api_host="api.usw.gorelo.io")
+    assert write_matrix.voided_invoices(later) == []
 
 
 # the run around it: the tools, the guard, the cleanup
@@ -5159,11 +5534,11 @@ def test_the_fake_lists_the_contacts_of_a_client_like_the_api_does():
     fake = FakeGorelo()
     code, listed = send(fake, "GET", "/v1/contacts?ClientIds=9501&PageSize=200")
     rows = listed["Data"]
-    assert code == 200 and len(rows) == 4 and all(row["ClientId"] == TEST_CLIENT and row["Status"]["Name"] == "Inactive" for row in rows)
+    assert code == 200 and len(rows) == 4 and all(row["ClientId"] == TEST_CLIENT and row["Status"] == {"Id": 4, "Name": "Archived"} for row in rows)
     assert all(row["PrimaryEmail"].endswith("@example.invalid") for row in rows)
     assert send(fake, "GET", "/v1/contacts?ClientIds=9502")[1]["Data"][0]["Id"] == OPERATOR_CONTACT
     assert len(send(fake, "GET", "/v1/contacts")[1]["Data"]) == 5  # every client
-    # every location answers BillingContactIds as production does when it names nobody: the text of an empty JSON list
+    # every location answers BillingContactIds as Gorelo does when it names nobody: the text of an empty JSON list
     assert fake.locations[TEST_CLIENT][0]["BillingContactIds"] == "[]" and fake.locations[SECOND][0]["BillingContactIds"] == "[]"
     assert fake.leftovers() == []  # the contacts that existed before the run are nobody's leftover
 
@@ -5190,12 +5565,19 @@ def test_email_problem_is_none_only_for_an_invoice_that_says_it_was_not_emailed(
         assert problem(record).startswith("WARNING: whether the invoice was emailed cannot be read")
 
 
-def test_the_precondition_helpers_read_only_what_they_can_prove():
-    inactive, free = write_matrix.inactive_contact, write_matrix.no_billing_contacts
-    assert inactive({"Status": {"Id": 2, "Name": "Inactive"}}) and inactive({"Status": {"Name": " INACTIVE "}})
-    for row in ({"Status": {"Id": 1, "Name": "Active"}}, {"Status": {"Id": 2}}, {"Status": None}, {}, "x", None, {"Status": "Inactive"}):
-        assert not inactive(row)
-    for ids in ("", "  ", None, [], "[]", " [ ] ", "[]\n"):  # "[]" is what production answers
+def test_the_precondition_helpers_read_only_what_they_can_prove(monkeypatch):
+    unemailable, free = write_matrix.unemailable_contact, write_matrix.no_billing_contacts
+    assert unemailable({"Status": {"Id": 4, "Name": "whatever"}}) and unemailable({"Status": {"Id": 4}})
+    # the status is matched by its id, never by its name, and a bool is no id
+    for row in (
+        {"Status": {"Id": 1, "Name": "Active"}}, {"Status": {"Id": 3}}, {"Status": {"Id": "4"}}, {"Status": {"Id": True}},
+        {"Status": {"Name": "Archived"}}, {"Status": None}, {}, "x", None, {"Status": "Archived"},
+    ):
+        assert not unemailable(row)
+    monkeypatch.setattr(write_matrix, "UNEMAILABLE_CONTACT_STATUS_IDS", ())  # the shipped gate: nothing is proven, whatever the row
+    assert not unemailable({"Status": {"Id": 4, "Name": "Archived"}})
+    monkeypatch.setattr(write_matrix, "UNEMAILABLE_CONTACT_STATUS_IDS", (4,))
+    for ids in ("", "  ", None, [], "[]", " [ ] ", "[]\n"):  # "[]" is what Gorelo answers
         assert free({"Id": 1, "BillingContactIds": ids})
     for row in ({"Id": 1}, {"BillingContactIds": "1"}, {"BillingContactIds": ["1"]}, {"BillingContactIds": 1}, {"BillingContactIds": 0}, "x", None):
         assert not free(row)
@@ -5546,7 +5928,7 @@ async def test_projects_the_type_is_the_first_row_with_a_guid_id(run):
     assert next(r.json for r in fake.mock.requests if r.method == "POST" and r.path == "/v1/projects")["TypeId"] == project_type_guid(7)
 
 
-async def test_projects_the_fake_refuses_a_project_without_a_type_or_a_group_like_production_does(run):
+async def test_projects_the_fake_refuses_a_project_without_a_type_or_a_group_like_gorelo_does(run):
     fake = FakeGorelo()
     base = {"Title": "t", "ClientId": TEST_CLIENT, "LocationId": 9001}
 
@@ -5687,9 +6069,11 @@ def test_the_command_line_passes_its_flags_and_turns_the_report_into_an_exit_sta
     assert write_matrix.main(["--with-approved-invoice", "--only", "approved_invoice"]) == 1
     assert write_matrix.main(["--with-custom-assets", "--only", "custom_assets"]) == 1
     assert write_matrix.main(["--with-custom-properties", "--only", "custom_properties"]) == 1
+    assert write_matrix.main(["--with-documents", "--only", "documents"]) == 1
+    assert write_matrix.main(["--with-custom-assets", "--with-asset-move", "--only", "custom_assets"]) == 1
     flags = {
         "with_items": False, "with_invoices": False, "with_approved_invoice": False, "with_custom_assets": False,
-        "with_custom_properties": False,
+        "with_custom_properties": False, "with_documents": False, "with_asset_move": False,
     }
     assert calls == [
         {"areas": ["items", " uptime"], "skip_email": True, "leftovers": True, **flags},
@@ -5700,6 +6084,11 @@ def test_the_command_line_passes_its_flags_and_turns_the_report_into_an_exit_sta
         {"areas": ["approved_invoice"], "skip_email": False, "leftovers": False, **{**flags, "with_approved_invoice": True}},
         {"areas": ["custom_assets"], "skip_email": False, "leftovers": False, **{**flags, "with_custom_assets": True}},
         {"areas": ["custom_properties"], "skip_email": False, "leftovers": False, **{**flags, "with_custom_properties": True}},
+        {"areas": ["documents"], "skip_email": False, "leftovers": False, **{**flags, "with_documents": True}},
+        {
+            "areas": ["custom_assets"], "skip_email": False, "leftovers": False,
+            **{**flags, "with_custom_assets": True, "with_asset_move": True},
+        },
     ]
 
     async def passed(**options):
@@ -5725,6 +6114,7 @@ def test_main_runs_the_matrix_end_to_end_and_its_exit_status_follows_the_result(
     monkeypatch.setattr(write_matrix, "run_matrix", partial(FakeGorelo(), RUN_START))
     assert write_matrix.main(["--only", "items,uptime", "--with-items"]) == 0
     out = capsys.readouterr().out
+    assert out.splitlines()[0] == "api host: api.usw.gorelo.io"  # the first line of the run names the host it calls
     assert f"write matrix {RUN}: manifest " in out and "areas: items, uptime" in out
     assert "area items: pass, 5 requests" in out and out.rstrip().endswith("result: PASSED")
 
@@ -5752,9 +6142,12 @@ def test_the_help_names_the_flags_and_the_areas(capsys):
                  "product on the test client", "--with-invoices", "uses up one invoice number", "also under --only invoices",
                  "--with-approved-invoice", "ALONE (needs --only approved_invoice and no other flag)", "approves a $1 invoice on the test client, "
                  "which pushes it to the connected accounting system, then voids it", "also under --only approved_invoice",
-                 "clients, contacts, tickets, comments, email, time, items, custom_assets, custom_properties, invoices, "
+                 "clients, contacts, tickets, comments, email, time, items, custom_assets, custom_properties, documents, invoices, "
                  "approved_invoice, uptime, projects",
-                 "--with-custom-assets", "CANNOT be deleted through the API", "also under --only custom_assets",
+                 "--with-custom-assets", "this harness never deletes a custom asset (the spec's soft DELETE is not used)", "also under --only custom_assets",
+                 "--with-asset-move", "MOVE the custom asset of the custom_assets area to the second client and back",
+                 "only together with the custom assets flag", "--with-documents", "creates two documents on the test client",
+                 "sharing is never turned on", "also under --only documents",
                  "--with-custom-properties", "the test client ITSELF", "the one write the live guard allows on that client",
                  "also under --only custom_properties",
                  "'forms' is another name for 'projects': the Forms scope is only probed there, and the area WRITES a project, a section, "
@@ -5823,7 +6216,7 @@ async def test_the_run_is_paced_and_cleaned_up_at_the_same_pace(run, monkeypatch
     assert sig["with_items"] is False  # the catalog is never touched unless asked for
     assert sig["with_invoices"] is False  # and no invoice is ever created unless asked for
     assert sig["with_approved_invoice"] is False  # and no invoice is ever approved unless asked for, in a run of its own
-    assert sig["with_custom_assets"] is False  # and no custom asset (which cannot be deleted) is ever created unless asked for
+    assert sig["with_custom_assets"] is False  # and no custom asset (which this harness never deletes) is ever created unless asked for
     assert sig["with_custom_properties"] is False  # and the test client itself is never written unless asked for
     assert sig["sync_interval"] == write_matrix.SYNC_INTERVAL == 5.0 and sig["sync_polls"] == write_matrix.SYNC_POLLS == 24
     assert write_matrix.SYNC_INTERVAL * write_matrix.SYNC_POLLS == 120.0  # polled every 5 s for at most 120 s
@@ -5839,3 +6232,482 @@ def test_without_a_site_config_the_write_matrix_refuses_to_start_and_creates_not
 def test_the_site_values_of_the_write_matrix_come_from_the_config():
     assert (write_matrix.SITE.test_client, write_matrix.SITE.second_client) == (9501, 9502)
     assert (write_matrix.SITE.operator_contact, write_matrix.SITE.operator_email) == (9600, "ops@example.com")
+
+
+# --------------------------------------------------------------------------
+# The documents area (--with-documents, contract a7954b24844b): two documents of the test client, every tool but share_document
+# --------------------------------------------------------------------------
+
+DOCUMENT_TOOLS_NAMES = {
+    "list_documents", "get_document", "export_document_pdf", "list_document_versions", "get_document_version",
+    "list_document_related_items", "create_document", "update_document", "move_document", "archive_document", "restore_document",
+    "duplicate_document", "restore_document_version", "add_document_related_items", "unshare_document", "remove_document_related_item",
+}
+DOC_ONE = "00000099-dddd-4eee-8fff-000000000099"  # a document id the fake never made
+
+
+def the_documents(fake: FakeGorelo) -> list[dict]:
+    """The documents of the fake in the order they were made: the first document, then its copy."""
+    return list(fake.documents.values())
+
+
+def with_area(monkeypatch, area):
+    """Run `area` instead of the documents area (to try something the real area never does)."""
+    monkeypatch.setattr(write_matrix, "AREAS", tuple(write_matrix.Area(a.key, area if a.key == "documents" else a.run, a.sends_email) for a in write_matrix.AREAS))
+
+
+async def test_documents_with_the_flag_the_area_passes_archives_both_documents_and_leaves_known_residue(run, lines):
+    fake = FakeGorelo()
+    report = await run(fake, areas=["documents"], with_documents=True)
+    found = results(report)["documents"]
+    assert found.status == "pass" and report.ok and report.exit_code == 0, "\n".join(lines)
+    assert area_ops(fake, report) == {"documents": GOLDEN_DOCUMENTS, "cleanup": []}  # the cleanup sends nothing: both are archived already
+    assert found.requests == 37 and report.refused == 0 and not fake.mock.unmatched
+    first, copy = the_documents(fake)
+    assert first["Title"] == f"{RUN} document" and copy["Title"] == f"{RUN} document copy"
+    assert first["StatusId"] == copy["StatusId"] == 2 and first["ClientId"] == copy["ClientId"] == TEST_CLIENT
+    assert first["ParentDocumentId"] is None and copy["ParentDocumentId"] is None
+    assert not first["PublicLinkEnabled"] and not first["PublishToPortalEnabled"] and not copy["PublicLinkEnabled"]
+    assert first["Attachments"] == [] and first["_links"] == []  # the file was removed again and so was the link
+    assert first["_versions"][0]["Title"] == f"{RUN} document"  # the oldest version was made current again
+    assert fake.leftovers() == [] and fake.residue() == [f"document {first['Id']}", f"document {copy['Id']}"]
+    # three records: the two documents and the uploaded file; none of them is cleaned, and none is a leftover
+    assert report.summary == {"created": 3, "cleaned": 0, "leftovers": 0, "undeletable": 3, "unresolved_intents": 0}
+    manifest = Manifest.load(report.manifest_path)
+    for document in (first, copy):
+        record = manifest.record("document", document["Id"])
+        assert not record.cleaned and record.outcome == cleanup.document_residue("archived by the write matrix (archive_document)")
+        assert record.outcome.endswith(cleanup.DOCUMENT_RESIDUE_TAIL) and cleanup.is_known_undeletable(record)
+    assert manifest.record("document", copy["Id"]).details == {
+        "client_id": TEST_CLIENT, "parent_document_id": None, "duplicate_of": first["Id"],
+    }
+    (attachment,) = [r for r in manifest.all_created() if r.kind == "attachment"]
+    assert attachment.details == {"document_id": first["Id"]}
+    assert attachment.outcome == f"archived with its document; {cleanup.UNDELETABLE_REASON}"
+    assert report.documents == [first["Id"], copy["Id"]]
+    assert (
+        f"reminder: 2 document(s) of this run stay in Gorelo {cleanup.DOCUMENT_RESIDUE_TAIL}; the cleanup lines above say which are "
+        f"archived: search the Documents area of Gorelo for {RUN}"
+    ) in lines
+    assert lines[-1] == "result: PASSED"
+
+
+async def test_documents_every_create_is_announced_first_and_the_notes_say_what_gorelo_did(run):
+    fake = FakeGorelo()
+    report = await run(fake, areas=["documents"], with_documents=True)
+    intents = json.loads(Path(report.manifest_path).read_text(encoding="utf-8"))["intents"]
+    assert [(intent["kind"], intent["status"]) for intent in intents] == [("document", "created")] * 2 + [("attachment", "created")]
+    notes = results(report)["documents"].notes
+    assert any("created at the top level, not shared" in note and cleanup.DOCUMENT_RESIDUE_TAIL in note for note in notes)
+    assert any("the copy of a starred document starts with the star, the public link and the portal off" in note for note in notes)
+    assert any("refused locally after its read of the document" in note for note in notes)
+    assert any("a changed body kept the attachment" in note for note in notes)
+    assert any(note.startswith("export_document_pdf: ") and "bytes of application/pdf" in note for note in notes)
+    assert any(note.startswith("3 versions listed;") for note in notes)
+    assert any("took its client" in note for note in notes) and any("restored and reads Active again at the top level" in note for note in notes)
+
+
+async def test_documents_without_the_flag_the_area_is_skipped_with_the_reason_and_nothing_is_sent(run, lines):
+    fake = FakeGorelo()
+    report = await run(fake, areas=["documents"])
+    found = results(report)["documents"]
+    assert found.status == "skipped" and found.requests == 0 and found.detail == write_matrix.DOCUMENTS_SKIP_REASON
+    assert "cannot be deleted through the API" in write_matrix.DOCUMENTS_SKIP_REASON
+    assert fake.mock.requests == [] and fake.documents == {} and report.ok and report.summary["created"] == 0
+    assert "area documents: skipped, 0 requests (" + write_matrix.DOCUMENTS_SKIP_REASON + ")" in lines
+
+
+def test_documents_the_tools_are_named_apart_and_share_document_is_in_no_tool_set():
+    assert write_matrix.DOCUMENT_TOOLS == DOCUMENT_TOOLS_NAMES and len(write_matrix.DOCUMENT_TOOLS) == 16
+    for tools in (write_matrix.DOCUMENT_TOOLS, write_matrix.MATRIX_TOOLS, write_matrix.APPROVED_INVOICE_TOOLS, write_matrix.CUSTOM_ASSET_TOOLS):
+        assert "share_document" not in tools
+    assert not write_matrix.DOCUMENT_TOOLS & write_matrix.MATRIX_TOOLS and not write_matrix.DOCUMENT_TOOLS & write_matrix.APPROVED_INVOICE_TOOLS
+    assert not write_matrix.DOCUMENT_TOOLS & write_matrix.tools_for(True, True, False, True)  # no other flag opens them
+    assert write_matrix.tools_for(False, with_documents=True) == (
+        write_matrix.MATRIX_TOOLS - write_matrix.ITEM_TOOLS - write_matrix.INVOICE_TOOLS | write_matrix.DOCUMENT_TOOLS
+    )
+    assert write_matrix.tools_for(False, False, True, False, True) == write_matrix.APPROVED_INVOICE_TOOLS  # the approved run takes nothing else
+    assert '"share_document"' not in inspect.getsource(write_matrix.area_documents)  # no call by name
+
+
+async def test_documents_share_document_cannot_be_called_by_the_matrix_even_when_the_area_tries(run, monkeypatch):
+    seen = {}
+
+    async def area(matrix):
+        try:
+            await matrix.tool("share_document", document_id=DOC_ONE, public_link=True, confirm=True)
+        except RuntimeError as exc:
+            seen["error"] = str(exc)
+
+    with_area(monkeypatch, area)
+    fake = FakeGorelo()
+    report = await run(fake, areas=["documents"], with_documents=True)
+    assert seen == {"error": "share_document is not one of the tools this script may call"} and fake.mock.requests == []
+    assert results(report)["documents"].status == "pass"
+
+
+async def test_documents_the_guard_still_refuses_sharing_if_the_tool_allowlist_were_bypassed(run, monkeypatch):
+    fake = FakeGorelo()
+    monkeypatch.setattr(write_matrix, "tools_for", lambda *args, **kwargs: write_matrix.MATRIX_TOOLS | write_matrix.DOCUMENT_TOOLS | {"share_document"})
+    outcome = {}
+
+    async def area(matrix):
+        label = matrix.manifest.label("document")
+        made = await matrix.create("document", label, {"client_id": TEST_CLIENT}, "create_document", {"title": label, "client_id": TEST_CLIENT})
+        try:
+            await matrix.tool("share_document", document_id=made["Id"], public_link=True, confirm=True)
+        except write_matrix.GuardTripped as exc:
+            outcome["refused"] = str(exc)
+            raise
+
+    with_area(monkeypatch, area)
+    report = await run(fake, areas=["documents"], with_documents=True)
+    found = results(report)["documents"]
+    assert found.status == "FAIL" and found.detail.startswith("the guard refused a request, the run stops:")
+    assert "PublicLinkEnabled may only be false: the live harness never turns sharing on" in outcome["refused"]
+    (doc,) = fake.documents.values()
+    assert doc["PublicLinkEnabled"] is False and doc["StatusId"] == 2  # never shared, and the cleanup archived it
+    assert not any(r.method == "PATCH" and r.json and r.json.get("PublicLinkEnabled") is True for r in fake.mock.requests)
+
+
+async def test_documents_a_key_without_the_documents_scope_is_a_skip_after_one_read(run):
+    fake = FakeGorelo(documents_scope=False)
+    report = await run(fake, areas=["documents"], with_documents=True)
+    found = results(report)["documents"]
+    assert found.status == "skipped" and found.detail == "scope missing: Documents" and found.requests == 1
+    assert [(r.method, r.path) for r in fake.mock.requests] == [("GET", "/v1/documents")]
+    assert report.scopes_missing == ["Documents"] and report.ok and fake.documents == {} and report.summary["created"] == 0
+
+
+async def test_documents_a_gorelo_that_drops_the_attachments_with_a_new_version_fails_the_area_and_the_cleanup_archives_both(run, lines):
+    fake = FakeGorelo(keeps_attachments=False)
+    report = await run(fake, areas=["documents"], with_documents=True)
+    found = results(report)["documents"]
+    assert found.status == "FAIL" and "Attachments are not the ones that were asked for" in found.detail
+    first, copy = the_documents(fake)
+    assert first["StatusId"] == copy["StatusId"] == 2 and fake.leftovers() == []  # the cleanup archived what the area had left active
+    assert area_ops(fake, report)["cleanup"] == ["GET /v1/documents/{documentId}", "PATCH /v1/documents/{documentId}"] * 2  # read first, then archive
+    assert [r.json for r in fake.mock.requests[-4:] if r.method == "PATCH"] == [{"StatusId": 2}, {"StatusId": 2}]  # nothing but the archive
+    manifest = Manifest.load(report.manifest_path)
+    for document in (first, copy):
+        record = manifest.record("document", document["Id"])
+        assert record.outcome == cleanup.document_residue("archived by the cleanup (archive_document)") and not record.cleaned
+    assert report.summary["leftovers"] == 0 and report.summary["undeletable"] == 3 and not report.ok  # the failed area fails the run
+    assert any(line.startswith("  known undeletable document ") for line in lines)
+
+
+async def test_documents_an_upload_gorelo_refuses_stops_the_area_and_the_cleanup_archives_both(run):
+    fake = FakeGorelo()
+    fake.fail("POST /v1/attachments", error_envelope(400, [("070101", "The record is archived.", "itemId")]))
+    report = await run(fake, areas=["documents"], with_documents=True)
+    found = results(report)["documents"]
+    assert found.status == "FAIL" and "HTTP 400" in found.detail
+    assert all(d["StatusId"] == 2 for d in fake.documents.values()) and fake.leftovers() == []
+    manifest = Manifest.load(report.manifest_path)
+    assert [r.kind for r in manifest.all_created()] == ["document", "document"] and manifest.unresolved_intents() == []  # the refused upload settled
+
+
+def hurt_duplicate(fake, key):
+    original = fake.duplicate_document
+
+    def duplicate(q):
+        copy = fake.documents[original(q)["Data"]["Id"]]
+        copy[key] = True
+        return envelope(fake.doc_detail(copy))
+
+    fake.handlers["POST /v1/documents/{documentId}/duplicate"] = duplicate
+
+
+def hurt_patch(fake, when, change):
+    """Every PATCH of a document for which when(body) holds answers the document as `change(document)` left it, written or not."""
+    original = fake.patch_document
+
+    def patch(q):
+        if when(q.json):
+            doc = fake.documents[fake.part(q, 3)]
+            change(doc)
+            return envelope(fake.doc_detail(doc))
+        return original(q)
+
+    fake.handlers["PATCH /v1/documents/{documentId}"] = patch
+
+
+def hurt_listing(fake):
+    fake.handlers["GET /v1/documents"] = lambda q: fake.paged([], q)
+
+
+def hurt_children(fake):
+    fake.doc_children = lambda doc: []
+
+
+def hurt_restore(fake):
+    restore = fake.restore_document_version
+
+    def wrong(q):
+        doc = fake.documents[fake.part(q, 3)]
+        restore(q)
+        doc["Title"] = f"{RUN} something else"
+        return envelope(fake.doc_detail(doc))
+
+    fake.handlers["POST /v1/documents/{documentId}/versions/{versionId}/restore"] = wrong
+
+
+def hurt_link_removal(fake):
+    fake.handlers["DELETE /v1/documents/{documentId}/related-items/{relatedItemId}"] = lambda q: envelope({"Id": int(fake.part(q, 5))})
+
+
+@pytest.mark.parametrize(
+    "hurt, said",
+    [
+        (lambda f: hurt_duplicate(f, "IsStarred"), "duplicate_document IsStarred (the star starts off): expected False, got True"),
+        (lambda f: hurt_duplicate(f, "PublicLinkEnabled"), "duplicate_document PublicLinkEnabled: expected False, got True"),
+        (hurt_listing, "list_documents (both documents) did not show the expected documents (a mismatch for 2 of 2)"),
+        (
+            lambda f: hurt_patch(f, lambda b: "Move" in b and b["Move"].get("ParentDocumentId"), lambda d: None),
+            "move_document: PATCH /v1/documents/{documentId}: the answer does not show the move (ParentDocumentId is not the new parent)",
+        ),
+        (hurt_children, "get_document of the copy does not list the moved document among its children"),
+        (hurt_restore, "restore_document_version: POST /v1/documents/{documentId}/versions/{versionId}/restore: the title in the answer is not the title of the restored version"),
+        (hurt_link_removal, "list_document_related_items still shows the link that was removed"),
+        (
+            lambda f: hurt_patch(f, lambda b: b.get("PublicLinkEnabled") is False, lambda d: d.update(PublicLinkEnabled=True)),
+            "unshare_document: PATCH /v1/documents/{documentId}: the answer shows PublicLinkEnabled as true, not the false that was asked for",
+        ),
+    ],
+)
+async def test_documents_a_gorelo_that_does_not_do_what_the_spec_says_fails_the_area_naming_the_step(run, hurt, said):
+    fake = FakeGorelo()
+    hurt(fake)
+    report = await run(fake, areas=["documents"], with_documents=True)
+    found = results(report)["documents"]
+    assert found.status == "FAIL" and said in found.detail, found.detail
+    assert not report.ok and report.refused == 0 and report.summary["unresolved_intents"] == 0 and report.summary["leftovers"] == 0
+    assert all(d["StatusId"] == 2 for d in fake.documents.values())  # whatever the step, the cleanup archived what was left active
+
+
+async def test_documents_an_archive_that_gorelo_ignores_leaves_the_documents_as_leftovers_with_the_reason(run, lines):
+    fake = FakeGorelo()
+    hurt_patch(fake, lambda b: b == {"StatusId": 2}, lambda d: None)  # every archive is answered and ignored, the cleanup's too
+    report = await run(fake, areas=["documents"], with_documents=True)
+    found = results(report)["documents"]
+    assert found.status == "FAIL" and "archive_document: PATCH /v1/documents/{documentId}: the answer does not show Status 2 Archived" in found.detail
+    assert all(d["StatusId"] == 1 for d in fake.documents.values())  # still Active: nothing archived them
+    assert not report.ok and report.summary["leftovers"] == 3  # the two documents and, with no archived parent, the file
+    assert any("LEFTOVER   document" in line and "is still Active, archive_document did not confirm" in line for line in lines)
+
+
+async def test_documents_a_list_that_lags_behind_the_create_is_asked_again(run):
+    fake = FakeGorelo()
+    original, lag = fake.list_documents, {"left": 2}
+
+    def lagging(q):
+        if "Query" in q.query and lag["left"]:
+            lag["left"] -= 1
+            return fake.paged([], q)
+        return original(q)
+
+    fake.handlers["GET /v1/documents"] = lagging
+    report = await run(fake, areas=["documents"], with_documents=True)
+    found = results(report)["documents"]
+    assert found.status == "pass" and found.requests == 37 + 2
+    assert "list_documents (both documents) showed the expected documents on attempt 3" in found.notes
+
+
+async def test_documents_the_area_stops_cleanly_when_a_document_cannot_be_created(run):
+    fake = FakeGorelo()
+    fake.fail("POST /v1/documents", error_envelope(400, [("070101", "Title is required, max 200 characters.", "Title")]))
+    report = await run(fake, areas=["documents"], with_documents=True)
+    found = results(report)["documents"]
+    assert found.status == "FAIL" and "HTTP 400" in found.detail and found.requests == 2  # the scope probe and the refused create
+    assert fake.documents == {} and report.summary["created"] == 0 and report.summary["unresolved_intents"] == 0
+    assert area_ops(fake, report)["cleanup"] == []
+
+
+async def test_documents_a_create_whose_answer_is_lost_stays_announced_for_the_operator_to_search(run, lines):
+    fake = FakeGorelo()
+    fake.fail("POST /v1/documents", httpx.ReadTimeout("timed out"))
+    report = await run(fake, areas=["documents"], with_documents=True)
+    found = results(report)["documents"]
+    assert found.status == "FAIL" and report.summary["unresolved_intents"] == 1 and not report.ok
+    assert any(line.startswith("  UNRESOLVED document ") and "search for the label" in line for line in lines)
+
+
+async def test_documents_a_run_interrupted_in_the_middle_still_archives_what_it_made(run, lines):
+    fake = FakeGorelo()
+    original, calls = fake.patch_document, {"n": 0}
+
+    class Interrupted(BaseException):  # what an interrupt is to the code: no `except Exception` catches it (a real KeyboardInterrupt would stop pytest)
+        pass
+
+    def interrupted(q):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise Interrupted
+        return original(q)
+
+    fake.handlers["PATCH /v1/documents/{documentId}"] = interrupted
+    def carries(error):  # the task groups of the client wrap it, once or several times
+        return isinstance(error, Interrupted) or any(carries(inner) for inner in getattr(error, "exceptions", ()))
+
+    with pytest.raises(BaseException) as stopped:
+        await run(fake, areas=["documents"], with_documents=True)
+    assert carries(stopped.value)
+    assert len(fake.documents) == 2 and all(d["StatusId"] == 2 for d in fake.documents.values()) and fake.leftovers() == []
+    assert any(line.startswith("  known undeletable document ") for line in lines)
+
+
+async def test_documents_only_the_runs_own_documents_are_touched_and_only_for_the_test_client(run):
+    fake = FakeGorelo()
+    foreign = fake.add_document({"Title": "A customer's runbook", "Body": "secret"}, parent=None, client=SECOND)["Id"]
+    report = await run(fake, areas=["documents"], with_documents=True)
+    assert results(report)["documents"].status == "pass"
+    assert fake.documents[foreign]["StatusId"] == 1 and fake.documents[foreign]["Title"] == "A customer's runbook"
+    own = {d["Id"] for d in fake.documents.values()} - {foreign}
+    assert len(own) == 2
+    for request in fake.mock.requests:
+        if request.method in ("PATCH", "POST", "DELETE") and request.path.startswith("/v1/documents/"):
+            assert request.path.split("/")[3] in own, request.path  # every document write names a document the run made
+        body = request.json if isinstance(request.json, dict) else {}
+        assert body.get("ClientId") in (None, TEST_CLIENT) and body.get("PublicLinkEnabled") is not True and body.get("PublishToPortalEnabled") is not True
+        assert (body.get("Move") or {}).get("ClientId") in (None, TEST_CLIENT) and (body.get("Move") or {}).get("ParentDocumentId") in (None, *own)
+    assert not any(r.method == "DELETE" and r.path.count("/") == 3 for r in fake.mock.requests)  # no document is ever deleted
+
+
+async def test_documents_the_guard_of_the_run_has_the_option_only_for_the_flag_and_the_cleanup_never_has_it(run, monkeypatch):
+    made, cleanups = [], []
+    real = write_matrix.LiveGuard
+
+    class Spy(real):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            made.append((kwargs.get("allow_documents"), kwargs.get("allow_custom_asset_move")))
+
+    class CleanupSpy(real):
+        def __init__(self, *args, **kwargs):
+            cleanups.append(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(write_matrix, "LiveGuard", Spy)
+    monkeypatch.setattr(cleanup, "LiveGuard", CleanupSpy)
+    await run(FakeGorelo(), areas=["documents"])
+    await run(FakeGorelo(), areas=["documents"], with_documents=True, started=datetime(2099, 10, 2, 10, 16, 0, tzinfo=timezone.utc))
+    assert made == [(False, False), (True, False)]
+    assert cleanups and all("allow_documents" not in kwargs and kwargs.get("cleanup") is True for kwargs in cleanups)
+
+
+def test_documents_the_summary_reminds_about_documents_only_when_the_run_made_some():
+    plain = write_matrix.MatrixReport(run_id=RUN, manifest_path="m.json", cleanup=write_matrix.CleanupReport(run_id=RUN))
+    assert not any("document(s)" in line for line in plain.render())
+    one = write_matrix.MatrixReport(run_id=RUN, manifest_path="m.json", cleanup=write_matrix.CleanupReport(run_id=RUN), documents=["a-1"])
+    text = one.render()
+    assert any(line.startswith("reminder: 1 document(s) of this run stay in Gorelo") for line in text) and text[-1] == "result: PASSED"
+
+
+def test_documents_residue_documents_lists_the_documents_of_the_manifest(tmp_path):
+    manifest = Manifest(RUN, tmp_path / "r.json")
+    assert write_matrix.residue_documents(manifest) == []
+    manifest.created("document", DOC_ONE, f"{RUN} document")
+    manifest.created("client", 8200, f"{RUN} client")
+    assert write_matrix.residue_documents(manifest) == [DOC_ONE]
+
+
+# --------------------------------------------------------------------------
+# The usage rules of the new flags, the region, and the gate of the approved invoice
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flag", ["with_documents", "with_asset_move"])
+async def test_the_approved_invoice_flag_beside_the_new_flags_is_a_usage_error(run, flag):
+    fake = FakeGorelo()
+    named = "--" + flag.replace("_", "-")
+    with pytest.raises(write_matrix.UsageError, match=f"--with-approved-invoice runs alone: it cannot be combined with {named}$"):
+        await run(fake, areas=["approved_invoice"], with_approved_invoice=True, **{flag: True})
+    assert fake.mock.requests == []
+
+
+async def test_the_asset_move_flag_needs_the_custom_assets_flag_before_anything_is_sent(run, tmp_path):
+    fake = FakeGorelo()
+    with pytest.raises(write_matrix.UsageError, match="--with-asset-move needs --with-custom-assets"):
+        await run(fake, areas=["custom_assets"], with_asset_move=True)
+    assert fake.mock.requests == [] and not (tmp_path / "runs").exists()
+
+
+def test_the_command_line_refuses_the_asset_move_flag_alone_with_status_two(capsys):
+    assert write_matrix.main(["--with-asset-move"]) == 2
+    assert capsys.readouterr().err.startswith("usage: --with-asset-move needs --with-custom-assets")
+
+
+async def test_the_guard_of_a_run_has_the_move_option_only_with_both_flags(run, monkeypatch):
+    seen = []
+    real = write_matrix.LiveGuard
+
+    class Spy(real):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            seen.append((kwargs.get("allow_custom_assets"), kwargs.get("allow_custom_asset_move")))
+
+    monkeypatch.setattr(write_matrix, "LiveGuard", Spy)
+    await run(FakeGorelo(), areas=["clients"])
+    await run(FakeGorelo(), areas=["clients"], with_custom_assets=True, started=datetime(2099, 10, 2, 10, 16, 0, tzinfo=timezone.utc))
+    await run(FakeGorelo(), areas=["clients"], with_custom_assets=True, with_asset_move=True, started=datetime(2099, 10, 2, 10, 17, 0, tzinfo=timezone.utc))
+    assert seen == [(False, False), (True, False), (True, True)]
+
+
+async def test_every_request_of_a_run_goes_to_the_region_of_its_settings_and_the_guard_is_built_for_it(make_settings, tmp_path, monkeypatch):
+    australian = "https://api.aue.gorelo.io/v1"
+    checks, guards, echoed = [], [], []
+    real = write_matrix.LiveGuard
+
+    class Spy(real):
+        def __init__(self, *args, **kwargs):
+            guards.append(kwargs.get("base_url"))
+            super().__init__(*args, **kwargs)
+
+    async def spy(api_key, *, transport=None, cfg=None, base_url=None):
+        checks.append(base_url)
+        facts = write_matrix.live_guard.ClientFacts
+        return {9501: facts(1, "Active"), 9502: facts(1, "Active")}
+
+    monkeypatch.setattr(write_matrix, "LiveGuard", Spy)
+    monkeypatch.setattr(write_matrix.live_guard, "verify_site_clients", spy)
+    fake = FakeGorelo()
+    report = await write_matrix.run_matrix(
+        settings=make_settings(destructive=True, base_url=australian), transport=fake.mock.transport, pace=0,
+        directory=tmp_path / "runs", echo=echoed.append, areas=["clients"], lookup_wait=0, started=RUN_START,
+    )
+    assert report.ok and checks == [australian] and guards == [australian]
+    assert echoed[0] == "api host: api.aue.gorelo.io" and Manifest.load(report.manifest_path).api_host == "api.aue.gorelo.io"
+
+
+# the gate of the approved invoice area: CLOSED while UNEMAILABLE_CONTACT_STATUS_IDS is empty (fail closed)
+
+
+async def test_approved_invoice_the_shipped_gate_is_closed_and_the_area_is_skipped_before_its_first_request(run, monkeypatch, lines):
+    monkeypatch.setattr(write_matrix, "UNEMAILABLE_CONTACT_STATUS_IDS", ())
+    fake = FakeGorelo()
+    report = await run(fake, areas=["approved_invoice"], with_approved_invoice=True)
+    found = results(report)["approved_invoice"]
+    assert found.status == "skipped" and found.requests == 0 and found.detail.startswith(write_matrix.APPROVED_INVOICE_GATE_CLOSED[:200])
+    assert fake.mock.requests == [] and fake.invoices == {} and report.ok and report.summary["created"] == 0
+    reason = write_matrix.APPROVED_INVOICE_GATE_CLOSED
+    assert "nothing proves that nobody can be emailed" in reason
+    assert "No published contact status says that a contact cannot be emailed" in reason
+    assert "The operator has to decide which state proves it before this area runs again" in reason
+    assert any(line.startswith("area approved_invoice: skipped, 0 requests (precondition not met: nothing proves") for line in lines)
+
+
+def test_approved_invoice_the_constant_that_opens_the_gate_ships_empty():
+    source = open(write_matrix.__file__, encoding="utf-8").read()
+    assert "UNEMAILABLE_CONTACT_STATUS_IDS: tuple[int, ...] = ()" in source
+
+
+async def test_approved_invoice_with_the_gate_open_an_empty_contact_list_is_a_skip_after_one_read(approved):
+    report = await approved(FakeGorelo(test_client_contacts=[]))
+    found = results(report)["approved_invoice"]
+    assert found.status == "skipped" and found.requests == 1 and "lists no contact of client 9501" in found.detail
+
+
+async def test_approved_invoice_the_closed_gate_does_not_touch_the_guards_rules_for_the_area(run, monkeypatch):
+    monkeypatch.setattr(write_matrix, "UNEMAILABLE_CONTACT_STATUS_IDS", ())
+    report = await run(FakeGorelo(), areas=["approved_invoice"], with_approved_invoice=True)
+    assert report.refused == 0 and results(report)["approved_invoice"].status == "skipped"

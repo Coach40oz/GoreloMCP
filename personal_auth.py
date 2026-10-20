@@ -142,7 +142,7 @@ class PersonalAuthProvider(InMemoryOAuthProvider):
     - Bodies of requests to /authorize, /token, /register and /revoke are capped at 16 KiB,
       whatever the HTTP method; an OPTIONS with a body is refused (a preflight has none)
     - Fails closed: refuses to start without a password or on an unchecked fastmcp or mcp, and
-      authorize() works only inside a request the consent endpoint approved
+      authorize() is allowed only inside a request the consent endpoint approved
     - Token persistence to a JSON file (survives restarts), read, checked, pruned and
       written atomically by oauth_store.py
     - One issuer of pat_ and prt_ tokens for sign-ins and refreshes; refresh tokens rotate
@@ -408,7 +408,7 @@ class PersonalAuthProvider(InMemoryOAuthProvider):
     ) -> str:
         """Issue an authorization code and return the redirect address that carries it.
 
-        Works only inside a request that the consent endpoint approved for exactly this client and redirect address, after
+        Allowed only inside a request that the consent endpoint approved for exactly this client and redirect address, after
         the password matched (oauth_guard.approved / take_approval). Called from anywhere else, which can only happen if
         the framework's own /authorize handler ever got into the path, it raises access_denied: the password page is not
         the only thing standing between a client and a code. The redirect address is checked once more."""

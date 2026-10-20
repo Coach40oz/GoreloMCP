@@ -41,6 +41,13 @@ pytestmark = pytest.mark.anyio
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EM_DASH, EN_DASH = chr(0x2014), chr(0x2013)
+LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
+needs_spec_text = pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
+
+
+def operation(method, path):
+    return json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["paths"][path][method]
+
 
 LIST = "/v1/tickets"
 STATUSES_PATH = "/v1/tickets/statuses"
@@ -381,6 +388,7 @@ def test_the_docstrings_carry_what_the_documentation_requires():
         "closed_on without updated_on also sets UpdatedOn",
         "a status change may email the contact",
         "notifications and timeline entries fire for each changed field",
+        "(not for a close with closed_on)",
         "REPLACE the whole list",
         "name it in clear_fields",
         "cannot be unassigned",
@@ -469,6 +477,30 @@ async def test_the_parameter_descriptions_carry_the_warnings_and_the_scales(serv
     assert "Not also lead or assisting: " + conflict in describe["update_ticket"]["watcher_ids"]
     assert "needs created_on and a closed status_id" in describe["create_ticket"]["closed_on"]
     assert "needs a closed status" in describe["update_ticket"]["closed_on"]
+    assert describe["update_ticket"]["closed_on"] == (
+        "Close date (not future); needs a closed status. Also sets updated_on unless given. "
+        "History: no status email to the contact, no automation."
+    )
+    assert "history" not in describe["create_ticket"]["closed_on"]
+
+
+@needs_spec_text
+async def test_the_closed_on_history_sentence_is_in_the_spec_text(server):
+    # closed_on is a field of the PATCH body that update_ticket sends; the spec sentence says what a close with it does
+    body = operation("patch", "/v1/tickets/{ticketId}")["requestBody"]["content"]["application/json"]["schema"]
+    assert body == {"$ref": "#/components/schemas/UpdateTicketCommand"}
+    schema = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["components"]["schemas"]["UpdateTicketCommand"]
+    spec_text = " ".join(schema["properties"]["ClosedOn"]["description"].split())
+    assert (
+        "A close that carries ClosedOn is treated as history: it is recorded on the timeline but sends no "
+        "status-changed email to the contact and triggers no automation rules."
+    ) in spec_text
+    listed = {tool.name: tool for tool in await list_tools(server)}
+    closed_on = listed["update_ticket"].inputSchema["properties"]["closed_on"]["description"]
+    for word in ("History", "no status email to the contact", "no automation"):
+        assert word in closed_on, word
+    assert "timeline only" not in closed_on
+    assert "no email" not in closed_on
 
 
 def test_the_module_is_plain_ascii_without_dashes():
@@ -1215,8 +1247,8 @@ async def test_search_tickets_a_scan_that_ends_exactly_at_the_cap_is_complete(se
     assert result["complete_scan"] is True and result["truncated"] is False and "note" not in result
 
 
-def test_search_tickets_the_default_scan_cap_is_large_enough_for_the_whole_tenant():
-    assert tickets.SEARCH_SCAN_CAP >= 2000 and tickets.SEARCH_PAGE_SIZE == 200
+def test_search_tickets_scan_cap_page_size_and_limits_are_the_documented_constants():
+    assert tickets.SEARCH_SCAN_CAP == 5000 and tickets.SEARCH_PAGE_SIZE == 200
     assert (tickets.SEARCH_LIMIT_DEFAULT, tickets.SEARCH_LIMIT_MAX) == (50, 500)
 
 
@@ -2729,7 +2761,7 @@ async def test_update_ticket_a_missing_ticket_is_a_gorelo_404(server, mock_gorel
     assert [r.method for r in mock_gorelo.requests] == ["PATCH"]
 
 
-async def test_update_ticket_the_null_only_rejection_probe_is_reported_as_gorelo_said_it(server, mock_gorelo):
+async def test_update_ticket_reports_a_refused_patch_as_gorelo_said_it(server, mock_gorelo):
     mock_gorelo.on("PATCH", f"{LIST}/{T1}", error_envelope(400, [("070101", "The request must contain at least one field to update.")]))
     text = await call_tool_error(server, "update_ticket", {"ticket_id": T1, "title": "x"})
     assert "The request must contain at least one field to update." in text
@@ -2992,12 +3024,14 @@ async def test_get_ticket_accepts_a_hyphenless_or_uppercase_guid_and_still_searc
 NEUTRAL_TEXT_NUMBERS = {
     "8601",  # ISO 8601
     "080203",  # Gorelo notification code for a missing scope (public error code, not a tenant value)
+    "070208",  # Gorelo notification code of a record type the key cannot read (list_deletions; a public error code, not a tenant value)
     "070101",  # example Gorelo notification code in a docstring
     "100", "200", "250", "255", "500", "5000", "10485760", "65535",  # limits and sizes
     "400", "403", "404", "405", "409", "429",  # HTTP status codes
     "123", "456",  # the neutral id examples ("such as 123", "[123, 456]")
     "1042",  # INV-1042 example invoice number
     "1234",  # TCK-1234 example ticket number
+    "0001", "9999",  # the ends of the calendar range in utc_iso's message ("outside the years 0001 to 9999"), not tenant values
 }
 # An int literal of 3 or more digits is allowed in code only as a module-level UPPER_CASE constant or as one of these.
 NEUTRAL_INT_LITERALS = {100, 120, 127, 200, 250, 255, 500, 1024, 5000, 65535}  # page sizes, limits, ASCII DEL, ports

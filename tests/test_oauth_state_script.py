@@ -38,7 +38,7 @@ REAL_DEFAULT_STATE_DIR = oauth_state.DEFAULT_STATE_DIR  # read before any test p
 EM_DASH, EN_DASH = chr(0x2014), chr(0x2013)
 
 DAY = 24 * 60 * 60
-NOW = int(datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc).timestamp())
+NOW = int(datetime(2026, 6, 15, 12, 0, tzinfo=timezone.utc).timestamp())
 STATE_FILE = oauth_store.STATE_FILE_NAME
 LOCK_FILE = oauth_store.LOCK_FILE_NAME
 BASE_URL = "https://mcp.example.test"
@@ -153,21 +153,20 @@ class Builder:
         return [*self.access, *self.refresh, *(c.client_secret for c in self.clients.values()), *self.clients]
 
 
-OLD_SESSIONS = [client_id_of(0x10 + i) for i in range(6)]
-TOKENLESS = [client_id_of(0x20 + i) for i in range(3)]
+OLD_SESSIONS = [client_id_of(0x10 + i) for i in range(2)]
+TOKENLESS = [client_id_of(0x20)]
 
 
 def typical_state() -> Builder:
-    """A synthetic scenario of a long-running install: one live session, six old sessions whose access tokens
-    expired long ago and whose refresh tokens never expire, and three clients that never got a token."""
+    """A synthetic scenario of a long-running install: one live session, two old sessions whose access tokens
+    expired long ago and whose refresh tokens never expire, and one client that never got a token."""
     builder = Builder()
-    live = builder.client(0, "Claude", registered=NOW - 17 * DAY, cid=LIVE_ID)
-    builder.pair(live, "live", access_exp=NOW + 13 * DAY)
+    live = builder.client(0, "Claude", registered=NOW - 4 * DAY, cid=LIVE_ID)
+    builder.pair(live, "live", access_exp=NOW + 26 * DAY)
     for i, cid in enumerate(OLD_SESSIONS):
-        builder.client(0x10 + i, "Claude", registered=NOW - (180 - i) * DAY)
-        builder.pair(cid, f"old-{i}", access_exp=NOW - (150 - i) * DAY)
-    for i, name in enumerate(("test", "old-test-client", "Claude")):
-        builder.client(0x20 + i, name, registered=NOW - 185 * DAY)
+        builder.client(0x10 + i, "Claude", registered=NOW - (90 - i) * DAY)
+        builder.pair(cid, f"old-{i}", access_exp=NOW - (60 - i) * DAY)
+    builder.client(0x20, "Example client", registered=NOW - 185 * DAY)
     return builder
 
 
@@ -240,7 +239,7 @@ def state_dir(tmp_path) -> Path:
 
 
 @pytest.fixture
-def production(state_dir) -> Builder:
+def typical(state_dir) -> Builder:
     builder = typical_state()
     builder.write(state_dir)
     return builder
@@ -272,7 +271,7 @@ def hold_lock(state_dir: Path) -> oauth_store.StateLock:
     ],
     ids=lambda argv: " ".join(argv) or "no arguments",
 )
-def test_a_command_line_that_is_not_deliberate_is_refused_and_changes_nothing(argv, production, state_dir, capsys):
+def test_a_command_line_that_is_not_deliberate_is_refused_and_changes_nothing(argv, typical, state_dir, capsys):
     before = snapshot(state_dir)
     assert oauth_state.main([*argv, "--state-dir", str(state_dir)], clock=lambda: NOW) == oauth_state.EXIT_REFUSED
     assert snapshot(state_dir) == before
@@ -285,7 +284,7 @@ def test_a_command_line_that_is_not_deliberate_is_refused_and_changes_nothing(ar
     "value", ["short", "toolongvalue", "0a1b2c3!", LIVE_ID, "", "0a1b 2c3", "0a1b2c3\n"], ids=lambda v: repr(v)[:20]
 )
 @pytest.mark.parametrize("argv", [["expire-access", "--client", None, "--apply"], ["purge", "--stale", "--keep-client", None, "--plan"]])
-def test_an_id_that_is_not_the_first_8_characters_of_an_id_is_refused_without_echoing_it(argv, value, production, state_dir, capsys):
+def test_an_id_that_is_not_the_first_8_characters_of_an_id_is_refused_without_echoing_it(argv, value, typical, state_dir, capsys):
     argv = [value if part is None else part for part in argv]
     before = snapshot(state_dir)
     assert oauth_state.main([*argv, "--state-dir", str(state_dir)], clock=lambda: NOW) == oauth_state.EXIT_REFUSED
@@ -391,7 +390,7 @@ def test_forgetting_the_state_directory_reaches_nothing_and_creates_nothing(tmp_
     assert not missing.exists() and not missing.parent.joinpath(STATE_FILE).exists()
 
 
-def test_it_runs_as_a_program_from_any_directory_and_prints_the_same_check(production, state_dir, tmp_path):
+def test_it_runs_as_a_program_from_any_directory_and_prints_the_same_check(typical, state_dir, tmp_path):
     # an operator runs `python scripts/oauth_state.py ...`: the script has to find oauth_store.py itself (sys.path gets scripts/)
     cwd = tmp_path / "elsewhere"
     cwd.mkdir()
@@ -402,7 +401,7 @@ def test_it_runs_as_a_program_from_any_directory_and_prints_the_same_check(produ
         cwd=cwd, env=env, capture_output=True, text=True, timeout=180,
     )
     assert done.returncode == 0, done.stderr[-2000:]
-    assert "state: format=v1 clients=10 access=7 refresh=7" in done.stdout and "result: ok" in done.stdout
+    assert "state: format=v1 clients=4 access=3 refresh=3" in done.stdout and "result: ok" in done.stdout
     assert snapshot(state_dir) == before and list(cwd.iterdir()) == []
     help_run = subprocess.run([sys.executable, str(SCRIPT), "--help"], cwd=cwd, env=env, capture_output=True, text=True, timeout=180)
     assert help_run.returncode == 0 and "revoke-all" in help_run.stdout
@@ -418,22 +417,22 @@ def test_it_runs_as_a_program_from_any_directory_and_prints_the_same_check(produ
 # --------------------------------------------------------------------------
 
 
-def test_check_of_the_typical_state_file_gives_the_counts_the_service_will_log(production, state_dir):
+def test_check_of_the_typical_state_file_gives_the_counts_the_service_will_log(typical, state_dir):
     before = snapshot(state_dir)
     run = invoke("check", state_dir=state_dir)
     assert run.code == 0 and run.err == ""
-    assert "state: format=v1 clients=10 access=7 refresh=7 tombstones=0 skipped=0 migrated=7 pruned_on_load=6" in run.out
+    assert "state: format=v1 clients=4 access=3 refresh=3 tombstones=0 skipped=0 migrated=3 pruned_on_load=2" in run.out
     assert "lock: absent" in run.out and "result: ok" in run.out
     assert "file: mode=0600" in run.out and "hint:" not in run.out and "problem:" not in run.out
     assert snapshot(state_dir) == before  # it read, and wrote and created nothing: no .lock, no temp file, same bytes, same mtime
     assert LOCK_FILE not in os.listdir(state_dir)
-    assert_no_credential(run, production)
+    assert_no_credential(run, typical)
 
 
 def test_check_says_what_the_service_loads_for_every_kind_of_file(state_dir):
     builder = typical_state()
     builder.write(state_dir, version=2)
-    assert "format=v2 clients=10 access=7 refresh=7" in invoke("check", state_dir=state_dir).out
+    assert "format=v2 clients=4 access=3 refresh=3" in invoke("check", state_dir=state_dir).out
     empty = state_dir.parent / "empty"
     empty.mkdir()
     run = invoke("check", state_dir=empty)
@@ -545,9 +544,9 @@ def test_check_of_a_file_the_store_refuses_still_prints_the_file_facts_and_the_l
     assert snapshot(state_dir) == before  # it read, and wrote and created nothing: no .lock, no temp file, same bytes, same mtime
 
 
-def test_check_of_a_file_the_service_user_cannot_read_names_the_owner_problem_before_the_error(state_dir, monkeypatch):
+def test_check_of_a_file_the_service_user_cannot_read_names_the_ownership_problem_before_the_error(state_dir, monkeypatch):
     """A copy made as root leaves the state file owned by root, mode 0600, in the directory of
-    gorelo-mcp, which then cannot read it. The owner repair of docs/TROUBLESHOOTING.md is for exactly that, and `problem: the state file is owned by
+    gorelo-mcp, which then cannot read it. The ownership repair in docs/TROUBLESHOOTING.md is for exactly that, and `problem: the state file is owned by
     another user than its directory` is the line that tells the operator to use it. check once printed none of it, only the generic error, so
     an unreadable file could not be told from a damaged one."""
     typical_state().write(state_dir)
@@ -570,13 +569,13 @@ def test_check_of_a_file_the_service_user_cannot_read_names_the_owner_problem_be
         f"error: StateFileError: {oauth_state.STATE_FILE_UNUSABLE}",
         "result: problems",
     ]
-    assert "hint:" not in run.out  # only the mode problem has a hint (the owner repair is in docs/TROUBLESHOOTING.md)
+    assert "hint:" not in run.out  # only the mode problem has a hint (the ownership repair is in docs/TROUBLESHOOTING.md)
     assert snapshot(state_dir) == before
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="only root can give a file to another user")
-def test_check_of_a_file_really_owned_by_another_user_that_cannot_be_read_names_the_owner_problem(state_dir, monkeypatch):
-    # the same again, with a real chown (the owner is not simulated; only the refusal to read is, because root reads everything)
+def test_check_of_a_file_really_owned_by_another_user_that_cannot_be_read_names_the_ownership_problem(state_dir, monkeypatch):
+    # the same again, with a real chown (the chown is real; only the refusal to read is simulated, because root reads everything)
     typical_state().write(state_dir)
     path = state_dir / STATE_FILE
     try:
@@ -630,7 +629,7 @@ def test_check_of_a_refused_file_says_whether_the_service_holds_the_lock_and_whe
     assert lines.index(problem) < lines.index(line_of(run.out, "error: ")) and lines[-1] == "result: problems"
 
 
-def test_a_held_lock_reported_by_the_store_still_ends_in_exit_status_3_for_check(production, state_dir, monkeypatch):
+def test_a_held_lock_reported_by_the_store_still_ends_in_exit_status_3_for_check(typical, state_dir, monkeypatch):
     # a held lock is not a fault of the file, so check does not handle it itself: StateLockedError still ends in main()'s exit status 3
     def locked(*args, **kwargs):
         raise oauth_store.StateLockedError("pat_THIS_MUST_NOT_BE_PRINTED_0123456789abcdef is held")
@@ -652,7 +651,7 @@ def test_check_reports_records_that_cannot_be_read_as_a_problem(state_dir):
     assert "skipped=1" in run.out and "problem: 1 records in the file cannot be read" in run.out and "result: problems" in run.out
 
 
-def test_check_reports_a_state_file_that_other_users_can_read_as_a_problem(production, state_dir):
+def test_check_reports_a_state_file_that_other_users_can_read_as_a_problem(typical, state_dir):
     os.chmod(state_dir / STATE_FILE, 0o644)
     run = invoke("check", state_dir=state_dir)
     assert run.code == oauth_state.EXIT_FAILED and "mode=0644" in run.out and "problem: the state file can be read by other users" in run.out
@@ -674,7 +673,7 @@ def test_check_of_the_typical_state_file_as_an_older_release_wrote_it_is_a_probl
     before = snapshot(state_dir)
     run = invoke("check", state_dir=state_dir)
     assert run.code == oauth_state.EXIT_FAILED and run.err == ""
-    assert "state: format=v1 clients=10 access=7 refresh=7" in run.out and "file: mode=0644" in run.out
+    assert "state: format=v1 clients=4 access=3 refresh=3" in run.out and "file: mode=0644" in run.out
     lines = run.out.splitlines()
     problem = line_of(run.out, "problem: the state file can be read by other users")
     assert "(its mode should be 0600)" in problem
@@ -719,7 +718,7 @@ def test_only_the_mode_problem_has_a_hint(state_dir):
     assert "hint:" not in run.out  # a repair is named only where the script has one
 
 
-def test_check_says_whether_this_user_can_write_to_the_directory_which_the_service_needs(production, state_dir, monkeypatch):
+def test_check_says_whether_this_user_can_write_to_the_directory_which_the_service_needs(typical, state_dir, monkeypatch):
     run = invoke("check", state_dir=state_dir)
     assert run.code == 0 and "dir_writable: yes" in run.out
     seen = []
@@ -736,7 +735,7 @@ def test_check_says_whether_this_user_can_write_to_the_directory_which_the_servi
     assert (state_dir, os.W_OK | os.X_OK) in seen  # it asked about the directory, for writing and for entering it
 
 
-def test_check_says_whether_the_service_holds_the_lock_and_creates_no_lock_file(production, state_dir):
+def test_check_says_whether_the_service_holds_the_lock_and_creates_no_lock_file(typical, state_dir):
     assert "lock: absent" in invoke("check", state_dir=state_dir).out
     assert LOCK_FILE not in os.listdir(state_dir)
     lock = hold_lock(state_dir)
@@ -748,12 +747,12 @@ def test_check_says_whether_the_service_holds_the_lock_and_creates_no_lock_file(
     assert invoke("check", state_dir=state_dir).code == 0
 
 
-def test_check_while_the_real_provider_runs_sees_the_lock_held_and_the_same_counts(production, state_dir):
+def test_check_while_the_real_provider_runs_sees_the_lock_held_and_the_same_counts(typical, state_dir):
     provider = PersonalAuthProvider(base_url=BASE_URL, password=PASSWORD, state_dir=str(state_dir), clock=lambda: float(NOW))
     try:
         run = invoke("check", state_dir=state_dir)
         assert run.code == 0 and "lock: held" in run.out
-        assert "format=v1 clients=10 access=7 refresh=7" in run.out
+        assert "format=v1 clients=4 access=3 refresh=3" in run.out
     finally:
         provider.close()
 
@@ -763,29 +762,29 @@ def test_check_while_the_real_provider_runs_sees_the_lock_held_and_the_same_coun
 # --------------------------------------------------------------------------
 
 
-def test_inventory_lists_every_client_and_token_and_changes_nothing(production, state_dir):
+def test_inventory_lists_every_client_and_token_and_changes_nothing(typical, state_dir):
     before = snapshot(state_dir)
     run = invoke("inventory", state_dir=state_dir)
     assert run.code == 0 and run.err == ""
     assert snapshot(state_dir) == before
-    assert "clients (10):" in run.out and "access tokens (7):" in run.out and "refresh tokens (7):" in run.out
+    assert "clients (4):" in run.out and "access tokens (3):" in run.out and "refresh tokens (3):" in run.out
     live = line_of(run.out, "  client=0a1b2c3d ")
     assert 'name="Claude"' in live and "redirect_hosts=claude.ai" in live and "session=live" in live and "access=1 refresh=1" in live
     old = line_of(run.out, "  client=00000010 ")
     assert "session=refresh-only" in old
     tokenless = [line for line in run.out.splitlines() if line.startswith("  client=0000002")]
-    assert len(tokenless) == 3 and all("session=tokenless" in line and "access=0 refresh=0" in line for line in tokenless)
-    assert 'name="test"' in tokenless[0] and 'name="old-test-client"' in tokenless[1]
+    assert len(tokenless) == 1 and all("session=tokenless" in line and "access=0 refresh=0" in line for line in tokenless)
+    assert 'name="Example client"' in tokenless[0]
     access = [line for line in run.out.splitlines() if line.startswith("  type=pat_")]
-    assert len(access) == 7 and sum("status=live" in line for line in access) == 1 and sum("status=prunable" in line for line in access) == 6
-    assert any("client=0a1b2c3d" in line and "expires=" in line and f"{datetime.fromtimestamp(NOW + 13 * DAY, timezone.utc):%Y-%m-%d %H:%M}" in line for line in access)
+    assert len(access) == 3 and sum("status=live" in line for line in access) == 1 and sum("status=prunable" in line for line in access) == 2
+    assert any("client=0a1b2c3d" in line and "expires=" in line and f"{datetime.fromtimestamp(NOW + 26 * DAY, timezone.utc):%Y-%m-%d %H:%M}" in line for line in access)
     refresh = [line for line in run.out.splitlines() if line.startswith("  type=prt_")]
-    assert len(refresh) == 7 and all("expires=never" in line and "origin=legacy" in line and "access=1" in line for line in refresh)
+    assert len(refresh) == 3 and all("expires=never" in line and "origin=legacy" in line and "access=1" in line for line in refresh)
 
 
-def test_inventory_is_metadata_only(production, state_dir):
+def test_inventory_is_metadata_only(typical, state_dir):
     run = invoke("inventory", state_dir=state_dir)
-    assert_no_credential(run, production)
+    assert_no_credential(run, typical)
     kinds = set(re.findall(r"type=(\S+)", run.out))
     assert kinds == {"pat_", "prt_"}
     # every line is one of a few known shapes: nothing else is ever printed
@@ -1169,12 +1168,12 @@ def test_inventory_counts_the_tombstones_and_shows_their_dates_only(state_dir):
 # --------------------------------------------------------------------------
 
 
-def test_the_plan_names_the_six_old_pairs_and_nine_clients_and_changes_nothing(production, state_dir):
+def test_the_plan_names_the_old_pairs_and_clients_and_changes_nothing(typical, state_dir):
     before = snapshot(state_dir)
     run = invoke("purge", "--stale", "--plan", state_dir=state_dir)
     assert run.code == 0 and run.err == ""
     assert snapshot(state_dir) == before
-    assert "totals: pairs=6 access_tokens=6 refresh_tokens=6 clients=9 kept_clients=1" in run.out
+    assert "totals: pairs=2 access_tokens=2 refresh_tokens=2 clients=3 kept_clients=1" in run.out
     assert "plan only: nothing was changed" in run.out
     removed_pairs = re.findall(r"  remove pair: client=(\w+) ", run.out)
     assert sorted(removed_pairs) == sorted(oauth_state.id8(cid) for cid in OLD_SESSIONS)
@@ -1182,15 +1181,15 @@ def test_the_plan_names_the_six_old_pairs_and_nine_clients_and_changes_nothing(p
     assert sorted(removed_clients) == sorted(oauth_state.id8(cid) for cid in [*OLD_SESSIONS, *TOKENLESS])
     assert "  keep client: client=0a1b2c3d " in run.out and "why=has a valid access token" in run.out
     assert "0a1b2c3d" not in "".join(line for line in run.out.splitlines() if "remove" in line)
-    assert_no_credential(run, production)
+    assert_no_credential(run, typical)
 
 
-def test_the_plan_needs_no_lock_and_works_while_the_service_holds_it(production, state_dir):
+def test_the_plan_needs_no_lock_and_works_while_the_service_holds_it(typical, state_dir):
     lock = hold_lock(state_dir)
     try:
         before = snapshot(state_dir)
         run = invoke("purge", "--stale", "--plan", state_dir=state_dir)
-        assert run.code == 0 and "pairs=6" in run.out
+        assert run.code == 0 and "pairs=2" in run.out
         assert snapshot(state_dir) == before
     finally:
         lock.release()
@@ -1265,11 +1264,11 @@ def test_a_legacy_pair_is_dated_from_its_access_token_as_the_store_estimates_it(
     assert "issued 70 days ago" in plan.pairs[0].why
 
 
-def test_a_client_named_to_keep_loses_nothing_and_a_keep_list_typo_is_refused(production, state_dir):
-    keep = oauth_state.id8(OLD_SESSIONS[2])
+def test_a_client_named_to_keep_loses_nothing_and_a_keep_list_typo_is_refused(typical, state_dir):
+    keep = oauth_state.id8(OLD_SESSIONS[1])
     plan = oauth_state.plan_stale(loaded(state_dir).state, NOW, [keep])
-    assert OLD_SESSIONS[2] not in plan.clients and OLD_SESSIONS[2] not in {pair.client_id for pair in plan.pairs}
-    assert plan.kept[OLD_SESSIONS[2]] == "named with --keep-client" and len(plan.pairs) == 5 and len(plan.clients) == 8
+    assert OLD_SESSIONS[1] not in plan.clients and OLD_SESSIONS[1] not in {pair.client_id for pair in plan.pairs}
+    assert plan.kept[OLD_SESSIONS[1]] == "named with --keep-client" and len(plan.pairs) == 1 and len(plan.clients) == 2
     before = snapshot(state_dir)
     for mode in ("--plan", "--apply"):
         run = invoke("purge", "--stale", "--keep-client", keep, "--keep-client", "deadbeef", mode, state_dir=state_dir)
@@ -1280,11 +1279,11 @@ def test_a_client_named_to_keep_loses_nothing_and_a_keep_list_typo_is_refused(pr
     assert after == before
 
 
-def test_keep_client_takes_several_ids_in_either_form(production, state_dir):
+def test_keep_client_takes_several_ids_in_either_form(typical, state_dir):
     a, b = oauth_state.id8(OLD_SESSIONS[0]), oauth_state.id8(OLD_SESSIONS[1])
     for argv in (["--keep-client", a, b], ["--keep-client", a, "--keep-client", b]):
         run = invoke("purge", "--stale", *argv, "--plan", state_dir=state_dir)
-        assert run.code == 0 and "pairs=4 " in run.out and "kept_clients=3" in run.out
+        assert run.code == 0 and "pairs=0 " in run.out and "kept_clients=3" in run.out
 
 
 def test_a_kept_id_covers_every_client_that_shares_it(state_dir):
@@ -1349,7 +1348,7 @@ def test_apply_never_removes_a_client_that_holds_a_token_even_when_the_plan_list
     assert cid in state.clients and access in state.access_tokens and refresh in state.refresh_tokens
 
 
-def test_the_plan_is_pure(production, state_dir):
+def test_the_plan_is_pure(typical, state_dir):
     state = loaded(state_dir).state
     dumped = oauth_store.dump_state(state)
     oauth_state.plan_stale(state, NOW, [oauth_state.id8(OLD_SESSIONS[0])])
@@ -1361,11 +1360,11 @@ def test_the_plan_is_pure(production, state_dir):
 # --------------------------------------------------------------------------
 
 
-def test_apply_removes_the_planned_sessions_and_keeps_the_live_one_value_for_value(production, state_dir):
-    original = production.document()
+def test_apply_removes_the_planned_sessions_and_keeps_the_unplanned_pair_value_for_value(typical, state_dir):
+    original = typical.document()
     run = invoke("purge", "--stale", "--apply", state_dir=state_dir)
     assert run.code == 0 and run.err == ""
-    assert "removed: access_tokens=6 refresh_tokens=6 clients=9" in run.out
+    assert "removed: access_tokens=2 refresh_tokens=2 clients=3" in run.out
     assert "written: format=v2 clients=1 access=1 refresh=1 verified=yes" in run.out
     document = read_document(state_dir)
     assert document["version"] == 2
@@ -1375,10 +1374,10 @@ def test_apply_removes_the_planned_sessions_and_keeps_the_live_one_value_for_val
             assert original[section][key] == value, section
     (refresh_token,) = document["refresh_tokens"]
     assert document["refresh_meta"][refresh_token]["origin"] == "legacy" and document["retired"] == {}
-    assert_no_credential(run, production)
+    assert_no_credential(run, typical)
 
 
-def test_apply_leaves_a_clean_directory_a_private_file_and_no_lock_held(production, state_dir):
+def test_apply_leaves_a_clean_directory_a_private_file_and_no_lock_held(typical, state_dir):
     assert invoke("purge", "--stale", "--apply", state_dir=state_dir).code == 0
     assert sorted(os.listdir(state_dir)) == sorted([STATE_FILE, LOCK_FILE])  # no temporary file
     assert stat.S_IMODE((state_dir / STATE_FILE).stat().st_mode) == 0o600
@@ -1387,7 +1386,7 @@ def test_apply_leaves_a_clean_directory_a_private_file_and_no_lock_held(producti
     again.release()
 
 
-def test_a_second_apply_has_nothing_to_do_and_writes_nothing(production, state_dir):
+def test_a_second_apply_has_nothing_to_do_and_writes_nothing(typical, state_dir):
     assert invoke("purge", "--stale", "--apply", state_dir=state_dir).code == 0
     before = snapshot(state_dir)
     run = invoke("purge", "--stale", "--apply", state_dir=state_dir)
@@ -1395,19 +1394,19 @@ def test_a_second_apply_has_nothing_to_do_and_writes_nothing(production, state_d
     assert snapshot(state_dir) == before
 
 
-def test_apply_with_a_keep_list_keeps_that_client_with_its_pair(production, state_dir):
-    keep_id = OLD_SESSIONS[3]
-    keep_access = next(t for t, r in production.access.items() if r.client_id == keep_id)
-    keep_refresh = next(t for t, r in production.refresh.items() if r.client_id == keep_id)
+def test_apply_with_a_keep_list_keeps_that_client_with_its_pair(typical, state_dir):
+    keep_id = OLD_SESSIONS[1]
+    keep_access = next(t for t, r in typical.access.items() if r.client_id == keep_id)
+    keep_refresh = next(t for t, r in typical.refresh.items() if r.client_id == keep_id)
     run = invoke("purge", "--stale", "--keep-client", oauth_state.id8(keep_id), "--apply", state_dir=state_dir)
-    assert run.code == 0 and "removed: access_tokens=5 refresh_tokens=5 clients=8" in run.out
+    assert run.code == 0 and "removed: access_tokens=1 refresh_tokens=1 clients=2" in run.out
     after = loaded(state_dir).state
     assert set(after.clients) == {LIVE_ID, keep_id}
     assert keep_access in after.access_tokens and keep_refresh in after.refresh_tokens
-    assert after.refresh_tokens[keep_refresh] == production.refresh[keep_refresh]  # unchanged, token for token
+    assert after.refresh_tokens[keep_refresh] == typical.refresh[keep_refresh]  # unchanged, token for token
 
 
-def test_apply_while_the_service_holds_the_lock_is_refused_and_changes_nothing(production, state_dir):
+def test_apply_while_the_service_holds_the_lock_is_refused_and_changes_nothing(typical, state_dir):
     lock = hold_lock(state_dir)
     try:
         before = snapshot(state_dir)
@@ -1421,7 +1420,7 @@ def test_apply_while_the_service_holds_the_lock_is_refused_and_changes_nothing(p
     assert invoke("purge", "--stale", "--apply", state_dir=state_dir).code == 0  # and once it lets go, it works
 
 
-def test_apply_while_the_real_provider_is_up_is_refused(production, state_dir):
+def test_apply_while_the_real_provider_is_up_is_refused(typical, state_dir):
     provider = PersonalAuthProvider(base_url=BASE_URL, password=PASSWORD, state_dir=str(state_dir), clock=lambda: float(NOW))
     try:
         before = snapshot(state_dir)
@@ -1432,8 +1431,8 @@ def test_apply_while_the_real_provider_is_up_is_refused(production, state_dir):
     assert invoke("revoke-all", "--apply", state_dir=state_dir).code == 0
 
 
-def test_apply_refuses_a_file_that_holds_records_it_could_not_read_and_changes_nothing(production, state_dir):
-    document = production.document()
+def test_apply_refuses_a_file_that_holds_records_it_could_not_read_and_changes_nothing(typical, state_dir):
+    document = typical.document()
     document["access_tokens"]["junk"] = {"token": "junk"}
     (state_dir / STATE_FILE).write_text(json.dumps(document))
     before = snapshot(state_dir)
@@ -1456,12 +1455,12 @@ def test_apply_on_a_directory_without_a_state_file_creates_none(state_dir):
     assert plan.code == 0 and "totals: pairs=0" in plan.out and os.listdir(state_dir) == []
 
 
-def test_after_a_purge_the_real_provider_serves_the_live_session_and_does_not_know_the_rest(production, state_dir):
+def test_after_a_purge_the_real_provider_serves_the_live_session_and_does_not_know_the_rest(typical, state_dir):
     assert invoke("purge", "--stale", "--apply", state_dir=state_dir).code == 0
-    live_access = next(t for t, r in production.access.items() if r.client_id == LIVE_ID)
-    live_refresh = next(t for t, r in production.refresh.items() if r.client_id == LIVE_ID)
-    gone_access = next(t for t, r in production.access.items() if r.client_id == OLD_SESSIONS[0])
-    gone_refresh = next(t for t, r in production.refresh.items() if r.client_id == OLD_SESSIONS[0])
+    live_access = next(t for t, r in typical.access.items() if r.client_id == LIVE_ID)
+    live_refresh = next(t for t, r in typical.refresh.items() if r.client_id == LIVE_ID)
+    gone_access = next(t for t, r in typical.access.items() if r.client_id == OLD_SESSIONS[0])
+    gone_refresh = next(t for t, r in typical.refresh.items() if r.client_id == OLD_SESSIONS[0])
     provider = PersonalAuthProvider(base_url=BASE_URL, password=PASSWORD, state_dir=str(state_dir), clock=lambda: float(NOW))
     try:
         assert set(provider.clients) == {LIVE_ID}
@@ -1475,7 +1474,7 @@ def test_after_a_purge_the_real_provider_serves_the_live_session_and_does_not_kn
 
 
 # --------------------------------------------------------------------------
-# expire-access: the refresh test
+# expire-access (to check that the client refreshes by itself)
 # --------------------------------------------------------------------------
 
 
@@ -1489,8 +1488,8 @@ def test_expire_access_marks_only_that_clients_valid_access_tokens(state_dir):
     builder.write(state_dir)
     run = invoke("expire-access", "--client", "0a1b2c3d", "--apply", state_dir=state_dir)
     assert run.code == 0 and run.err == ""
-    assert "expired: client=0a1b2c3d access_tokens=2 expired_at=2026-10-05 11:59:59; refresh tokens were not touched" in run.out
-    assert "written: format=v2 clients=11 access=" in run.out
+    assert "expired: client=0a1b2c3d access_tokens=2 expired_at=2026-06-15 11:59:59; refresh tokens were not touched" in run.out
+    assert "written: format=v2 clients=5 access=" in run.out
     after = loaded(state_dir).state
     assert after.access_tokens[live_access].expires_at == NOW - 1
     assert after.access_tokens[second_access].expires_at == NOW - 1
@@ -1505,10 +1504,10 @@ def test_expire_access_marks_only_that_clients_valid_access_tokens(state_dir):
     assert_no_credential(run, builder)
 
 
-def test_the_refresh_test_end_to_end_through_the_real_provider(production, state_dir, caplog):
-    # the operator procedure: stop the service, expire the live session's access token, start the service, the client refreshes
-    access = next(t for t, r in production.access.items() if r.client_id == LIVE_ID)
-    refresh = next(t for t, r in production.refresh.items() if r.client_id == LIVE_ID)
+def test_expire_access_end_to_end_through_the_real_provider(typical, state_dir, caplog):
+    # stop the service, expire the session's access token, start it: the client refreshes
+    access = next(t for t, r in typical.access.items() if r.client_id == LIVE_ID)
+    refresh = next(t for t, r in typical.refresh.items() if r.client_id == LIVE_ID)
     run = invoke("expire-access", "--client", "0a1b2c3d", "--apply", state_dir=state_dir)
     assert run.code == 0
     caplog.set_level(logging.INFO)
@@ -1527,7 +1526,7 @@ def test_the_refresh_test_end_to_end_through_the_real_provider(production, state
     assert any("access outcome=expired" in message for message in messages)
     assert any("token outcome=refreshed" in message for message in messages)
     assert not any("consent" in message for message in messages)  # no sign-in page was involved
-    assert not any(secret in message for secret in production.secrets() for message in messages)
+    assert not any(secret in message for secret in typical.secrets() for message in messages)
 
 
 def test_expire_access_refuses_a_client_that_could_not_refresh(state_dir):
@@ -1576,10 +1575,10 @@ def test_expire_access_on_a_client_that_has_nothing_valid_changes_nothing(state_
     assert after == before
 
 
-def test_a_token_expired_by_the_script_is_recent_enough_to_be_recognized_as_expired(production, state_dir):
+def test_a_token_expired_by_the_script_is_recent_enough_to_be_recognized_as_expired(typical, state_dir):
     assert invoke("expire-access", "--client", "0a1b2c3d", "--apply", state_dir=state_dir).code == 0
     result = oauth_store.load_state(state_dir, now=NOW)  # a normal load, with the prune
-    assert result.pruned.total == 6 and len(result.state.access_tokens) == 1  # only the six old tokens go, not this one
+    assert result.pruned.total == 2 and len(result.state.access_tokens) == 1  # only the two old tokens go, not this one
     assert result.state.access_tokens and next(iter(result.state.access_tokens.values())).expires_at == NOW - 1
 
 
@@ -1595,8 +1594,8 @@ def test_revoke_all_removes_every_token_and_keeps_clients_and_tombstones(state_d
     original = builder.document(2)
     run = invoke("revoke-all", "--apply", state_dir=state_dir)
     assert run.code == 0 and run.err == ""
-    assert "revoked: access_tokens=7 refresh_tokens=7; client registrations stay (clients=10)" in run.out
-    assert "written: format=v2 clients=10 access=0 refresh=0 verified=yes" in run.out
+    assert "revoked: access_tokens=3 refresh_tokens=3; client registrations stay (clients=4)" in run.out
+    assert "written: format=v2 clients=4 access=0 refresh=0 verified=yes" in run.out
     document = read_document(state_dir)
     assert document["access_tokens"] == {} and document["refresh_tokens"] == {}
     assert document["a2r"] == {} and document["r2a"] == {} and document["refresh_meta"] == {}
@@ -1605,21 +1604,21 @@ def test_revoke_all_removes_every_token_and_keeps_clients_and_tombstones(state_d
     assert_no_credential(run, builder)
 
 
-def test_revoke_all_of_a_version_1_file_writes_version_2_and_leaves_the_clients_alone(production, state_dir):
-    original = production.document()
+def test_revoke_all_of_a_version_1_file_writes_version_2_and_leaves_the_clients_alone(typical, state_dir):
+    original = typical.document()
     assert invoke("revoke-all", "--apply", state_dir=state_dir).code == 0
     document = read_document(state_dir)
     assert document["version"] == 2 and document["clients"] == original["clients"]
 
 
-def test_after_revoke_all_the_real_provider_knows_no_token_and_logs_no_reuse(production, state_dir, caplog):
-    access = next(t for t, r in production.access.items() if r.client_id == LIVE_ID)
-    refresh = next(t for t, r in production.refresh.items() if r.client_id == LIVE_ID)
+def test_after_revoke_all_the_real_provider_knows_no_token_and_logs_no_reuse(typical, state_dir, caplog):
+    access = next(t for t, r in typical.access.items() if r.client_id == LIVE_ID)
+    refresh = next(t for t, r in typical.refresh.items() if r.client_id == LIVE_ID)
     assert invoke("revoke-all", "--apply", state_dir=state_dir).code == 0
     caplog.set_level(logging.INFO)
     provider = PersonalAuthProvider(base_url=BASE_URL, password=PASSWORD, state_dir=str(state_dir), clock=lambda: float(NOW))
     try:
-        assert len(provider.clients) == 10 and provider.access_tokens == {} and provider.refresh_tokens == {}
+        assert len(provider.clients) == 4 and provider.access_tokens == {} and provider.refresh_tokens == {}
         assert asyncio.run(provider.load_access_token(access)) is None
         assert asyncio.run(provider.load_refresh_token(provider.clients[LIVE_ID], refresh)) is None
     finally:
@@ -1639,8 +1638,8 @@ def test_revoke_all_with_no_token_changes_nothing(state_dir):
     assert after == before
 
 
-def test_revoke_all_goes_ahead_when_the_file_holds_records_it_cannot_read_and_says_so(production, state_dir):
-    document = production.document()
+def test_revoke_all_goes_ahead_when_the_file_holds_records_it_cannot_read_and_says_so(typical, state_dir):
+    document = typical.document()
     document["refresh_tokens"]["junk"] = {"token": "junk"}
     (state_dir / STATE_FILE).write_text(json.dumps(document))
     run = invoke("revoke-all", "--apply", state_dir=state_dir)
@@ -1678,26 +1677,26 @@ def test_no_command_ever_creates_a_state_directory(argv, tmp_path):
     [["check"], ["inventory"], ["purge", "--stale", "--plan"]],
     ids=lambda argv: " ".join(argv),
 )
-def test_the_read_only_commands_leave_the_directory_exactly_as_it_was(argv, production, state_dir):
+def test_the_read_only_commands_leave_the_directory_exactly_as_it_was(argv, typical, state_dir):
     before = snapshot(state_dir)
     assert invoke(*argv, state_dir=state_dir).code == 0
     assert snapshot(state_dir) == before
 
 
 @pytest.mark.parametrize("argv", [["check"], ["inventory"], ["purge", "--stale", "--apply"], ["revoke-all", "--apply"]])
-def test_an_unexpected_failure_prints_its_type_only(argv, production, state_dir, monkeypatch):
+def test_an_unexpected_failure_prints_its_type_only(argv, typical, state_dir, monkeypatch):
     def explode(*args, **kwargs):
-        raise ValueError("pat_THIS_MUST_NOT_BE_PRINTED_0123456789abcdef " + production.secrets()[0])
+        raise ValueError("pat_THIS_MUST_NOT_BE_PRINTED_0123456789abcdef " + typical.secrets()[0])
 
     monkeypatch.setattr(oauth_store, "load_state", explode)
     run = invoke(*argv, state_dir=state_dir)
     assert run.code == oauth_state.EXIT_FAILED
     assert run.err.strip() == "error: ValueError"
-    assert "THIS_MUST_NOT_BE_PRINTED" not in run.text and production.secrets()[0] not in run.text
+    assert "THIS_MUST_NOT_BE_PRINTED" not in run.text and typical.secrets()[0] not in run.text
 
 
 @pytest.mark.parametrize("argv", [["check"], ["inventory"], ["purge", "--stale", "--plan"]], ids=lambda argv: " ".join(argv))
-def test_a_state_error_prints_its_type_and_a_fixed_sentence_never_its_message(argv, production, state_dir, monkeypatch):
+def test_a_state_error_prints_its_type_and_a_fixed_sentence_never_its_message(argv, typical, state_dir, monkeypatch):
     def refuse(*args, **kwargs):
         raise oauth_store.StateFileError("the file holds pat_THIS_MUST_NOT_BE_PRINTED_0123456789abcdef at line 3")
 
@@ -1712,13 +1711,13 @@ def test_a_state_error_prints_its_type_and_a_fixed_sentence_never_its_message(ar
     assert "THIS_MUST_NOT_BE_PRINTED" not in run.text and "line 3" not in run.text
 
 
-def test_a_line_that_holds_a_credential_is_never_printed(production, state_dir, monkeypatch):
+def test_a_line_that_holds_a_credential_is_never_printed(typical, state_dir, monkeypatch):
     # if a future edit ever formats a token into a line, the guard stops the line: it is not printed and the run fails
-    leaked = next(iter(production.access))
+    leaked = next(iter(typical.access))
     monkeypatch.setattr(oauth_state, "token_type", lambda token: token)
     run = invoke("inventory", state_dir=state_dir)
     assert run.code == oauth_state.EXIT_FAILED and "LeakError" in run.err
-    assert leaked not in run.text and not any(secret in run.text for secret in production.secrets())
+    assert leaked not in run.text and not any(secret in run.text for secret in typical.secrets())
 
 
 def test_the_guard_covers_tokens_secrets_full_client_ids_and_tombstones():
@@ -1745,7 +1744,7 @@ def test_the_guard_covers_tokens_secrets_full_client_ids_and_tombstones():
     assert stream.getvalue() == "client=abcdef12 type=pat_\n"
 
 
-def test_a_failed_write_leaves_the_old_file_byte_for_byte_and_the_lock_free(production, state_dir, monkeypatch):
+def test_a_failed_write_leaves_the_old_file_byte_for_byte_and_the_lock_free(typical, state_dir, monkeypatch):
     before = snapshot(state_dir)
 
     def refuse(src, dst):
@@ -1761,7 +1760,7 @@ def test_a_failed_write_leaves_the_old_file_byte_for_byte_and_the_lock_free(prod
     oauth_store.StateLock(state_dir).acquire().release()  # and the lock was let go
 
 
-def test_a_file_that_does_not_read_back_as_written_is_reported_and_not_called_done(production, state_dir, monkeypatch):
+def test_a_file_that_does_not_read_back_as_written_is_reported_and_not_called_done(typical, state_dir, monkeypatch):
     real_write = oauth_store.write_state
 
     def write_something_else(directory, state):

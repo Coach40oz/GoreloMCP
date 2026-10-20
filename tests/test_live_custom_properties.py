@@ -49,6 +49,7 @@ from scripts.live.guard import CUSTOM_PROPERTY_UNKNOWN_ID, GuardViolation, LiveG
 from scripts.live.manifest import Manifest
 from scripts.live.smoke import GuardTripped, ToolFailed
 from server import build_server
+from settings import DEFAULT_BASE_URL
 from tools._common import REGISTRY
 
 pytestmark = pytest.mark.anyio
@@ -1523,7 +1524,11 @@ async def test_run_cleanup_gives_its_guard_the_option_only_when_the_manifest_hol
     cleaned = recorded_manifest(tmp_path / "cleaned")
     cleaned.cleaned("custom_property", FIELD, "cleared by the write matrix (update_client clear_custom_property_ids)")
     await go(cleaned)  # one that is
-    assert made == [{"cleanup": True}, {"cleanup": True, "allow_custom_properties": True}, {"cleanup": True}]
+    assert made == [
+        {"cleanup": True, "base_url": DEFAULT_BASE_URL},
+        {"cleanup": True, "allow_custom_properties": True, "base_url": DEFAULT_BASE_URL},
+        {"cleanup": True, "base_url": DEFAULT_BASE_URL},
+    ]
     assert not pending.ok and [record.kind for record in pending.leftovers] == ["custom_property"]  # unmatched read: left over, no crash
 
 
@@ -1543,7 +1548,7 @@ def test_the_cleanup_docstring_says_who_clears_what_and_when():
         "somebody changed it since and it is left alone",
         "Whatever is not cleared is a LEFTOVER (not a known residue) that names the field Id and the client",
         "The guard of the cleanup gets allow_custom_properties only when the manifest holds a custom_property record",
-        "The text of a tool error that goes into an outcome has its quoted strings cut out",
+        "The text of an update_client error that goes into an outcome has its quoted strings cut out",
     ):
         assert said in text, said
 
@@ -1561,7 +1566,7 @@ def test_the_area_needs_no_tool_of_its_own_and_the_flag_does_not_widen_the_tool_
 
 def test_the_area_sits_right_after_the_custom_assets_and_is_selected_by_name():
     keys = [area.key for area in write_matrix.AREAS]
-    assert keys.index("custom_assets") + 1 == keys.index("custom_properties") == keys.index("invoices") - 1
+    assert keys.index("custom_assets") + 1 == keys.index("custom_properties") == keys.index("documents") - 1 == keys.index("invoices") - 2
     assert write_matrix.CUSTOM_PROPERTIES_AREA == "custom_properties"
     assert [a.key for a in write_matrix.select_areas(["custom_properties"], False)] == ["custom_properties"]
     assert [a.key for a in write_matrix.select_areas([" Custom_Properties "], True)] == ["custom_properties"]
@@ -1618,7 +1623,7 @@ async def test_the_approved_invoice_flag_beside_the_custom_properties_flag_is_a_
 def test_the_module_docstring_describes_the_area_its_flag_its_record_and_its_leftover():
     text = " ".join(write_matrix.__doc__.split())
     for said in (
-        "[--with-custom-assets] [--with-custom-properties] [--with-approved-invoice]",
+        "[--with-custom-assets] [--with-asset-move] [--with-custom-properties] [--with-documents] [--with-approved-invoice]",
         "custom_properties get_client of the TEST CLIENT, then ONE client custom field value on that client itself",
         "SKIPPED unless --with-custom-properties is given (also under --only custom_properties without it: nothing is sent, not even a read)",
         "Every update_client call with custom fields reads the client first (a GET) and refuses locally an Id the client does not list (no PATCH, no second GET)",
@@ -1742,7 +1747,10 @@ async def test_end_to_end_the_area_passes_and_leaves_the_test_client_as_it_was(r
     assert area_ops(fake, report) == {"custom_properties": GOLDEN_CUSTOM_PROPERTIES, "cleanup": []}  # the cleanup sends nothing
     assert results(report)["custom_properties"].requests == 11
     assert fake.saved.get(TEST_CLIENT, {}) == {}  # unset again
-    assert fake.clients[TEST_CLIENT] == {"Id": TEST_CLIENT, "Name": "the test client", "AlternateName": "the test client alt", "BillingName": "the test client"}
+    assert fake.clients[TEST_CLIENT] == {
+        "Id": TEST_CLIENT, "Name": "the test client", "AlternateName": "the test client alt", "BillingName": "the test client",
+        "Status": {"Id": 1, "Name": "Active"},
+    }
     assert fake.patches == [
         {"CustomProperties": [{"Id": FIELD, "Value": RUN}]},
         {"CustomProperties": [{"Id": FIELD, "Value": None}]},
@@ -2132,3 +2140,67 @@ async def test_end_to_end_the_flag_does_not_make_any_other_area_write_the_test_c
     assert set(patches[0].json) == {"AlternateName"}  # the temporary client of the clients area
     assert all(set(p.json) == {"CustomProperties"} for p in patches[1:])
     assert report.ok and fake.leftovers() == []
+
+
+# --------------------------------------------------------------------------
+# Hidden fields (contract a7954b24844b: IsHidden, and the Value of a hidden field is always null whether or not one is saved)
+# --------------------------------------------------------------------------
+
+
+def hidden_field(ident, name, kind="Text", *, is_set=False):
+    """A custom field the service provider hid from the API: its Value is null, its IsSet is still reported."""
+    return {**field(ident, name, kind, value=None, is_set=is_set), "IsHidden": True}
+
+
+def visible_field(ident, name, kind="Text", *, value=None, is_set=False):
+    """A visible field as Gorelo answers it: the IsHidden key is there (false)."""
+    return {**field(ident, name, kind, value=value, is_set=is_set), "IsHidden": False}
+
+
+def test_unset_text_field_never_picks_a_hidden_field_even_when_it_has_the_lowest_id():
+    fields = [hidden_field(5, "PIN"), visible_field(40, "Support tier"), visible_field(31, "Contract owner", value="the default owner")]
+    assert write_matrix.unset_text_field(fields)["Id"] == 31  # the default rule among the visible ones
+    assert write_matrix.unset_text_field([hidden_field(5, "PIN"), visible_field(40, "Support tier")])["Id"] == 40
+    assert write_matrix.unset_text_field([hidden_field(5, "PIN")]) is None
+    assert write_matrix.unset_text_field([{**field(6, "Notes", "Large Text"), "IsHidden": "true"}])["Id"] == 6  # only a true IsHidden hides
+    assert write_matrix.unset_text_field([field(6, "Notes", "Large Text")])["Id"] == 6  # a record without the key is not hidden
+
+
+async def test_a_tenant_whose_only_unset_text_field_is_hidden_is_a_skip_that_says_hidden_and_writes_nothing(tmp_path):
+    fields = [hidden_field(5, "PIN"), visible_field(2, "Seats", "Number", value="5")]
+    matrix, session, manifest = matrix_for(tmp_path, fields=fields)
+    with pytest.raises(write_matrix.Skipped) as stopped:
+        await write_matrix.area_custom_properties(matrix)
+    reason = str(stopped.value)
+    assert reason.startswith("no custom field of the test client is an unset text field, so nothing was written; its fields (Id, Type, IsSet): ")
+    assert "5 (Text, IsSet false, hidden)" in reason and "2 (Number, IsSet false)" in reason
+    assert "PIN" not in reason and "Seats" not in reason  # ids and kinds only
+    assert [name for name, _ in session.calls] == ["get_client"] and manifest.all_created() == [] and session.bodies == []
+
+
+async def test_a_hidden_field_that_is_set_counts_as_a_set_field_and_keeps_the_area_from_writing(tmp_path):
+    fields = [hidden_field(5, "PIN", is_set=True), visible_field(31, "Contract owner", value="x")]
+    matrix, session, manifest = matrix_for(tmp_path, fields=fields)
+    with pytest.raises(write_matrix.Skipped, match=r"custom field\(s\) 5 of the test client are set \(IsSet true\)"):
+        await write_matrix.area_custom_properties(matrix)
+    assert session.bodies == [] and manifest.all_created() == []
+    assert any("5 (Text, IsSet true, hidden)" in note for note in matrix.notes)
+
+
+async def test_the_area_writes_the_visible_field_next_to_a_hidden_one_and_compares_the_hidden_one_on_its_isset(tmp_path):
+    fields = [hidden_field(5, "PIN"), visible_field(31, "Contract owner", value="the default owner"), visible_field(40, "Support tier")]
+    matrix, session, manifest = matrix_for(tmp_path, fields=fields)
+    await write_matrix.area_custom_properties(matrix)
+    assert [body["CustomProperties"][0]["Id"] for _, body in session.bodies] == [31, 31]  # the hidden field was never written
+    assert only_record(manifest).id == 31
+    # the hidden field changes behind the area's back (it becomes set): the comparison of (IsSet, Value) catches it by IsSet alone
+    matrix, session, manifest = matrix_for(tmp_path / "other", fields=[hidden_field(5, "PIN"), visible_field(31, "Contract owner")])
+    (tmp_path / "other").mkdir(exist_ok=True)
+    session.hurt["answer"] = stuck(5, IsSet=True)
+    with pytest.raises(write_matrix.CheckFailed, match=r"custom field\(s\) 5 of client 9501 do not read as at the first read"):
+        await write_matrix.area_custom_properties(matrix)
+
+
+def test_describe_fields_marks_a_hidden_field_and_leaves_the_others_as_they_were():
+    fields = [hidden_field(5, "PIN"), field(6, "Notes", "Large Text", is_set=True), visible_field(7, "Owner")]
+    assert write_matrix.describe_fields(fields) == "5 (Text, IsSet false, hidden), 6 (Large Text, IsSet true), 7 (Text, IsSet false)"

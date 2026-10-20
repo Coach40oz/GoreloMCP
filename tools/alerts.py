@@ -33,10 +33,11 @@ client. Nothing was observed for Uptime or External alerts, and an alert raised 
 id, so the advice stays as it is. The client_ids text of list_alerts gives the model both facts: Uptime and External
 alerts have no ClientId, so the filter may leave them out (a hedge, not a promise: nothing was observed), and a Script
 alert without one matched through its device (the spec text is only pinned in the tests as a fact about the spec).
-The filters are StatusIds (new, ignored, ticketed), TypeIds (the scale published in the parameter text
-of the spec, 0 for a type it cannot name), ClientIds, DeviceIds, CreatedSince (at or after), CreatedBefore
-(strictly before) and SortOrder (desc, newest first, is the default). DismissedOn and DismissedBy are set only
-while an alert is dismissed.
+The filters are StatusIds (new, dismissed, ticketed: the spec of 2026-10-17 names status 2 Dismissed, where the
+spec of 2026-10-14 said Ignored, and answers 400 for any other id), TypeIds (the scale published in the parameter
+text of the spec, 0 (N/A) for an alert it cannot name, 400 outside 0-20), ClientIds, DeviceIds, CreatedSince (at or
+after), CreatedBefore (strictly before) and SortOrder (desc, newest first, is the default). DismissedOn and
+DismissedBy are set only while an alert is dismissed.
 """
 
 from datetime import datetime
@@ -81,15 +82,15 @@ SEVERITY_NAMES = {1: "Critical", 2: "Error", 3: "Warning", 4: "Information"}
 SEVERITIES = tuple(SEVERITY_NAMES)
 SEVERITY_HELP = "1 Critical, 2 Error, 3 Warning, 4 Information"
 
-# GET /v1/alerts StatusIds: "New=1, Ignored=2, Ticketed=3. 0 (Unknown) matches any other status." The tool offers the
-# three named statuses as words; 0 is not offered, because it only matches a status this scale cannot name.
-ALERT_STATUS_IDS = {"new": 1, "ignored": 2, "ticketed": 3}
+# GET /v1/alerts StatusIds: "New=1, Dismissed=2, Ticketed=3. Any other id is a 400." The tool offers the three named statuses as
+# words; 0 (the old "Unknown" match-all) is not accepted by Gorelo any more and was never offered.
+ALERT_STATUS_IDS = {"new": 1, "dismissed": 2, "ticketed": 3}
 STATUS_NAMES = ", ".join(repr(name) for name in ALERT_STATUS_IDS)
 # GET /v1/alerts TypeIds, as the spec text of that parameter lists them. "7-17 are device-check alerts, identified by
 # their check type rather than by how the alert was raised. 18-20 carry no device or check; Contract and Domain carry a
-# subject id, Warranty does not. 0 (Unknown) matches an alert this scale cannot name."
+# subject id, Warranty does not. 0 (N/A) matches an alert this scale cannot name. Any id outside 0-20 is a 400."
 ALERT_TYPES = {
-    0: "Unknown",
+    0: "N/A",
     1: "Uptime",
     2: "API",
     3: "Script",
@@ -210,7 +211,7 @@ def _status_filter(values: Any) -> list[str] | None:
             f"status: expected a list such as ['new', 'ticketed'], got {describe_value(values)}; statuses are {STATUS_NAMES}"
         )
     if not values:
-        raise ValueError(f"status: must contain at least one of {STATUS_NAMES} (omit it for every status)")
+        raise ValueError(f"status: must contain at least one of {STATUS_NAMES} (omit it for no status filter)")
     for item in values:
         if not isinstance(item, str) or item not in ALERT_STATUS_IDS:
             raise ValueError(f"status: expected one of {STATUS_NAMES}, got {describe_value(item)}")
@@ -218,8 +219,8 @@ def _status_filter(values: Any) -> list[str] | None:
 
 
 def _type_filter(values: Any) -> list[int] | None:
-    """type_ids on the published scale (0 to 20), distinct, in the caller's order. An id off the scale would come back
-    as a silent empty page, so it is an error naming the scale."""
+    """type_ids on the published scale (0 to 20), distinct, in the caller's order. An id outside 0-20 is a 400 at Gorelo,
+    so it is refused here, naming the scale."""
     if values is None:
         return None
     if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)):
@@ -230,8 +231,8 @@ def _type_filter(values: Any) -> list[int] | None:
         if isinstance(item, bool) or not isinstance(item, int) or item not in ALERT_TYPES:
             shown = item if isinstance(item, int) and not isinstance(item, bool) else describe_value(item)
             raise ValueError(
-                f"type_ids[{position}]: {shown} is not an alert type id; valid ids: 0 Unknown, "
-                + ", ".join(f"{key} {name}" for key, name in ALERT_TYPES.items() if key)
+                f"type_ids[{position}]: {shown} is not an alert type id; valid ids: "
+                + ", ".join(f"{key} {name}" for key, name in ALERT_TYPES.items())
             )
     return list(dict.fromkeys(values))
 
@@ -250,10 +251,12 @@ def _instant(text: str) -> datetime:
 async def list_alerts(
     ctx: Context,
     status: Annotated[
-        list[Literal["new", "ignored", "ticketed"]] | None, Field(description="Omit for every status.")
+        list[Literal["new", "dismissed", "ticketed"]] | None,
+        Field(description="new=1, dismissed=2, ticketed=3. Omit for no status filter."),
     ] = None,
     type_ids: Annotated[
-        list[StrictId] | None, Field(description="Alert type ids, named in the tool text. 0 matches a type with no name.")
+        list[StrictId] | None,
+        Field(description="Alert type ids, named in the tool text. 0 (N/A) matches an alert this scale cannot name; outside 0-20 is refused."),
     ] = None,
     client_ids: Annotated[
         list[StrictId] | None,
@@ -272,8 +275,8 @@ async def list_alerts(
     ] = None,
 ) -> dict:
     """List alerts raised in Gorelo, including those sent with post_alert, one page at a time: newest first unless sort_order is asc.
-    Alerts cannot be deleted. DismissedOn and DismissedBy are set only while an alert is dismissed.
-    type_ids: Uptime=1, API=2, Script=3, External=4, Slide=5, Huntress=6, Error Event Log=7, Disk Usage=8, Connectivity=9, Process=10, Service=11, Antivirus=12, Redfish=13, CPU=14, Memory=15, Ping=16, Windows Updates=17, Warranty Expiration=18, Domain Expiration=19, Contract Expiration=20 (7-17 are device checks; 0 matches a type with no name).
+    Alerts cannot be deleted. DismissedOn and DismissedBy are set only while an alert is dismissed. status: new=1, dismissed=2, ticketed=3.
+    type_ids: Uptime=1, API=2, Script=3, External=4, Slide=5, Huntress=6, Error Event Log=7, Disk Usage=8, Connectivity=9, Process=10, Service=11, Antivirus=12, Redfish=13, CPU=14, Memory=15, Ping=16, Windows Updates=17, Warranty Expiration=18, Domain Expiration=19, Contract Expiration=20 (7-17 are device checks; 0 (N/A) matches an alert this scale cannot name; an id outside 0-20 is refused).
     """
     names = _status_filter(status)
     types = _type_filter(type_ids)

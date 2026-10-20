@@ -20,6 +20,8 @@ from tools import (  # noqa: F401
     contacts,
     contracts,
     conversations,
+    deletions,
+    documents,
     forms,
     invoices,
     meta,

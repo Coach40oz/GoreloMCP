@@ -950,7 +950,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--apply", action="store_true", help="remove it (the service must be stopped)")
 
     expire = commands.add_parser(
-        "expire-access", parents=[common], help="mark the valid access tokens of one client as expired (the refresh test)"
+        "expire-access", parents=[common], help="mark the valid access tokens of one client as expired (to check that the client refreshes by itself)"
     )
     expire.add_argument("--client", required=True, type=_id8_argument, metavar="ID8", help="the first 8 characters of the client id")
     expire.add_argument("--apply", action="store_true", required=True, help="do it (the service must be stopped)")

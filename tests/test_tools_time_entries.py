@@ -63,7 +63,7 @@ def reference(n=1, number="2", title="Printer offline"):
 
 
 def entry(entry_id=501, **overrides):
-    """A time entry as the live API returns it (PascalCase), verified by the probe of 2026-10-03: the published
+    """A time entry as the live API returns it (PascalCase): the published
     TimeEntryModel, with the user, ticket and task as objects (User {Id, Name}, Ticket and Task {Id, Number, Title}) and
     Task null for a ticket entry. There is no flat UserId, TicketId or TaskId (see flat_entry)."""
     record = {
@@ -568,7 +568,7 @@ async def test_get_time_entry_for_a_task_entry_passes_the_task_through(server, m
 
 
 def test_the_fixture_is_the_published_time_entry_model(spec_index):
-    # the probe of 2026-10-03: a record has exactly the keys of the published TimeEntryModel, and the user, ticket and
+    # a record has exactly the keys of the published TimeEntryModel, and the user, ticket and
     # task are the objects the spec names: User a CodeModel {Id, Name}, Ticket and Task NumberedReferenceModels
     # {Id, Number, Title}. (Task is null for a ticket entry: the spec says one of Ticket and Task is set, the other null.)
     model = spec_index.schema("TimeEntryModel")["fields"]

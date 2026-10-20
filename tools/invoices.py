@@ -67,6 +67,7 @@ from pydantic import BaseModel, ConfigDict, Field, Strict
 
 from gorelo_client import GoreloAPIError, Page
 from tools._common import (
+    MAX_ID,
     StrictBool,
     StrictId,
     build_body,
@@ -95,8 +96,9 @@ DELETE_OP = "DELETE /v1/invoices/{invoiceId}"
 
 PDF_MAX_BYTES = 5 * 1024 * 1024
 
-# Invoice status ids (the contract: match on Id, never on Name).
-INVOICE_STATUSES = {1: "Draft", 3: "Paid", 4: "Void", 5: "Approved"}
+# Invoice status ids (the contract: match on Id, never on Name). 2 Submitted was added by the 2026-10-17 spec.
+INVOICE_STATUSES = {1: "Draft", 2: "Submitted", 3: "Paid", 4: "Void", 5: "Approved"}
+INVOICE_STATUS_SCALE = ", ".join(f"{status} {label}" for status, label in INVOICE_STATUSES.items())
 # The only statuses Gorelo removes: a Draft is deleted (no longer listed), an Approved invoice is voided (still listed).
 REMOVABLE_STATUS_IDS = {"Draft": 1, "Approved": 5}
 # What DELETE /v1/invoices/{invoiceId} answers (DeleteInvoiceResult, contract e15cb5a18ec2): {Id, StatusId}, the status the
@@ -245,16 +247,22 @@ def _calendar_date(param: str, value: Any) -> str | None:
     raise ValueError(f"{param}: expected a calendar date as YYYY-MM-DD, for example 2026-09-01 (no time, no offset)")
 
 
+def _invoice_status(param: str, value: Any) -> int:
+    """One invoice status of the list filter (1 Draft ... 5 Approved); 0 and the negative numbers are answered with the scale."""
+    if isinstance(value, int) and not isinstance(value, bool) and -MAX_ID <= value < 1:
+        status = int(value)
+    else:
+        status = positive_id(param, value)
+    if status not in INVOICE_STATUSES:
+        raise ValueError(f"{param}: expected {INVOICE_STATUS_SCALE}, got {status}")
+    return status
+
+
 def _status_ids(param: str, values: Any) -> list[int] | None:
-    """Status ids must be on the published scale: an unknown id would come back as a silent empty page."""
-    ids = positive_ids(param, values)
-    if ids is None:
-        return None
-    unknown = [value for value in ids if value not in INVOICE_STATUSES]
-    if unknown:
-        valid = ", ".join(f"{key} {name}" for key, name in INVOICE_STATUSES.items())
-        raise ValueError(f"{param}: unknown status id(s) {unknown}; valid ids: {valid}")
-    return ids
+    """The status_ids filter: every item on the published scale (Gorelo answers 400 for any other id), a bad one named by its index."""
+    if isinstance(values, (list, tuple)) and values:
+        return [_invoice_status(f"{param}[{index}]", item) for index, item in enumerate(values)]
+    return positive_ids(param, values)
 
 
 def _to_query(filters: dict[str, Any]) -> dict[str, Any]:
@@ -292,7 +300,8 @@ async def list_invoices(
     ctx: Context,
     client_ids: Annotated[list[StrictId] | None, Field(description="From list_clients.")] = None,
     status_ids: Annotated[
-        list[StrictId] | None, Field(description="1 Draft, 3 Paid, 4 Void, 5 Approved.")
+        list[StrictId] | None,
+        Field(description="1 Draft, 2 Submitted, 3 Paid, 4 Void, 5 Approved. Omitted: every status; deleted invoices are never listed."),
     ] = None,
     contract_ids: Annotated[list[StrictId] | None, Field(description="From list_contracts.")] = None,
     number: Annotated[StrictId | None, Field(description="Bare number: 1042 for INV-1042.")] = None,
@@ -318,7 +327,7 @@ async def list_invoices(
 ) -> dict:
     """List invoices, one page at a time; filter by number, client, status or dates.
     Rows carry Id (the GUID get_invoice and export_invoice_pdf need), Number, Status and amounts; only get_invoice
-    returns the lines. A Void invoice can still show AmountDue: read Status first.
+    returns the lines. Without status_ids every status is listed; deleted invoices never are. A Void invoice can still show AmountDue: read Status first.
     """
     filters = {
         "client_ids": positive_ids("client_ids", client_ids),
@@ -801,7 +810,7 @@ async def delete_invoice(
     must be the only match and have status expected_status, else nothing changes. Draft: deleted (no longer
     listed). Approved: voided (status Void, still listed). The result's StatusId is Gorelo's answer: 6 Deleted
     or 4 Void; previous_status is read from it too (6 was a Draft, 4 was Approved). Void is refused here (Gorelo
-    itself treats deleting a void invoice as success); Paid and others are refused by Gorelo with 409.
+    itself treats deleting a void invoice as success); Paid, Submitted and others are refused by Gorelo with 409.
     A void happens in Gorelo ONLY: the copy already pushed to the accounting system stays open (observed with Xero), so say so when you ask the user, who must void it there too. A Void invoice can still show
     AmountDue: read Status first.
     Ask the user first; needs confirm=true.

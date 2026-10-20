@@ -15,7 +15,7 @@ systemctl --failed --no-pager
 
 You should see `active` twice, then `401` twice (healthy: the endpoint wants a sign-in), then `0 loaded units listed`. A `000` on the first `curl` means the service is down. A wrong answer on the second only means the tunnel is down.
 
-Then, in a new Claude conversation, ask "Run health_check". `ok: true` means Claude reaches your server, and your server reaches Gorelo.
+Then, in a new Claude conversation, ask "Run health_check". `ok: true` means Claude reaches your server, and your server reaches Gorelo. Look at one more thing in the answer: `gated_tools` lists the gated tools that exist.
 
 ## Read the logs
 
@@ -27,13 +27,16 @@ journalctl -u gorelo-changelog-watch.service --since today    # the API watcher
 
 What normal looks like:
 
-- At start: `oauth state loaded format=v2 (format=none before the first sign-in) clients=N access=N refresh=N pruned=N` and `gorelo-mcp ready: toolsets=... destructive=False tools=N`. If `tools=N` is not what [tool-catalog.md](tool-catalog.md) lists for your toolsets, the environment is not what you think.
-- For every Gorelo request, one line: the tool, the operation, the status and the time taken. Only the names of fields are logged. Values, your key and the password are never logged.
-- Sign-in lines such as `authorize outcome=approved`, `token outcome=issued` and `token outcome=refreshed`. The access token of a first sign-in lasts 30 days; after its first refresh, a session in use refreshes about once an hour. `access outcome=expired` followed by `refreshed` is normal.
+- At start: `gorelo-mcp settings: api_host=<host> extra_redirect_domains=<list or none>` (host names only: the Gorelo host this server calls, and the extra sign-in domains), `gorelo-mcp gated tools: none` (or the sorted names of the gated tools that exist), `oauth state loaded format=v2 (format=none before the first sign-in) clients=N access=N refresh=N pruned=N` and `gorelo-mcp ready: toolsets=... destructive=False tools=N`. If `tools=N` is not what [tool-catalog.md](tool-catalog.md) lists for your toolsets, the environment is not what you think, and if the start line's `api_host` is not the host of your region, fix `GORELO_BASE_URL`.
+- For every Gorelo request, one line: the tool, the operation (its method and path template), the path with the record ids in it, the status and the time taken, the attempts, and the names of the query parameters and body fields. That line holds no field or query value.
+- A failed tool call is logged at ERROR by FastMCP with its traceback and the error text the model also gets, except where the log filter below changes the record. A call to a name the server does not have is answered without a log line. The error text can quote a value the call was given (for example a ticket reference, a status name, a date or a region code), list the valid choices (for example the ticket statuses) and pass on Gorelo's own message. The log filter changes two kinds of error: a validation error is logged as a summary of its parameter names and error types, without the argument values and the traceback; an error that carries a summary (the custom field alarm of `update_client`, the attachment refusal of `update_document`) is logged as that summary alone. Other errors are logged as they are, except that the filter redacts any `input_value=` text from a message.
+- Sign-in lines such as `authorize outcome=approved`, `token outcome=issued` and `token outcome=refreshed`. In these lines a client id is cut to its first 8 characters. The `authorize` and `register` lines carry the visitor's IP address (`ip=`), and the lines for a valid request also name the client as it registered (`name=`). A request to `/authorize`, `/token`, `/register` or `/revoke` whose body is refused is logged as `body outcome=... path=... ip=...`, with the visitor's address. A registration refused for a redirect address and a blocked redirect are logged with the host of that address (`redirect=`). None of them carries a password or a token. The access token of a first sign-in lasts 30 days; after its first refresh, a session in use refreshes about once an hour. `access outcome=expired` followed by `refreshed` is normal.
+- One access line from the web server for each HTTP request: the visitor's address, the method, the path and the query string in full, the HTTP version and the status. The query of a sign-in page carries the client id in full and the OAuth parameters; the password is typed into the form body, which is never logged.
+- The API key and the password are never logged: no log line formats either of them, and the key is sent only in a request header.
 
 What deserves attention:
 
-- `wrong_password`, `rate_limited` or `register outcome=refused`: someone is guessing the password or probing registration. Look at the `ip=` value. If it is not you, use a longer password (below), and consider signing everyone out.
+- `wrong_password`, `rate_limited` or `register outcome=refused`: someone is guessing the password or probing registration. Look at the `ip=` value. If it is not you, use a longer password (below), and consider signing everyone out. One exception: `register outcome=refused reason=redirect_not_allowed redirect=<host>` can also be a client you meant to allow (ChatGPT or Microsoft Copilot Studio, for example). The host after `redirect=` is what `MCP_EXTRA_REDIRECT_DOMAINS` needs; see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#copilot-studio-cannot-connect).
 - `refusing to start`: the service is not running. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#service-will-not-start).
 - A warning that the password is shorter than 16 characters: change it.
 - `refresh_reuse_detected` (warning): an old refresh token was used again after its grace period. If you did not do anything unusual, sign everyone out and sign in again.
@@ -50,7 +53,7 @@ Logs older than the journal's size limit disappear on their own.
    systemctl restart gorelo-mcp.service
    ```
 
-3. Check the logs for the `ready:` line, then in a new Claude conversation run `health_check`.
+3. Check the logs for the `ready:` line, then in a new Claude conversation run `health_check`: `ok: true` means Gorelo accepted the new key.
 4. If you use the watcher, put the new key in its file too (it reads it on its next run):
 
    ```bash
@@ -65,11 +68,23 @@ Logs older than the journal's size limit disappear on their own.
 2. Edit `MCP_AUTH_PASSWORD` in `/opt/gorelo-mcp/app/.env`, then `systemctl restart gorelo-mcp.service`.
 3. Sessions that already exist keep working. The password is only asked when someone connects for the first time. To end them, sign everyone out (next section).
 
+## Change which tools exist
+
+Three lines of `/opt/gorelo-mcp/app/.env` decide what Claude can do, and each takes effect at the next start of the service:
+
+- `GORELO_TOOLSETS` chooses the toolsets (blank is the default set; `documents`, `projects` and `forms` are off until you add them, and each needs its scope on the Gorelo key).
+- `GORELO_ENABLE_DESTRUCTIVE` chooses the gated tools: blank or `0` is none, `1` is all of them, and a comma list of tool names is just those (`share_document` and `remove_document_related_item` need `documents` in `GORELO_TOOLSETS`).
+- `MCP_EXTRA_REDIRECT_DOMAINS` chooses which other AI clients can finish a sign-in (see INSTALL step 6.1 and 6.2).
+
+Edit the file, run `systemctl restart gorelo-mcp.service`, and read the start lines: `gorelo-mcp settings:`, `gorelo-mcp gated tools:` and `gorelo-mcp ready:`. A value the server cannot honor stops the start with an error that names it (`refusing to start`), and systemd then tries again every 10 seconds until you fix the file. Open a NEW conversation in Claude to see the new tool list.
+
 ## Sign out all Claude sessions
+
+This is also how to cut off another client (ChatGPT, Copilot Studio) after you remove its domain from `MCP_EXTRA_REDIRECT_DOMAINS`, because removing the domain stops new sign-ins only.
 
 Do this if you think someone else has the password or a token, or after you changed the password and want the old sessions gone. Every Claude connection must then sign in again.
 
-The script `scripts/oauth_state.py` edits the sign-in data safely. It prints only counts and short identifiers, never a token. To change anything it needs the lock that the running service holds, so it refuses (exit status 3, nothing changed) while the service runs. That is why you stop the service first.
+The script `scripts/oauth_state.py` edits the sign-in data safely. It prints metadata only, never a token, a secret or a full client id: counts and dates (UTC), the type of a token (`pat_` or `prt_`, `other` for anything else), the first 8 characters of a client id or of a token family (the refresh tokens that one sign-in produced), the names clients registered with (cut to 40 characters) and the hosts of their redirect addresses, and, in `check`, the file's mode and owner, the path of the state directory and the state lock's status. To change anything it needs the lock that the running service holds, so it refuses (exit status 3, nothing changed) while the service runs. That is why you stop the service first.
 
 ```bash
 cd /opt/gorelo-mcp/app
@@ -101,7 +116,7 @@ Everything except these four things comes back from git. Back these up:
 |---|---|---|
 | Settings and secrets | `/opt/gorelo-mcp/app/.env` | Create a new Gorelo key and a new password. |
 | Sign-in data | `/opt/gorelo-mcp/app/.oauth-state/` | Every Claude connection must sign in again. |
-| Watcher settings | `/opt/gorelo-mcp/app/site.local.toml` (owner `root:gorelo-mcp`, mode 0640; the watcher needs only `[watcher] alert_client_id`) and `/etc/gorelo-mcp/watcher.env` | Create them again from the examples. |
+| Watcher settings | `/opt/gorelo-mcp/app/site.local.toml` (owner `root:gorelo-mcp`, mode 0640; the watcher needs only `[watcher] alert_client_id`) and `/etc/gorelo-mcp/watcher.env` (the key, and `GORELO_BASE_URL` for an account hosted in Australia) | Create them again from the examples. |
 | Tunnel token | `/etc/cloudflared/tunnel.env` | Get a new token in the Cloudflare dashboard. |
 
 A simple local backup (copy the archive to another machine afterwards, because a backup on the same disk does not survive the disk):

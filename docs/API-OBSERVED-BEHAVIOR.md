@@ -8,10 +8,10 @@ production does.
 
 How to read it. Each entry gives the date it was seen (UTC dates; the hour is mostly not
 recorded), what the published spec said at that time, what production did, and what this server
-does about it. Everything here was observed with live calls against a test client, never against
-real client records. Production can change at any time, so treat this as a log, not a promise.
-The reasoning behind the design is in `docs/why/`, and the tools that result are in
-`docs/tool-catalog.md`.
+does about it. Everything here was observed with live calls, except entries 20 and 28, which rest on
+the published text: every write against a test client, and the reads of 2026-10-17 as read-only
+requests. Production can change at any time, so treat this as a log, not a promise. The reasoning
+behind the design is in `docs/why/`, and the tools that result are in `docs/tool-catalog.md`.
 
 A caution that applies to all of it: an unchanged spec hash says nothing about live behavior.
 Several entries below were invisible to any spec comparison. Only live calls can find them, so
@@ -220,6 +220,8 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
   as published (clearing the contact and the serial number was not tried live). A PATCH that names another client as `ClientId` is a 400 and
   moves nothing, so the client of a custom asset cannot be changed. There is no read of a single
   custom asset. A custom asset created through the API cannot be deleted through this server.
+  Superseded in part on 2026-10-17: the new contract adds a read of one custom asset and says that
+  a PATCH with a new `ClientId` moves the asset (entry 26).
 - This server: `create_custom_asset` and `update_custom_asset` read the result back through the
   list. `update_custom_asset` needs the asset's current `client_id` and clears fields only through
   `clear_fields`. Delete stays forbidden.
@@ -235,3 +237,68 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
 - A deleted catalog item reads as a 404 afterwards (2026-10-04).
 - A key without the `Project` and `Forms` scopes gets HTTP 403 code
   080203 (2026-10-01); this is why those toolsets are off by default (`docs/why/10-toolsets.txt`).
+
+## 23. The 2026-10-17 contract: documents, deletions and one custom asset (2026-10-17)
+
+- Spec said: 14 operations were added: twelve for documents (list, one document, create, update,
+  duplicate, PDF, versions, related items), `GET /v1/deletions` and
+  `GET /v1/assets/custom/{customAssetId}`. Two comment bodies lost `BodyText`, a custom field
+  can say `IsHidden`, and a PATCH of a custom asset with a new `ClientId` moves the asset.
+- Production did: the document reads answered with the published shapes: the list, one document (the fields of the
+  published model), its versions and its related items. No document write, move, archive, restore, version restore,
+  attachment or sharing call has been tried. So it is not known whether a url read from a document
+  is accepted in `Attachments` of an update, whether a changed title or body keeps the attachments,
+  how far an archive reaches below the document and what a restore does to the documents that were
+  archived with it, whether the public link stays the same after it is turned off and on again,
+  whether a move resets the sharing flags, whether the PDF export is recorded as an event, and what
+  linking a structured document or a password does.
+- This server: the `documents` toolset (off by default) follows the published text and checks
+  every answer; its texts and `docs/OVERVIEW.md` say what is not proven.
+
+## 24. Status filters: another id is a 400, and the defaults leave some records out (2026-10-17)
+
+- Spec said: the status parameters of the lists name their scales and say "any other id is a
+  400", and several lists leave Archived or Disabled records out when no status is given.
+- Production did: each claim that was tried held. An id outside a status scale is a 400 with code 070101 and a
+  message such as "Status id 2 is invalid." for every scale that was tried; items and tasks rest on the spec text.
+  The list defaults follow the published text. An alert `TypeIds` of 21 answered 400 with the literal message
+  "Type id {0} is invalid." (an unfilled placeholder in Gorelo's own message). The project status names are the
+  spec's: 1 Not started, 2 In progress, 3 On hold, 4 Completed, 5 Closed.
+- This server: it checks the same scales locally before any request, with a message that names the
+  parameter and the scale, and its texts say what an omitted filter returns.
+
+## 25. The deletions feed (2026-10-17)
+
+- Spec said: `GET /v1/deletions` needs `TypeIds` (1 to 9, up to 10 values) and lists each record once
+  with its latest deletion.
+- Production did: the deletions feed answered with the published shapes; `TypeIds` 10 answered 400
+  "Type id 10 is invalid."; no `TypeIds` answered 400 "TypeIds is required. Accepted values: 1
+  Client, 2 Contact, 3 Contract, 4 Ticket, 5 Item, 6 Invoice, 7 Custom asset, 8 Project, 9 Task.".
+- This server: `list_deletions` requires `type_ids` and passes a 403 for a type the key cannot read
+  on, naming the parameter.
+
+## 26. One custom asset, and moving it (2026-10-17)
+
+- Spec said: `GET /v1/assets/custom/{customAssetId}` returns one custom asset, and a PATCH with a
+  new `ClientId` moves it (its location and contact must belong to the new client).
+- Production did: the read of an id that does not exist answers 404, code 070202, "The requested
+  resource was not found.". The move itself has not been tried.
+- This server: `get_custom_asset` reads one asset; `create_custom_asset` and `update_custom_asset`
+  read the asset back with it; `update_custom_asset` can move an asset and refuses a move that does
+  not give a location of the new client.
+
+## 27. An API key of the wrong form is answered by the gateway (2026-10-17)
+
+- Spec said: a 401 comes back for a missing or wrong key, in the usual envelope.
+- Production did: a value that is not an API key at all gets a 401 whose body is the gateway's own
+  JSON, `{"error": "Invalid or missing API key format", "timestamp": ...}`, not a Gorelo envelope.
+- This server: `health_check` reports any 401 as `ok: false` with status 401 and a hint that names
+  the Gorelo host it called and `GORELO_BASE_URL`.
+
+## 28. Custom fields can be hidden (2026-10-17)
+
+- Spec said: a custom field entry has `IsHidden`; when it is true the `Value` is always null,
+  whether or not a value is saved, `IsSet` is still reported, and the value can still be written.
+- Production did: not probed beyond the published shape; a hidden field has not been tested live.
+- This server: `update_client` confirms a saved hidden field by `IsSet` alone and says that the
+  value was not read back.

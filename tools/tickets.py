@@ -1083,7 +1083,12 @@ async def update_ticket(
     ] = None,
     closed_on: Annotated[
         str | None,
-        Field(description="Close date (not future); needs a closed status. Also sets updated_on unless given"),
+        Field(
+            description=(
+                "Close date (not future); needs a closed status. Also sets updated_on unless given. "
+                "History: no status email to the contact, no automation."
+            )
+        ),
     ] = None,
     updated_on: Annotated[
         str | None, Field(description="Last-activity time instead of now; stamps this call only")
@@ -1114,8 +1119,8 @@ async def update_ticket(
     Warnings: changing client_id resets the contact, CCs and billing override and unlinks assets and uptime checks (send
     new ones in the same call). closed_on without updated_on also sets UpdatedOn, and needs a closed status.
     A technician cannot be lead (or assisting) and watcher at once.
-    Side effects: Gorelo's normal notifications and timeline entries fire for each changed field; a status change may
-    email the contact and fire automation under the tenant's rules.
+    Side effects: notifications and timeline entries fire for each changed field; a status change may
+    email the contact and fire automation under the tenant's rules (not for a close with closed_on).
     The record is read back; if that fails the result is {Id, warning}: the update WAS applied, do not repeat it.
     """
     try:

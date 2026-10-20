@@ -9,7 +9,8 @@ Two paths, both behind ONE write-mode LiveGuard with cleanup=True (and allow_app
   build_server(live_settings(), event_hooks={"request": [guard, pacer]}): delete_ticket_comment,
   delete_time_entry (repeated while Outcome is "Reopened", at most 3 calls), delete_item, delete_uptime_check,
   delete_project_task, delete_project_comment and delete_invoice;
-* raw soft deletes through a minimal httpx.AsyncClient (X-API-Key, https://api.usw.gorelo.io/v1) for the
+* raw soft deletes through a minimal httpx.AsyncClient
+  (X-API-Key, the base URL of the settings: https://api.usw.gorelo.io/v1 unless GORELO_BASE_URL says otherwise) for the
   records that deliberately have no tool: tickets, contacts, the temporary client and projects (and, as the
   backstop for an invoice that has no Number or that delete_invoice cannot find by it, the invoice itself).
 
@@ -59,12 +60,22 @@ UNDELETABLE: it is not counted as cleaned, it is not a leftover, the result line
 over" while one exists, and it never alone turns the exit status to 1 (an attachment whose parent could not be
 deleted is a plain leftover).
 
-A custom asset (kind custom_asset, made by write_matrix --with-custom-assets) cannot be deleted through the API either
-(there is no delete the harness may send, and the API has no GET of one asset to confirm anything): the cleanup sends
-nothing for it and reports it as KNOWN UNDELETABLE, like the file and the voided invoice, with the outcome
-"stays on the test client until removed in the Gorelo app (a custom asset cannot be deleted through the API)". When the
+A custom asset (kind custom_asset, made by write_matrix --with-custom-assets) is never deleted: this harness never deletes a custom
+asset (the spec's soft DELETE is not used). The cleanup sends nothing for it and reports it as KNOWN UNDELETABLE, like the file and
+the voided invoice, with the outcome "stays on the test client until removed in the Gorelo app; this harness never deletes a custom
+asset (the spec's soft DELETE is not used)". When the
 negative check of the matrix moved the asset to the second client, or could not tell, the manifest details hold that client_id
 and the outcome names where the asset is (custom_asset_residue).
+
+A document (kind document, made by write_matrix --with-documents) cannot be deleted through the API either: there is no DELETE for it.
+The area archives every document it made (StatusId 2) and records the outcome itself (DOCUMENT_RESIDUE_TAIL), so for such a record the
+cleanup sends nothing. For a document a STOPPED run left active the cleanup reads it first (get_document) and archives it with the
+archive_document tool (the cleanup guard allows exactly the body {"StatusId": 2} for a run-created document and nothing else),
+then records the same outcome: a document is a KNOWN RESIDUE from the moment it exists, reported apart as known undeletable
+(neither cleaned nor a leftover, never alone a failure), and it stays in Gorelo, archived, until somebody removes it in the Gorelo
+app. A document Gorelo no longer finds (HTTP 404) is cleaned. A document that is already archived is only recorded. A file uploaded
+to a document (an attachment with details document_id) is known undeletable once its document is archived, like a file of a
+deleted ticket. It never restores, moves or shares anything.
 
 A custom property (kind custom_property, made by write_matrix --with-custom-properties) is the one thing a cleanup writes to
 the test client itself: the custom field value that the run set and may not have cleared yet. It is a record only so that this
@@ -86,16 +97,20 @@ When the field is not set any more, or the client no longer lists it, there is n
 somebody changed it since and it is left alone. Whatever is not cleared is a LEFTOVER (not a known residue) that names the field
 Id and the client and says how to clear it by hand: the exit status is 1. A second cleanup of a cleaned one sends nothing. The
 guard of the cleanup gets allow_custom_properties only when the manifest holds a custom_property record that is not cleaned yet.
-The text of a tool error that goes into an outcome has its quoted strings cut out ("..."): the tool may quote the name or the
-value of another custom field there, and an outcome holds ids and kinds only.
+The text of an update_client error that goes into an outcome has its quoted strings cut out ("..."): the tool may quote the name
+or the value of another custom field there, and no such name or value reaches an outcome.
 
 With --leftovers the leftovers listed in site.local.toml [leftovers] are handled FIRST: each is read (GET) and deleted only if its
 name matches (the optional name rules of [leftovers]: client_name_contains for clients, contact_first_name and
-contact_last_name_prefix for the contact; a rule left out does not apply); otherwise it is reported and skipped. Names are never printed.
+contact_last_name_prefix for the contact; a rule left out does not apply); otherwise it is reported and skipped. Their names are never printed.
+
+The manifest names the API host its run called (api_host). When the settings name another host, the cleanup stops before its
+first request (SiteConfigError: "cannot start", exit status 2) and says which host to set back.
 
 Every outcome is written to the manifest at once, so a cleanup that stops half way can simply be run again.
-A record counts as cleaned when the delete succeeded or Gorelo says it is gone (HTTP 404). The summary lists
-ids, labels and Gorelo's messages only, never customer data and never the API key. The exit status is 0 when
+A record counts as cleaned when the delete succeeded or Gorelo says it is gone (HTTP 404). The summary holds the API host,
+the run id, counts, kinds, ids, labels, invoice numbers and status names, and its outcomes, which are the script's own
+words, the run's own text and Gorelo's messages, which can quote a name or a value: never the API key. The exit status is 0 when
 nothing is left over (no leftover record, no create announced without an id, no listed leftover that failed to
 delete; one skipped because its name does not match is fine, and so is a known undeletable record: an uploaded file
 or a voided invoice, or a custom asset), 1 otherwise, 2 for a usage or setup error.
@@ -116,7 +131,6 @@ from typing import Any
 import httpx
 from fastmcp import Client
 
-from gorelo_client import GORELO_BASE_URL
 from scripts.live._env import EnvError, Pacer, live_settings, scrub, without_quotes
 from scripts.live.guard import GuardViolation, LiveGuard
 from scripts.live.manifest import Intent, Manifest, Record
@@ -134,9 +148,13 @@ COVERED_KINDS = frozenset({"comment", "project_comment", "task", "section", "sid
 # An uploaded file has no delete in the API: it is reported (not cleaned) once its parent is deleted, and apart from
 # the leftovers, because nobody can do anything about it. The outcome text ends with UNDELETABLE_REASON.
 UNDELETABLE_KINDS = frozenset({"attachment"})
-# A custom asset cannot be deleted through the API (DELETE /v1/assets/custom/{id} is forbidden): a known residue from the
-# moment it is created. Every outcome of one ends like this; write_matrix.py prints its own line from the same text.
-CUSTOM_ASSET_RESIDUE_TAIL = "until removed in the Gorelo app (a custom asset cannot be deleted through the API)"
+# A custom asset is never deleted: this harness never deletes a custom asset (the spec's soft DELETE is not used; DELETE
+# /v1/assets/custom/{id} is forbidden). It is a known residue from the moment it is created. Every outcome of one ends like this;
+# write_matrix.py prints its own line from the same text.
+CUSTOM_ASSET_RESIDUE_TAIL = (
+    "until removed in the Gorelo app; this harness never deletes a custom asset "
+    "(the spec's soft DELETE is not used)"
+)
 CUSTOM_ASSET_RESIDUE = "stays on the test client " + CUSTOM_ASSET_RESIDUE_TAIL
 # The client_id recorded in the manifest details of a custom asset when the negative check of the matrix could not tell
 # whether Gorelo moved the asset to the second client (a 5xx, a timeout or an unconfirmed write).
@@ -153,6 +171,17 @@ def custom_asset_residue(client_id: Any = None) -> str:
         return f"may be on the test client or on the second client ({client_id}), and stays there {CUSTOM_ASSET_RESIDUE_TAIL}"
     return f"stays on client {client_id}, not on the test client {CUSTOM_ASSET_RESIDUE_TAIL}"
 UNDELETABLE_REASON = "the file itself cannot be deleted through the API"
+# A document cannot be deleted through the API (the spec has no DELETE for it): a known residue from the moment it exists. Every outcome
+# of one ends like this, after "archived by ..." (the run archives it, a cleanup archives one a stopped run left); write_matrix.py
+# builds its own outcome from this suffix.
+DOCUMENT_RESIDUE_TAIL = "until removed in the Gorelo app (a document cannot be deleted through the API)"
+DOCUMENT_ARCHIVED = 2  # Document StatusId 2 Archived (1 Active)
+
+
+def document_residue(how: str) -> str:
+    """The outcome of an archived document: `how` ("archived by the write matrix (archive_document)"), then that it stays in Gorelo.
+    It ends with DOCUMENT_RESIDUE_TAIL, which is_known_undeletable reads."""
+    return f"{how}, stays in Gorelo {DOCUMENT_RESIDUE_TAIL}"
 CUSTOM_PROPERTY_CLEARED = "cleared by the cleanup (update_client clear_custom_property_ids)"
 # The sentence of the leftover that a cleanup leaves, sending nothing, while another custom field of the test client is set: a
 # clear that Gorelo applied as a replace would wipe that value. The matrix summary tells this leftover from the others by it.
@@ -165,7 +194,7 @@ CHANGED_FIELDS = "changed_fields"
 # the text of a tool error). tests/test_live_custom_properties.py drives the real tool, so a rewording is caught there.
 COLLATERAL_ALARM = "custom fields that were not in this call"
 SHOWN_IDS = 8  # custom field ids named in an outcome; the details keep all of them
-_PARENT_KEYS = (("ticket_id", "ticket"), ("task_id", "task"), ("project_id", "project"))
+_PARENT_KEYS = (("ticket_id", "ticket"), ("task_id", "task"), ("project_id", "project"), ("document_id", "document"))
 _RAW_PATHS = {"ticket": "/tickets/{}", "contact": "/contacts/{}", "client": "/clients/{}", "project": "/projects/{}"}
 # Not in _RAW_PATHS: an invoice is read first. A Draft is deleted; an Approved invoice recorded as 5 is voided (the raw
 # DELETE voids it too) only with --void-approved; any other status is never deleted or voided.
@@ -211,12 +240,15 @@ class _Outcome:
 
 def is_known_undeletable(record: Record) -> bool:
     """Is this record a known residue that nobody can remove: an uploaded file that the cleanup found its parent deleted
-    for (see _note_undeletable), or an invoice that was voided and stays listed as Void (see _note_void)?"""
+    (or, for a document, archived) for (see _note_undeletable), a custom asset, a document (archived, see _clean_document), or an
+    invoice that was voided and stays listed as Void (see _note_void)?"""
     outcome = record.outcome or ""
     if record.kind in UNDELETABLE_KINDS:
         return outcome.endswith(UNDELETABLE_REASON)
     if record.kind == "custom_asset":
         return outcome.endswith(CUSTOM_ASSET_RESIDUE_TAIL)
+    if record.kind == "document":
+        return outcome.endswith(DOCUMENT_RESIDUE_TAIL)
     return record.kind == "invoice" and outcome.endswith(VOID_RESIDUE)
 
 
@@ -389,12 +421,15 @@ class _Cleaner:
         if kind == "invoice":
             await self._clean_invoice(record)
             return
-        if kind == "custom_asset":  # nothing is sent: it cannot be removed, so it is a known residue
+        if kind == "custom_asset":  # nothing is sent: this harness never deletes a custom asset, so it is a known residue
             if not is_known_undeletable(record):
                 self.manifest.cleanup_failed(kind, ident, custom_asset_residue(record.details.get("client_id")))
             return
         if kind == "custom_property":
             await self._clean_custom_property(record)
+            return
+        if kind == "document":
+            await self._clean_document(record)
             return
         if kind in _RAW_PATHS:
             outcome = await self._raw("DELETE", _RAW_PATHS[kind].format(ident))
@@ -413,6 +448,46 @@ class _Cleaner:
         else:
             self.manifest.cleanup_failed(kind, ident, self._safe(outcome.text))
 
+    # -- documents ---------------------------------------------------------------
+
+    def _note_document(self, ident: Any, how: str) -> None:
+        """The document is archived and stays in Gorelo: record it as a known residue, not as cleaned (a document cannot be removed)."""
+        self.manifest.cleanup_failed("document", ident, document_residue(how))
+
+    async def _clean_document(self, record: Record) -> None:
+        """Archive a document a stopped run left active, and record it as a known residue (see the module docstring).
+
+        Nothing is sent for a record that already carries the residue outcome (the area archived it, or an earlier cleanup did). Otherwise
+        the document is read first (get_document): a 404 means it is gone; Status.Id 2 is only recorded; Status.Id 1 is archived with
+        the archive_document tool (the guard of a cleanup allows nothing else for a document) and the tool's own answer check has
+        to show Status 2; any other answer is a leftover that says what was seen. The outcome never holds a title or a body."""
+        ident = record.id
+        if is_known_undeletable(record):
+            return
+        read = await self._tool("get_document", {"document_id": ident})
+        if read.gone:
+            self.manifest.cleaned("document", ident, "already gone (HTTP 404)")
+            return
+        status = read.data.get("Status") if read.ok and isinstance(read.data, dict) else None
+        raw_id = status.get("Id") if isinstance(status, dict) else None
+        status_id = raw_id if isinstance(raw_id, int) and not isinstance(raw_id, bool) else None
+        if status_id is None:
+            why = read.text if not read.ok else "the record has no readable Status"
+            self.manifest.cleanup_failed(
+                "document", ident, self._safe(f"left over: document {ident} could not be read first ({why}), so it was not archived; it may still be Active")
+            )
+            return
+        if status_id == DOCUMENT_ARCHIVED:
+            self._note_document(ident, "already archived")
+            return
+        archived = await self._tool("archive_document", {"document_id": ident})
+        if not archived.ok:
+            self.manifest.cleanup_failed(
+                "document", ident, self._safe(f"left over: document {ident} is still Active, archive_document did not confirm: {archived.text}")
+            )
+            return
+        self._note_document(ident, "archived by the cleanup (archive_document)")
+
     # -- custom properties -------------------------------------------------------
 
     async def _clean_custom_property(self, record: Record) -> None:
@@ -426,7 +501,8 @@ class _Cleaner:
         client (cleanup_failed), says what to do and puts the cause last (the outcome is cut at 500 characters); a value
         somebody changed since is never touched. Other fields that read differently after the clear are a leftover whose outcome
         STARTS with their ids; the ids are kept in the details (CHANGED_FIELDS) and keep the record a leftover, whatever a re-run
-        finds, until somebody deletes that entry. Texts hold ids and the run's own text, never another value."""
+        finds, until somebody deletes that entry. Texts hold ids, the run's own text and Gorelo's messages, never another
+        custom field's value."""
         ident, details = record.id, record.details
         client, text = details.get("client_id"), details.get("value")
         where = f"custom property {ident} of client {client}"
@@ -782,11 +858,14 @@ class _Cleaner:
             parent = self._cleaned_parent(record)
             if parent is None:
                 continue
-            outcome = f"soft-deleted with its {parent.kind}; {UNDELETABLE_REASON}"
+            how = "archived with" if parent.kind == "document" else "soft-deleted with"
+            outcome = f"{how} its {parent.kind}; {UNDELETABLE_REASON}"
             if record.outcome != outcome:
                 self.manifest.cleanup_failed(record.kind, record.id, outcome)
 
     def _cleaned_parent(self, record: Record) -> Record | None:
+        """The parent record of `record` once it is gone: deleted (cleaned) or, for a document, archived (a known residue, which is as
+        far as a document goes)."""
         for key, kind in _PARENT_KEYS:
             reference = record.details.get(key)
             if not isinstance(reference, str) or not reference:
@@ -795,7 +874,7 @@ class _Cleaner:
                 parent = self.manifest.record(kind, reference)
             except (KeyError, ValueError):
                 continue
-            if parent.cleaned:
+            if parent.cleaned or (parent.kind == "document" and is_known_undeletable(parent)):
                 return parent
         return None
 
@@ -990,7 +1069,8 @@ async def run_cleanup(
                 read as Approved). Without it such an invoice is a leftover for the user; the write matrix never sets it.
                 The void is in Gorelo only: the report names every invoice this call voided (`voided`) and says so for each
                 (VOID_REMINDER), because its copy in the accounting system stays open until the user voids it there.
-    settings:   default live_settings() (reads the API key from the app .env); tests pass their own.
+    settings:   default live_settings() (reads the API key from the app .env); tests pass their own. Its API host must be the
+                manifest's api_host, else SiteConfigError before any request.
     transport:  an httpx transport for BOTH clients (tests pass httpx.MockTransport); default is the network.
     pace:       seconds between two requests (0 in tests).
     echo:       where the summary goes (one call per line). The API key is scrubbed from it.
@@ -1000,9 +1080,14 @@ async def run_cleanup(
     """
     site()  # no site config, no run: refuse before the API key is read or anything is sent
     chosen = settings if settings is not None else live_settings()
+    if chosen.api_host != manifest.api_host:  # the run's records were made in the host it called: the settings must name it too
+        raise SiteConfigError(
+            f"this run was made against {manifest.api_host}; GORELO_BASE_URL now names {chosen.api_host}: "
+            "set it back to the run's host to clean up. Nothing was sent."
+        )
     if verify_clients:
-        await live_guard.verify_site_clients(chosen.api_key, transport=transport)
-    guard_options: dict[str, Any] = {"cleanup": True}
+        await live_guard.verify_site_clients(chosen.api_key, transport=transport, base_url=chosen.base_url)
+    guard_options: dict[str, Any] = {"cleanup": True, "base_url": chosen.base_url}
     if void_approved:  # the one extra thing the guard learns: a run-created invoice recorded as Approved may be voided
         guard_options["allow_approved_invoice"] = True
     if any(record.kind == "custom_property" and not record.cleaned for record in manifest.all_created()):
@@ -1015,7 +1100,7 @@ async def run_cleanup(
         async with (
             Client(server) as tools,
             httpx.AsyncClient(
-                base_url=GORELO_BASE_URL,
+                base_url=chosen.base_url,
                 headers={"X-API-Key": chosen.api_key, "Accept": "application/json"},
                 timeout=30.0,
                 transport=transport,
@@ -1034,7 +1119,7 @@ async def run_cleanup(
         undeletable=[record for record in remaining if is_known_undeletable(record)],
         voided=list(cleaner.voided),
     )
-    for line in report.render().splitlines():
+    for line in [f"api host: {chosen.api_host}", *report.render().splitlines()]:
         echo(scrub(line, chosen.api_key))
     return report
 

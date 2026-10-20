@@ -16,8 +16,8 @@ the list in step with the ops=[...] of the declarations below):
 Things to know:
 
 * Scope. Every Forms operation needs the "Forms" scope on the API key. Without it Gorelo answers 403 with
-  Notification code 080203 and format_gorelo_error turns that into the "missing scope" message. The
-  key used during development did not have the scope, so these tools are tested offline only.
+  Notification code 080203 and format_gorelo_error turns that into the "missing scope" message.
+  The offline tests cover these tools.
 * The toolset is not in DEFAULT_TOOLSETS: the operator enables it with GORELO_TOOLSETS (forms or all).
 * The API has no endpoint for a single form's definition. Each answer in a response carries its own FieldId
   and Label (the question text at submission time), which is the only question text the API offers.
@@ -40,6 +40,7 @@ from pydantic import Field
 
 from gorelo_client import GoreloAPIError
 from tools._common import (
+    MAX_ID,
     StrictId,
     build_body,
     clamp_page_size,
@@ -51,6 +52,7 @@ from tools._common import (
     guid,
     non_empty,
     paged_result,
+    positive_id,
     positive_ids,
 )
 
@@ -58,8 +60,9 @@ LIST_OP = "GET /v1/forms"
 RESPONSES_OP = "GET /v1/forms/{formId}/responses"
 LINK_OP = "POST /v1/forms/{formId}/submission-links"
 
-# Form status ids as the GET /v1/forms StatusIds text gives them: "Active=1, Archived=2".
+# Form status ids as the GET /v1/forms StatusIds text gives them: "1 Active, 2 Archived". Any other id is a 400.
 FORM_STATUSES = {1: "Active", 2: "Archived"}
+FORM_STATUS_SCALE = ", ".join(f"{status} {label}" for status, label in FORM_STATUSES.items())
 
 # snake_case tool parameter -> Gorelo query name (GET /v1/forms). The same map turns a Gorelo PropertyName
 # back into the parameter to fix in error messages.
@@ -87,14 +90,22 @@ _FORM_ID = re.compile(r"[A-Za-z0-9_-]{1,50}")  # the spec's pattern for the form
 # --------------------------------------------------------------------------
 
 
+def _form_status(param: str, value: Any) -> int:
+    """One form status of the list filter (1 Active or 2 Archived); 0 and the negative numbers are answered with the scale."""
+    if isinstance(value, int) and not isinstance(value, bool) and -MAX_ID <= value < 1:
+        status = int(value)
+    else:
+        status = positive_id(param, value)
+    if status not in FORM_STATUSES:
+        raise ValueError(f"{param}: expected {FORM_STATUS_SCALE}, got {status}")
+    return status
+
+
 def _status_ids(param: str, values: Any) -> list[int] | None:
-    """Form status ids: 1 Active and 2 Archived are the only ones Gorelo documents."""
-    ids = positive_ids(param, values)
-    for item in ids or []:
-        if item not in FORM_STATUSES:
-            accepted = ", ".join(f"{status} ({label})" for status, label in FORM_STATUSES.items())
-            raise ValueError(f"{param}: Gorelo form statuses are {accepted}, got {item}")
-    return ids
+    """The status_ids filter: every item on the published scale (Gorelo answers 400 for any other id), a bad one named by its index."""
+    if isinstance(values, (list, tuple)) and values:
+        return [_form_status(f"{param}[{index}]", item) for index, item in enumerate(values)]
+    return positive_ids(param, values)
 
 
 def _sort_order(param: str, value: Any) -> str | None:
@@ -145,7 +156,8 @@ def _link_unconfirmed(err: GoreloAPIError) -> ToolError:
 async def list_forms(
     ctx: Context,
     status_ids: Annotated[
-        list[StrictId] | None, Field(description="1 Active, 2 Archived (deleted in the app). Default: Active only.")
+        list[StrictId] | None,
+        Field(description="1 Active, 2 Archived (deleted in the app, recoverable there). Omitted: Active only; archived forms are left out."),
     ] = None,
     group_ids: Annotated[
         list[StrictId] | None, Field(description="Technician group ids (list_org_groups).")
@@ -169,7 +181,7 @@ async def list_forms(
 ) -> dict:
     """List forms, most recently updated first by default, one page at a time.
 
-    ResponseCount counts submitted responses only, not pending links or drafts. An empty ClientIds means every client.
+    ResponseCount counts submitted responses only, not pending links or drafts. An empty ClientIds means every client. Archived forms are left out unless status_ids includes 2.
     Paging: pass next_cursor back as cursor with the SAME filters until has_more is false.
     """
     filters: dict[str, Any] = {

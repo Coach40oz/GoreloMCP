@@ -1,7 +1,8 @@
 """The live write matrix: the write tools against the test client and the second client, then clean up.
 
     python -m scripts.live.write_matrix [--skip-email] [--only AREA,...] [--leftovers] [--with-items] [--with-invoices]
-                                        [--with-custom-assets] [--with-custom-properties] [--with-approved-invoice]
+                                        [--with-custom-assets] [--with-asset-move] [--with-custom-properties]
+                                        [--with-documents] [--with-approved-invoice]
 
 Run id MCPTEST-<UTC yyyymmddHHMMSS>. Every record the run creates is named with it, announced in the run manifest
 (.live-runs/<run id>.json) BEFORE the create call and recorded with its id right after (the details contract of
@@ -12,6 +13,12 @@ pacer (one request per second); everything the matrix sends is a tool call (ther
 refusal stops the run at once (the remaining areas are "not run"); any other failure only fails its own area.
 scripts.live.cleanup.run_cleanup ALWAYS runs afterwards, in a `finally`, also when an area raised or the run was
 interrupted, and its leftovers decide the exit status together with the areas.
+
+Before anything is created the run reads each configured client (guard.verify_site_clients: the name must be the configured one) and
+refuses to start, with exit status 2 and "cannot start: ..." (guard.ClientNotActive), unless the TEST CLIENT is Active (Status.Id 1;
+since contract a7954b24844b a client is 1 Active, 3 Credit hold or 4 Archived). Nothing is sent and no manifest is made. The operator has to
+make the test client Active again in the Gorelo app: this harness never changes the status of a client itself. The cleanup (also the
+standalone one) has no such rule, so it can always clean up what an earlier run left.
 
 Areas, in this order (--only takes a comma separated list and keeps this order; "forms" is another name for
 "projects"). Names are prefixed with the run id; the test client unless noted.
@@ -51,17 +58,35 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
     custom_assets
                list_custom_asset_hardware_types (the first row is used, no tenant id is hardcoded), the test client's default
                location (list_client_locations), create_custom_asset (name `<run id>-asset`, a serial number, ip 192.0.2.10 from
-               the TEST-NET-1 documentation range and a warranty date), update_custom_asset (new name suffix, ip 192.0.2.11, a
-               description), then clear_fields description, ip_address and warranty_end_date (they must read back null or
-               empty), and a negative check: update_custom_asset with the second client as client_id must be refused by Gorelo
-               with HTTP 400 (an accepted one, or any other answer, fails the area; an accepted or unknown outcome records the second client, or
-               "unknown", as the asset's client in the manifest, and the residue text and the reminder name it). SKIPPED unless --with-custom-assets is given (and also
-               skipped, with the same reason, under --only custom_assets without it: its tools cannot even be called then).
-               A custom asset CANNOT BE DELETED through the API (DELETE /v1/assets/custom/{id} is forbidden, and there is no GET
-               of one asset), so this area leaves a residue: the asset stays on the test client until somebody removes it in
-               the Gorelo app. The manifest records it before and after the create; the cleanup sends nothing for it and
-               reports it as a known undeletable record (CUSTOM_ASSET_RESIDUE), and the summary prints a line telling the
-               operator to remove it in the Gorelo app. Never part of a default run
+               the TEST-NET-1 documentation range and a warranty date; the tool reads the asset back by id), a fresh get_custom_asset,
+               update_custom_asset WITHOUT client_id (new name suffix, ip 192.0.2.11, a description), then update_custom_asset with
+               client_id = the asset's current client and clear_fields description, ip_address and warranty_end_date (they must read
+               back null or empty; naming the current client moves nothing), and a negative check: update_custom_asset with the
+               second client as client_id and NO location_id must be refused LOCALLY by the tool after its read of the asset
+               (since contract a7954b24844b a different ClientId MOVES the asset and needs a LocationId of the new client; the
+               check passes only when the one request of that call was that GET, the guard let no write through and the tool's
+               error has no HTTP status and says "location_id: required when client_id moves the asset"; anything else fails
+               the area, and a PATCH that carried the second client would be refused by the guard, which stops the run).
+               With --with-asset-move the area then MOVES the asset to the second client and back: the second client must be
+               Active and have a location (list_client_locations; else the move is skipped with a note), the manifest details of
+               the asset are set to the second client BEFORE the move is sent (the guard relies on them), and the record's residue
+               text says the asset MAY be on the second client until Gorelo answers the move, then names the client; then
+               update_custom_asset with client_id = the second client and location_id = its location (the answer must read back
+               ClientId and LocationId as asked and the name and serial number as before), a fresh get_custom_asset, and the way
+               back: update_custom_asset with client_id = the test client and location_id = the location the asset was created
+               at (the answer and a fresh get_custom_asset must read the test client again); the details go back to the test client
+               when Gorelo answers the way back. The way back is tried even when a check of the way out failed, and when it fails
+               the record says where the asset may be (the second client, or "unknown"). The asset has no contact, so the contact rules
+               of a move (a contact of the new client or a clear) are not exercised live. SKIPPED unless --with-custom-assets is
+               given (and also skipped, with the same reason, under --only custom_assets without it: its tools cannot even be called
+               then); --with-asset-move needs --with-custom-assets (usage error otherwise).
+               A custom asset is not deleted by this harness (the guard never allows DELETE /v1/assets/custom/{id}, and this server
+               has no tool for it), so this area leaves a residue: the asset stays on the test client (or, after a move that could
+               not be undone, on the second client) until somebody removes it in the Gorelo app. The manifest records it before and
+               after the create; the cleanup sends nothing for it and reports it as a known undeletable record
+               (CUSTOM_ASSET_RESIDUE), and the summary prints a line telling the operator to remove it in the Gorelo app. The cleanup
+               never moves a stranded asset back: one left on the second client is moved back by hand, in the Gorelo app (a manual
+               step). Never part of a default run
     custom_properties
                get_client of the TEST CLIENT, then ONE client custom field value on that client itself (every other area
                creates records of its own, so this is the only write to the test client; the guard otherwise refuses any PATCH of it).
@@ -98,6 +123,27 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                fields that read differently after the cleanup's clear are a LEFTOVER too, named by their ids first and kept in the
                manifest until somebody acknowledges them (scripts/live/cleanup.py). A required text field with no default cannot be
                cleared back to nothing (Gorelo refuses the null), so it would stay set: that too is a leftover. Never part of a default run
+    documents  ONE top-level document of the test client and a copy of it (two documents in all; every title starts with the run id), run
+               through every document tool except share_document, which is not a tool of the matrix: create_document; update_document (title,
+               body, alternate name, star: the tool reads the document first); a fresh get_document; duplicate_document (the copy
+               must start with the star, the public link and the portal off); list_documents (client, run id as query: both are listed);
+               upload_attachment (item_type document) and update_document attachments (the tool reads the document first and the answer
+               must list the file); the NEGATIVE CHECK: update_document with a list that leaves the current file out must be refused
+               LOCALLY after its read (one GET, no write, no HTTP status, "would be removed"); update_document body only (the file must
+               still be attached: it probes whether a changed body keeps the attachments); update_document clear_fields attachments
+               (the answer lists none); export_document_pdf (a file: it must start with %PDF); list_document_versions, get_document_version
+               and restore_document_version of the OLDEST version (the title is the original one again); add_document_related_items (the
+               copy), list_document_related_items, remove_document_related_item (confirm=true) and a list that no longer shows the link;
+               move_document under the copy and back to the top level of the test client (the parent must list it as a child and then
+               not); unshare_document (public_link and publish_to_portal: both must read false); archive_document and restore_document
+               of the copy; and at the end archive_document of both, then list_documents (the active list shows neither, status_ids [2]
+               shows both). Sharing is NEVER turned on: share_document is not callable here and the guard refuses a true flag. A document
+               CANNOT BE DELETED through the API, so every document is a known residue from the moment it exists: the area archives it
+               and records the outcome (DOCUMENT_RESIDUE_TAIL), the cleanup archives one a stopped run left active, and the summary prints
+               a reminder line (the Documents area of Gorelo, search for the run id). The uploaded file is a known undeletable record too.
+               SKIPPED unless --with-documents is given (and also skipped, with the same reason, under --only documents without it: the
+               document tools cannot even be called then). The steps are also the probes of the unprobed document assumptions: each
+               answer is checked, a note records what Gorelo did. Never part of a default run
     invoices   list_items for the first active product that belongs to nobody or to the test client, create_invoice (always a
                Draft for the test client with one line and no recipients), get_invoice, list_invoices by the run label,
                export_invoice_pdf (a PDF file; the export event is recorded on the test invoice), then delete_invoice
@@ -118,8 +164,13 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                rejected create that settles its intent ("Gorelo is rate limiting requests (HTTP 429) ...; it did not
                process this request"), not a guard refusal. Every other request of the run keeps the client's normal
                retries.
-               Preconditions, checked before any write (a skip with the reason, nothing sent, when one does not hold):
-               every contact of the test client is Inactive (list_contacts), no location of the test client names a billing contact
+               Preconditions, checked before any write (a skip with the reason, nothing sent, when one does not hold): the gate that
+               nobody can be emailed. No published contact status says that a contact cannot be emailed, so NOTHING PROVES IT and the
+               area FAILS CLOSED until UNEMAILABLE_CONTACT_STATUS_IDS names one: while it is empty the area is skipped before its
+               first request, with APPROVED_INVOICE_GATE_CLOSED as the reason. The operator has to decide which state proves it. Once
+               that constant names
+               one, the area needs at least one contact of the test client (list_contacts with status_ids 1, 3 and 4) and every one
+               must be in such a state (no contact at all proves nothing), no location of the test client names a billing contact
                (list_client_locations: BillingContactIds empty, null or the text []), and an item as in the invoices area
                (list_items). Then the intent ("invoice", status_id 5, the label `<run> approved invoice`) and
                create_approved_invoice (the test client, ONE line: that item, quantity 1, unit price 1.0, the label as its
@@ -266,12 +317,23 @@ Live requests per area (method and spec path, in the order they are sent; the te
         GET /v1/assets/custom/hardware-types  # the first row is used (only with --with-custom-assets)
         GET /v1/clients/{clientId}/locations  # the test client's default location
         POST /v1/assets/custom  # create_custom_asset: name <run id>-asset, serial number, ip 192.0.2.10, warranty date
-        GET /v1/assets/custom  # create_custom_asset reads the row back (list by ClientIds)
-        PATCH /v1/assets/custom/{customAssetId}  # rename, ip 192.0.2.11, description
-        GET /v1/assets/custom  # update_custom_asset reads the row back
-        PATCH /v1/assets/custom/{customAssetId}  # clear_fields description, ip_address, warranty_end_date
-        GET /v1/assets/custom
-        PATCH /v1/assets/custom/{customAssetId}  # negative check: the second client as ClientId, Gorelo must answer HTTP 400
+        GET /v1/assets/custom/{customAssetId}  # create_custom_asset reads the asset back by id
+        GET /v1/assets/custom/{customAssetId}  # get_custom_asset: a fresh read
+        PATCH /v1/assets/custom/{customAssetId}  # update_custom_asset without client_id: rename, ip 192.0.2.11, description
+        GET /v1/assets/custom/{customAssetId}  # and its read-back by id
+        GET /v1/assets/custom/{customAssetId}  # update_custom_asset with client_id = the current client reads the asset first
+        PATCH /v1/assets/custom/{customAssetId}  # clear_fields description, ip_address, warranty_end_date (the same client moves nothing)
+        GET /v1/assets/custom/{customAssetId}
+        GET /v1/assets/custom/{customAssetId}  # negative check: the second client without location_id: the tool reads the asset and refuses locally
+        GET /v1/clients/{clientId}/locations  # the second client's location (only with --with-asset-move)
+        GET /v1/assets/custom/{customAssetId}  # update_custom_asset with the second client and its location_id reads the asset first
+        PATCH /v1/assets/custom/{customAssetId}  # the MOVE: ClientId = the second client, LocationId = its location
+        GET /v1/assets/custom/{customAssetId}  # read-back by id: the asset reads back at the second client
+        GET /v1/assets/custom/{customAssetId}  # get_custom_asset
+        GET /v1/assets/custom/{customAssetId}  # the move back reads the asset first
+        PATCH /v1/assets/custom/{customAssetId}  # ClientId = the test client, LocationId = the location it was created at
+        GET /v1/assets/custom/{customAssetId}  # read-back by id: the asset is on the test client again
+        GET /v1/assets/custom/{customAssetId}  # get_custom_asset
     custom_properties:
         GET /v1/clients/{clientId}  # get_client of the test client: its custom fields (only with --with-custom-properties)
         GET /v1/clients/{clientId}  # update_client reads the client first: every Id it sends must be one of its custom fields
@@ -284,8 +346,46 @@ Live requests per area (method and spec path, in the order they are sent; the te
         GET /v1/clients/{clientId}  # fresh get_client: the field is back at its first state, every other field as at the first read
         GET /v1/clients/{clientId}  # negative check: update_client reads the client and refuses an Id that is not a custom field; no PATCH, no second read
         GET /v1/clients/{clientId}  # last get_client: every custom field as at the first read
+    documents:
+        GET /v1/documents  # scope probe (page size 1; only with --with-documents); a 403 with code 080203 ends the area here (skipped)
+        POST /v1/documents  # create_document: a top-level document of the test client
+        GET /v1/documents/{documentId}  # update_document reads the document first
+        PATCH /v1/documents/{documentId}  # title, body, alternate name, star
+        GET /v1/documents/{documentId}  # a fresh get_document
+        POST /v1/documents/{documentId}/duplicate  # duplicate_document: the copy
+        GET /v1/documents  # list_documents: the test client's documents with the run id in the title (both are listed)
+        POST /v1/attachments  # upload_attachment (item_type document): a small text file
+        GET /v1/documents/{documentId}  # update_document attachments reads the document first
+        PATCH /v1/documents/{documentId}  # the complete attachment list: the file
+        GET /v1/documents/{documentId}  # negative check: a list that leaves the file out is refused locally after this read
+        GET /v1/documents/{documentId}  # update_document body only reads the document first
+        PATCH /v1/documents/{documentId}  # the file must still be attached
+        PATCH /v1/documents/{documentId}  # clear_fields attachments (no read first)
+        GET /v1/documents/{documentId}/pdf  # export_document_pdf: a file
+        GET /v1/documents/{documentId}/versions  # list_document_versions
+        GET /v1/documents/{documentId}/versions/{versionId}  # get_document_version of the oldest version
+        POST /v1/documents/{documentId}/versions/{versionId}/restore  # restore_document_version
+        GET /v1/documents/{documentId}/versions  # and the tool's confirmation read
+        GET /v1/documents/{documentId}  # the title is the original one again
+        POST /v1/documents/{documentId}/related-items  # add_document_related_items: the copy
+        GET /v1/documents/{documentId}/related-items  # the full list add_document_related_items reads after its POST
+        GET /v1/documents/{documentId}/related-items  # list_document_related_items
+        DELETE /v1/documents/{documentId}/related-items/{relatedItemId}  # remove_document_related_item
+        GET /v1/documents/{documentId}/related-items  # the link is gone
+        PATCH /v1/documents/{documentId}  # move_document under the copy
+        GET /v1/documents/{documentId}  # the copy lists it as a child
+        PATCH /v1/documents/{documentId}  # move_document back to the top level of the test client
+        GET /v1/documents/{documentId}  # the copy has no child any more
+        PATCH /v1/documents/{documentId}  # unshare_document: the public link and the portal off
+        PATCH /v1/documents/{documentId}  # archive_document of the copy
+        GET /v1/documents/{documentId}  # restore_document reads the document first: it must be archived
+        PATCH /v1/documents/{documentId}  # restore_document
+        PATCH /v1/documents/{documentId}  # archive_document of the copy, for good
+        PATCH /v1/documents/{documentId}  # archive_document of the first document
+        GET /v1/documents  # list_documents: the active list shows neither
+        GET /v1/documents  # list_documents with status_ids 2: both
     approved_invoice:
-        GET /v1/contacts  # list_contacts for the test client: every contact must be Inactive (only with --with-approved-invoice)
+        GET /v1/contacts  # list_contacts for the test client (status_ids 1, 3, 4): every contact must be in a state that cannot be emailed (only with --with-approved-invoice, and only once UNEMAILABLE_CONTACT_STATUS_IDS names one)
         GET /v1/clients/{clientId}/locations  # list_client_locations: no location may name a billing contact
         GET /v1/items  # list_items: the first active product of nobody or of the test client
         POST /v1/invoices  # create_approved_invoice: StatusId 5, one line of $1, no recipient, no dates
@@ -331,10 +431,15 @@ Live requests per area (method and spec path, in the order they are sent; the te
         DELETE /v1/clients/{clientId}  # the temporary client
 
 The lists above are the full path (the approver is accepted and stored as asked, the Project scope is granted, the
-time entry is deleted at once, --with-items, --with-invoices, --with-custom-assets, --with-custom-properties and
---with-approved-invoice are given, the invoice has a Number and, for the approved one, Gorelo has pushed it to the
-accounting system by the first get_invoice). What varies: the
-three lookups come with the first area that needs them (--only comments or time starts with them and the plain
+time entry is deleted at once, --with-items, --with-invoices, --with-custom-assets, --with-asset-move,
+--with-custom-properties, --with-documents and --with-approved-invoice are given, the invoice has a Number and, for the
+approved one, Gorelo has pushed it to the accounting system by the first get_invoice; the approved list is also the one of a
+gate that is open). What varies: the custom_assets area without --with-asset-move ends after its negative check (the first
+eleven requests), and with the move it skips the move, with a note, when the second client is not Active (nothing is sent for
+it) or has no location (only the read of its locations is sent); the documents area
+without the Documents scope is its first request only (a skip), lists a document again up to 3 times when a search lags behind a
+write, and stops at the first failed check (the cleanup then archives what is still Active: one GET and one PATCH for each such
+document); the three lookups come with the first area that needs them (--only comments or time starts with them and the plain
 ticket; --only projects sends them, and the test client's location, right after its two scope probes, which is why the
 projects list above names them with the note that an earlier area of the same run has read them already, and a full run
 sends the other twelve requests of that area only); get_ticket by number
@@ -358,10 +463,12 @@ reads back with no Number is not deleted by the area (no delete_invoice, no look
 removes it with its raw DELETE), a lookup by Number that still finds nothing after the 3 tries fails the area without
 any DELETE (the cleanup then removes the invoice, which it reads as a Draft by its id, with the same raw DELETE), and
 one that is no longer a Draft at the second get_invoice is not touched at all (the area fails there and the cleanup
-leaves it for the user). The approved_invoice area ends after its first request when a contact of the test client is not
-Inactive, after its second when a location names a billing contact and after its third when there is no usable item
-(each a skip, with the reason); its get_invoice is repeated every 5 s for at most 120 s (24 waits) until ExternalId is
-set (a read that fails is one of those polls, not a stop: the next one asks again), and an invoice that never gets one
+leaves it for the user). The approved_invoice area is skipped before its first request until UNEMAILABLE_CONTACT_STATUS_IDS
+names the contact statuses that cannot be emailed (empty since 1.3.0, so the gate is closed); then it ends after its first request
+when a contact of the test client is in none of them, after its second when a location names a billing contact and after its
+third when there is no usable item (each a skip, with the reason); its get_invoice is repeated every 5 s for at most 120 s
+(24 waits) until ExternalId is set (a read that fails is one of those polls, not a stop: the next one asks again), and an invoice
+that never gets one
 is NOT voided (no lookup by Number, no DELETE: the area fails, and the cleanup, which never voids without
 --void-approved, leaves it a leftover for the user); delete_invoice's lookup by Number is tried up to 3 times, like the
 Draft's, and a voided invoice sends nothing in the cleanup (a known residue). An approved invoice that reads with no
@@ -404,23 +511,31 @@ left over) ends with the second. Exit status 0 only when no area FAILED, nothing
 an attachment file or a voided invoice, is not a leftover) and the guard refused nothing; a skipped area (scope missing,
 --skip-email, items without --with-items, custom_assets without --with-custom-assets, custom_properties without
 --with-custom-properties, while a custom field of the test client is set or with no unset text field to use, invoices without
---with-invoices, approved_invoice without
---with-approved-invoice, a precondition of the approved invoice that does not hold) is not a failure; 1 otherwise; 2 for a
-usage or setup error (an unknown area, --with-approved-invoice without --only approved_invoice or beside another flag, no
-API key, a tool the matrix calls that the server would not offer); 130 when interrupted (the cleanup has run by then).
+--with-invoices, documents without --with-documents or with the Documents scope missing, approved_invoice without
+--with-approved-invoice, a precondition of the approved invoice that does not hold, which is always the case while
+UNEMAILABLE_CONTACT_STATUS_IDS is empty) is not a failure; 1 otherwise; 2 for a usage or setup error (an unknown area,
+--with-approved-invoice without --only approved_invoice or beside another flag, --with-asset-move without --with-custom-assets,
+no API key, a tool the matrix calls that the server would not offer, a test client that is not Active). A document of the run is a
+known undeletable record (archived, it stays in Gorelo) and never alone a failure; the summary ends with a reminder line for the
+documents of the run, after the one for the custom assets.
+130 when interrupted (the cleanup has run by then).
 A custom field value the run set on the test client and the cleanup could not clear is a LEFTOVER (exit status 1): the summary
 names the custom field Id and the client and says how to clear it, and its line depends on the kind of leftover: the field may
 still hold the run id (run the cleanup again, or clear it in the Gorelo app), another custom field of the client is set so the
 cleanup sent no write (clear the field in the Gorelo app), or other custom fields read differently after the clear (their ids,
 to be checked in the Gorelo app; no re-run is advised, and the cleanup reports them until they are acknowledged).
-Output holds ids and Gorelo's messages only, never customer data and never the API key. The text of an update_client error that
-a summary prints has its quoted strings cut out ("..."), because that tool quotes the name and the previous value of a custom field
-in its error for fields that changed without being sent (_env.without_quotes).
+Output holds the API host, the manifest path, the run id, the areas and the scopes it found missing, counts, kinds, ids, labels,
+the run's own values, the names of the tenant's own lookups when one fails, the script's own words and Gorelo's messages (which
+can quote a name or a value), never the API key. The text of an update_client error that a summary prints has its quoted strings cut out
+("..."), because that tool quotes the name and the previous value of a custom field in its error for fields that changed
+without being sent (_env.without_quotes).
 
 Safety nets besides the guard: the matrix may call only the tools in MATRIX_TOOLS (no post_alert, no
-create_approved_invoice; the three item tools only with --with-items; the three custom asset tools only with
---with-custom-assets; list_items, list_invoices, get_invoice,
-create_invoice, export_invoice_pdf and delete_invoice only with --with-invoices). The custom_properties area needs no tool of
+create_approved_invoice; the three item tools only with --with-items; the four custom asset tools only with
+--with-custom-assets; the sixteen document tools (DOCUMENT_TOOLS, never share_document) only with --with-documents; list_items,
+list_invoices, get_invoice, create_invoice, export_invoice_pdf and delete_invoice only with --with-invoices). The move of the
+custom asset needs no tool of its own: the guard of the run gets allow_custom_asset_move only with --with-asset-move, and refuses a
+PATCH that names the second client unless the manifest announced it. The custom_properties area needs no tool of
 its own (get_client and update_client are in MATRIX_TOOLS); what stops update_client from changing the test client in any
 other run is the guard: it refuses every PATCH of the test client unless it is built with allow_custom_properties
 (--with-custom-properties) and the body is one recorded custom field (a field whose record is cleaned takes the null only). With --with-approved-invoice the run
@@ -455,9 +570,13 @@ from scripts.live._env import EnvError, Pacer, live_settings, scrub, without_quo
 from scripts.live.cleanup import (
     CUSTOM_ASSET_CLIENT_UNKNOWN,
     CUSTOM_ASSET_RESIDUE,
+    CUSTOM_ASSET_RESIDUE_TAIL,
     CHANGED_FIELDS,
+    DOCUMENT_ARCHIVED,
+    DOCUMENT_RESIDUE_TAIL,
     custom_asset_residue,
     custom_property_leftover_kind,
+    document_residue,
     MAX_REOPEN_ATTEMPTS,
     NO_SUCH_NUMBER,
     PACE_SECONDS,
@@ -476,8 +595,10 @@ from scripts.live.smoke import (
     ShapeError,
     ToolFailed,
     ToolSession,
+    check_file,
     custom_properties_of,
     emit,
+    is_hidden,
     is_text_field,
     quiet_logs,
 )
@@ -514,14 +635,25 @@ NOT_PROCESSED = "it did not process this request"
 ITEMS_SKIP_REASON = "not live-tested by default: creates and deletes a catalog product on the test client"
 # Why the custom_assets area does not run by default (it is also the area's detail in the summary).
 CUSTOM_ASSETS_SKIP_REASON = (
-    "not live-tested by default: creates a custom asset on the test client, which cannot be deleted through the API "
-    "(it stays there until removed in the Gorelo app)"
+    "not live-tested by default: creates a custom asset on the test client; this harness never deletes a custom asset "
+    "(the spec's soft DELETE is not used), so it stays there until removed in the Gorelo app"
 )
 CUSTOM_ASSETS_AREA = "custom_assets"
 # TEST-NET-1 (RFC 5737): addresses reserved for documentation, never routable, so no real host is named by the test asset.
 CUSTOM_ASSET_IP = "192.0.2.10"
 CUSTOM_ASSET_IP_CHANGED = "192.0.2.11"
 CUSTOM_ASSET_WARRANTY_DAYS = 365
+# The summary's line about a stranded asset: the cleanup never sends a PATCH for a custom asset, so the move back is a manual step.
+CUSTOM_ASSET_NEVER_MOVED_BACK = (
+    "the cleanup never moves a stranded custom asset back: moving it back to the test client is a manual step in the Gorelo app"
+)
+# Why the documents area does not run by default (it is also the area's detail in the summary).
+DOCUMENTS_SKIP_REASON = (
+    "not live-tested by default: creates two documents on the test client, which cannot be deleted through the API (the run archives "
+    "them; they stay in Gorelo until removed in the Gorelo app)"
+)
+DOCUMENTS_AREA = "documents"
+DOCUMENT_ACTIVE = 1  # Document StatusId 1 Active (DOCUMENT_ARCHIVED, 2, comes from the cleanup)
 # Why the custom_properties area does not run by default (it is also the area's detail in the summary).
 CUSTOM_PROPERTIES_SKIP_REASON = (
     "not live-tested by default: sets one custom field value on the test client itself and clears it again, the one write "
@@ -539,6 +671,13 @@ APPROVED_INVOICE_SKIP_REASON = (
     "then voids it"
 )
 APPROVED_INVOICE_AREA = "approved_invoice"  # the key of the area, which --with-approved-invoice runs alone
+# Why the approved_invoice area is skipped, before its first request, while UNEMAILABLE_CONTACT_STATUS_IDS is empty.
+APPROVED_INVOICE_GATE_CLOSED = (
+    "precondition not met: nothing proves that nobody can be emailed the Approved invoice, so the area did not start and nothing was "
+    "sent. No published contact status says that a contact cannot be emailed, so the area stays closed until "
+    "UNEMAILABLE_CONTACT_STATUS_IDS names one (scripts/live/write_matrix.py). The operator has to decide which state proves it "
+    "before this area runs again"
+)
 INVOICE_DRAFT = 1  # Invoice StatusId of a Draft: the only status the invoices area creates
 INVOICE_PAID = 3  # what Gorelo makes of an Approved invoice whose total is exactly 0 (it neither deletes nor voids it)
 INVOICE_VOID = 4  # the StatusId Gorelo answers a DELETE of an Approved invoice with (it stays listed)
@@ -552,10 +691,13 @@ CATALOG_PAGE = 50  # catalog items read to find one to bill
 # for Gorelo to push it to the connected accounting system (ExternalId is set once it has).
 SYNC_INTERVAL = 5.0
 SYNC_POLLS = 24
-CONTACT_PAGES = 5  # pages of 200 contacts read to check that every contact of the test client is Inactive
-# The Status.Name of a contact that cannot be emailed (a test client whose contacts are all Inactive). The
-# spec does not publish the status scale of contacts, so the name is what is matched; anything else is not Inactive.
-INACTIVE_CONTACT = "inactive"
+CONTACT_PAGES = 5  # pages of 200 contacts read to check that every contact of the test client is in a state that cannot be emailed
+CONTACT_STATUS_IDS = [1, 3, 4]  # every status of the contact scale of contract a7954b24844b: 1 Active, 3 Temporary, 4 Archived
+# The Status.Id values of a contact that is PROVEN not to receive an invoice. EMPTY since 1.3.0 on purpose: no published contact
+# status says that a contact cannot be emailed, so the area stays closed until this tuple names one.
+# While it is empty the approved_invoice area FAILS CLOSED: it is skipped before its first request (APPROVED_INVOICE_GATE_CLOSED).
+# Only the operator may decide which state proves it; then this tuple names it and the area needs at least one contact, all in it.
+UNEMAILABLE_CONTACT_STATUS_IDS: tuple[int, ...] = ()
 # What the matrix records for the invoice it voided itself (a voided invoice cannot be removed: a known residue).
 VOIDED_BY_MATRIX = f"voided by the write matrix {VOID_RESIDUE}"
 # Who the stored ticket may say it emails: nobody, or the operator contact (the matrix asks for nothing else).
@@ -581,9 +723,23 @@ MATRIX_TOOLS = frozenset(
         "delete_project_comment", "delete_project_task",
     }
 )
-# The custom asset tools: NOT part of MATRIX_TOOLS; tools_for adds them only with --with-custom-assets (the asset the area
-# creates cannot be deleted through the API).
-CUSTOM_ASSET_TOOLS = frozenset({"list_custom_asset_hardware_types", "create_custom_asset", "update_custom_asset"})
+# The custom asset tools: NOT part of MATRIX_TOOLS; tools_for adds them only with --with-custom-assets; this harness never deletes
+# a custom asset (the spec's soft DELETE is not used).
+CUSTOM_ASSET_TOOLS = frozenset(
+    {"list_custom_asset_hardware_types", "create_custom_asset", "update_custom_asset", "get_custom_asset"}
+)
+# The document tools: NOT part of MATRIX_TOOLS; tools_for adds them only with --with-documents (a document cannot be deleted through
+# the API). share_document is deliberately NOT here: the live harness never turns sharing on (a public link or the client portal makes
+# a document readable outside the MSP), and the guard refuses a true flag as well. remove_document_related_item is a gated tool: it
+# is registered because live_settings() turns the destructive tools on, and it needs confirm=true.
+DOCUMENT_TOOLS = frozenset(
+    {
+        "list_documents", "get_document", "export_document_pdf", "list_document_versions", "get_document_version",
+        "list_document_related_items", "create_document", "update_document", "move_document", "archive_document",
+        "restore_document", "duplicate_document", "restore_document_version", "add_document_related_items",
+        "unshare_document", "remove_document_related_item",
+    }
+)
 # The catalog tools: callable only with --with-items (it creates, updates and deletes a catalog product on the test client).
 ITEM_TOOLS = frozenset({"create_item", "update_item", "delete_item"})
 # The invoice tools: callable only with --with-invoices (a Draft invoice uses up an invoice number, and the PDF export
@@ -604,11 +760,17 @@ APPROVED_INVOICE_TOOLS = frozenset(
 
 
 def tools_for(
-    with_items: bool, with_invoices: bool = False, with_approved_invoice: bool = False, with_custom_assets: bool = False
+    with_items: bool,
+    with_invoices: bool = False,
+    with_approved_invoice: bool = False,
+    with_custom_assets: bool = False,
+    with_documents: bool = False,
 ) -> frozenset[str]:
     """The tools a run may call: with --with-approved-invoice exactly APPROVED_INVOICE_TOOLS (that run has no other area);
     otherwise MATRIX_TOOLS, without the three item tools unless --with-items was given, without the six invoice tools
-    unless --with-invoices was given and with the three custom asset tools only when --with-custom-assets was given."""
+    unless --with-invoices was given, with the four custom asset tools only when --with-custom-assets was given (the move needs
+    no tool of its own: update_custom_asset and list_client_locations do it) and with the sixteen document tools only when
+    --with-documents was given."""
     if with_approved_invoice:
         return APPROVED_INVOICE_TOOLS
     tools = MATRIX_TOOLS
@@ -616,6 +778,8 @@ def tools_for(
         tools = tools - ITEM_TOOLS
     if with_custom_assets:
         tools = tools | CUSTOM_ASSET_TOOLS
+    if with_documents:
+        tools = tools | DOCUMENT_TOOLS
     if not with_invoices:
         tools = tools - INVOICE_TOOLS
     return tools
@@ -855,7 +1019,9 @@ def is_amount(value: Any) -> bool:
 def email_problem(invoice: dict[str, Any]) -> str | None:
     """What the invoice says about having been emailed, or None when it says it was not (IsEmailSent false, EmailSentOn null).
 
-    The matrix names no recipient and every contact of the test client is Inactive, so an invoice that reads as emailed is news:
+    The matrix names no recipient, and the approved_invoice area is skipped before its first request until UNEMAILABLE_CONTACT_STATUS_IDS
+    names the contact statuses that cannot be emailed (every contact of the test client must be in one), so an invoice that reads as
+    emailed is news:
     the text is written to be noticed (it goes into the notes of the area). A value that cannot be read is a problem too."""
     sent, on = invoice.get("IsEmailSent", _MISSING), invoice.get("EmailSentOn", _MISSING)
     if sent is False and on is None:
@@ -889,11 +1055,12 @@ def tax_problem(invoice: dict[str, Any]) -> str | None:
     )
 
 
-def inactive_contact(row: Any) -> bool:
-    """True when a row of list_contacts says the contact is Inactive (Status.Name, case ignored): anything else, and a row that
-    is not an object, is not provably Inactive."""
-    name = dig(row, "Status", "Name")
-    return isinstance(name, str) and name.strip().casefold() == INACTIVE_CONTACT
+def unemailable_contact(row: Any) -> bool:
+    """True when a row of list_contacts is in a state that is PROVEN not to receive an invoice: its Status.Id (a whole number, never a
+    bool) is one of UNEMAILABLE_CONTACT_STATUS_IDS. The name of the status is never matched. Anything else, a row that is not an
+    object and every row while the tuple is empty (it is, since 1.3.0) is not provably unemailable."""
+    status = dig(row, "Status", "Id")
+    return isinstance(status, int) and not isinstance(status, bool) and status in UNEMAILABLE_CONTACT_STATUS_IDS
 
 
 def no_billing_contacts(row: Any) -> bool:
@@ -1056,6 +1223,9 @@ class Matrix:
         gorelo: GoreloClient | None = None,
         with_custom_assets: bool = False,
         with_custom_properties: bool = False,
+        with_documents: bool = False,
+        with_asset_move: bool = False,
+        second_client_active: bool = False,  # fail closed: a move needs the run to say that the second client is Active
     ) -> None:
         if with_approved_invoice and gorelo is None:  # the one create is sent with 429 retries off: the client must be reachable
             raise SetupError(
@@ -1075,6 +1245,9 @@ class Matrix:
         self.with_approved_invoice = with_approved_invoice
         self.with_custom_assets = with_custom_assets
         self.with_custom_properties = with_custom_properties
+        self.with_documents = with_documents
+        self.with_asset_move = with_asset_move
+        self.second_client_active = second_client_active  # the status check of the run: a moved asset's new client must be Active
         self.sync_interval = sync_interval
         self.sync_polls = sync_polls
         self.gorelo = gorelo  # only the approved invoice run holds it (see without_429_retries)
@@ -1083,6 +1256,7 @@ class Matrix:
         self._plain: dict[str, Any] | None = None
         self._plain_error: str | None = None
         self._location: int | None = None
+        self._second_location: int | None = None
 
     # -- plumbing ----------------------------------------------------------
 
@@ -1285,6 +1459,40 @@ class Matrix:
             check(found is not None, f"client {SITE.test_client} has no location")
             self._location = found
         return self._location  # type: ignore[return-value]
+
+    async def second_location(self) -> int | None:
+        """The second client's default location (list_client_locations), for the move of the custom asset; None when it has none."""
+        if self._second_location is None:
+            rows = (await self.tool("list_client_locations", client_id=SITE.second_client))["items"]
+            defaults = [row for row in rows if isinstance(row, dict) and row.get("IsDefault") is True]
+            self._second_location = first_int_id(defaults) or first_int_id(rows)
+        return self._second_location
+
+    def mark_archived(self, document_id: str, how: str) -> None:
+        """A document of the run was archived and stays in Gorelo: a known residue, not a cleaned record (a document cannot be
+        removed). The outcome ends with DOCUMENT_RESIDUE_TAIL, which the cleanup reads, so it sends nothing for the document."""
+        self.manifest.cleanup_failed("document", document_id, document_residue(how))
+
+    async def document_listing(self, label: str, wanted: dict[str, bool], *, status_ids: list[int] | None = None) -> None:
+        """list_documents(client_ids=[the test client], query=the run id) must list each document of `wanted` (True) or not list it (False).
+
+        A search can lag behind a write (the ticket and invoice searches do), so it is read up to LOOKUP_ATTEMPTS times, LOOKUP_WAIT
+        seconds apart, before the check fails. `status_ids` [2] asks for the archived ones (the default list is Active only)."""
+        arguments: dict[str, Any] = {"client_ids": [SITE.test_client], "query": self.manifest.run_id, "page_size": 50}
+        if status_ids is not None:
+            arguments["status_ids"] = status_ids
+        for attempt in range(1, LOOKUP_ATTEMPTS + 1):
+            listing = await self.tool("list_documents", **arguments)
+            rows = listing.get("items") if isinstance(listing, dict) else None
+            seen = {row["Id"].lower() for row in (rows if isinstance(rows, list) else []) if isinstance(row, dict) and is_guid(row.get("Id"))}
+            if all((ident.lower() in seen) is listed for ident, listed in wanted.items()):
+                if attempt > 1:
+                    self.note(f"list_documents ({label}) showed the expected documents on attempt {attempt}")
+                return
+            if attempt < LOOKUP_ATTEMPTS:
+                await asyncio.sleep(self.lookup_wait)
+        wrong = sum(1 for ident, listed in wanted.items() if (ident.lower() in seen) is not listed)
+        raise CheckFailed(f"list_documents ({label}) did not show the expected documents (a mismatch for {wrong} of {len(wanted)})")
 
     async def comment(
         self,
@@ -1740,11 +1948,129 @@ async def area_items(m: Matrix) -> None:
     m.mark_cleaned("item", item_id, "deleted by the write matrix (delete_item)")
 
 
-async def area_custom_assets(m: Matrix) -> None:
-    """One custom asset on the test client: created, changed, cleared, and refused when a wrong client is named.
+async def refuse_move_without_location(m: Matrix, asset_id: str, renamed: str) -> None:
+    """The local negative check of a move: update_custom_asset with the SECOND client as client_id and no location_id.
 
-    The asset CANNOT be deleted through the API, so the area leaves it behind on purpose (see CUSTOM_ASSET_RESIDUE): it is
-    recorded in the manifest before and after the create, and the cleanup reports it as a known residue."""
+    Since contract a7954b24844b a different ClientId MOVES the asset, and Gorelo needs a LocationId of the new client; the tool reads
+    the asset first and refuses locally, before any PATCH. It passes only on that refusal: a ToolFailed with no HTTP status whose text
+    says "location_id: required when client_id moves the asset", exactly one request (that GET) and no write let through by the guard.
+    Anything else is a CheckFailed saying what happened. A PATCH that carried the second client would be refused by the guard (the move
+    option and the announcement are missing), which stops the run. Nothing moves."""
+    requests, writes = m.pacer.requests, m.guard.writes_allowed
+    try:
+        await m.tool("update_custom_asset", custom_asset_id=asset_id, client_id=SITE.second_client, name=renamed)
+    except ToolFailed as exc:
+        sent, wrote = m.pacer.requests - requests, m.guard.writes_allowed - writes
+        if wrote:
+            raise CheckFailed(
+                f"update_custom_asset with the second client and no location_id let {wrote} write request(s) through to Gorelo; "
+                f"look for the asset in the Gorelo app: it may have moved to client {SITE.second_client}"
+            ) from None
+        if exc.status is None and sent == 1 and "location_id" in exc.text and "moves the asset" in exc.text:
+            m.note("update_custom_asset with another client_id and no location_id: refused locally after its read of the asset, nothing was sent but that GET")
+            return
+        status = f"HTTP {exc.status}" if exc.status is not None else "no HTTP answer"
+        raise CheckFailed(
+            "update_custom_asset with another client_id and no location_id was not refused locally after one GET and before any PATCH, "
+            f"so the negative check did not pass ({sent} request(s), {status}): {exc.text[:160]}"
+        ) from None
+    raise CheckFailed(
+        "update_custom_asset with another client_id and no location_id was ACCEPTED (a PATCH reached Gorelo): the asset may have moved "
+        f"to client {SITE.second_client}; look for it in the Gorelo app"
+    )
+
+
+def custom_asset_unanswered_text(client_id: Any) -> str:
+    """The residue text of a custom asset while the move's PATCH is unanswered: the asset MAY be on the client the move names."""
+    return f"may be on the second client {client_id} (its move is not answered yet), and stays there {CUSTOM_ASSET_RESIDUE_TAIL}"
+
+
+def record_custom_asset_client(m: Matrix, asset_id: str, client_id: Any, *, answer_pending: bool = False) -> None:
+    """Record where a custom asset of the move is: its manifest details (client_id, which the guard and the cleanup read) and the
+    residue text of its record, which the cleanup keeps because it ends with CUSTOM_ASSET_RESIDUE_TAIL. While the move's PATCH is
+    unanswered (answer_pending) the text says the asset MAY be on the second client; after the answer it names the client."""
+    text = custom_asset_unanswered_text(client_id) if answer_pending else custom_asset_residue(client_id)
+    m.manifest.cleanup_failed("custom_asset", asset_id, text)  # the text first: a stop between the two saves leaves "MAY be there"
+    m.manifest.update_details("custom_asset", asset_id, client_id=client_id)
+
+
+async def move_custom_asset_out_and_back(m: Matrix, asset_id: str, home_location: int, renamed: str, serial: str) -> None:
+    """The opt-in move (--with-asset-move): the asset goes to the second client and comes back. See the module docstring.
+
+    The manifest details of the asset name the second client BEFORE the move is sent (the guard insists on it), and the record's
+    residue text says the asset MAY be there until Gorelo answers the move, so a crash then leaves that text true; once the answer
+    comes the record names the client. The way back is tried whatever the way out did: from the second client it brings the asset
+    home, from the test client the tool sees no move and re-sends the client the asset has. The details go back to the test client
+    when Gorelo answers the way back. A way back that is refused or never sent leaves them at the second client (the way out was
+    clean); an unknown outcome, a way out that was not clean, or a request the guard refused leaves them at "unknown", so the
+    reminder at the end of the run says where to look."""
+    if not m.second_client_active:
+        m.note(f"asset move skipped: the second client {SITE.second_client} is not Active, and a moved asset needs an active client")
+        return
+    target = await m.second_location()
+    if target is None:
+        m.note(f"asset move skipped: the second client {SITE.second_client} has no location to move the asset to")
+        return
+    record_custom_asset_client(m, asset_id, SITE.second_client, answer_pending=True)  # announced BEFORE the move is sent
+    m.note(f"custom asset {asset_id}: moving to client {SITE.second_client} (location {target}) and back; recorded in the manifest first")
+    trouble: ToolFailed | CheckFailed | None = None
+    try:
+        try:
+            out = full(
+                await m.tool("update_custom_asset", custom_asset_id=asset_id, client_id=SITE.second_client, location_id=target),
+                "update_custom_asset (move)",
+            )
+            record_custom_asset_client(m, asset_id, SITE.second_client)  # answered: the record names the second client
+            expect("update_custom_asset (move) Id", str(out.get("Id", "")).lower(), asset_id.lower())
+            expect("update_custom_asset (move) ClientId", out.get("ClientId"), SITE.second_client)
+            expect("update_custom_asset (move) LocationId", out.get("LocationId"), target)
+            expect("update_custom_asset (move) Name (left alone)", out.get("Name"), renamed)
+            expect("update_custom_asset (move) SerialNumber (left alone)", out.get("SerialNumber"), serial)
+            seen = await m.tool("get_custom_asset", custom_asset_id=asset_id)
+            expect("get_custom_asset ClientId after the move", seen.get("ClientId"), SITE.second_client)
+        except (ToolFailed, CheckFailed) as exc:
+            trouble = exc
+        if isinstance(trouble, ToolFailed) and trouble.sent and trouble.rejected:  # Gorelo answered 4xx: the asset never left
+            record_custom_asset_client(m, asset_id, SITE.test_client)
+            raise trouble
+        if trouble is not None:  # moved, or not known to have moved: whatever it is, ask Gorelo to bring it home
+            record_custom_asset_client(m, asset_id, CUSTOM_ASSET_CLIENT_UNKNOWN)
+        else:  # the way back is sent from the second client: until Gorelo answers it, the asset MAY be there
+            record_custom_asset_client(m, asset_id, SITE.second_client, answer_pending=True)
+        answered = False  # set once Gorelo answers the way back: the asset is then at the test client, whatever a read after that says
+        try:
+            home = full(
+                await m.tool("update_custom_asset", custom_asset_id=asset_id, client_id=SITE.test_client, location_id=home_location),
+                "update_custom_asset (move back)",
+            )
+            answered = True
+            record_custom_asset_client(m, asset_id, SITE.test_client)  # answered: the record names the test client again
+            expect("update_custom_asset (move back) ClientId", home.get("ClientId"), SITE.test_client)
+            expect("update_custom_asset (move back) LocationId", home.get("LocationId"), home_location)
+            seen = await m.tool("get_custom_asset", custom_asset_id=asset_id)
+            expect("get_custom_asset ClientId after the way back", seen.get("ClientId"), SITE.test_client)
+        except (ToolFailed, CheckFailed) as exc:
+            unsure = trouble is not None or isinstance(exc, CheckFailed) or (isinstance(exc, ToolFailed) and exc.sent and not exc.rejected)
+            if unsure:
+                record_custom_asset_client(m, asset_id, CUSTOM_ASSET_CLIENT_UNKNOWN)
+            elif not answered:  # refused or never sent: the way out left the asset at the second client
+                record_custom_asset_client(m, asset_id, SITE.second_client)
+            raise
+    except GuardTripped:  # a request was refused: nothing says where the asset is
+        record_custom_asset_client(m, asset_id, CUSTOM_ASSET_CLIENT_UNKNOWN)
+        raise
+    m.note(f"custom asset {asset_id}: moved to client {SITE.second_client} and back to client {SITE.test_client}, the same Id each time")
+    if trouble is not None:
+        raise trouble
+
+
+async def area_custom_assets(m: Matrix) -> None:
+    """One custom asset on the test client: created, read, changed, cleared, a move refused locally and, with --with-asset-move, moved
+    to the second client and back.
+
+    The asset is not deleted by the harness (see CUSTOM_ASSET_RESIDUE), so the area leaves it behind on purpose: it is recorded in the
+    manifest before and after the create, and the cleanup reports it as a known residue. The cleanup never moves a stranded asset
+    back: that is a manual step in the Gorelo app."""
     if not m.with_custom_assets:  # nothing is announced or sent: the custom asset tools are not even callable without the flag
         raise Skipped(CUSTOM_ASSETS_SKIP_REASON)
     types = (await m.tool("list_custom_asset_hardware_types")).get("items")
@@ -1783,12 +2109,16 @@ async def area_custom_assets(m: Matrix) -> None:
     expect("create_custom_asset IpAddress", asset.get("IpAddress"), CUSTOM_ASSET_IP)
     expect("create_custom_asset WarrantyEndDate", date_text(asset.get("WarrantyEndDate")), warranty)
 
+    seen = await m.tool("get_custom_asset", custom_asset_id=asset_id)  # the new tool, read live: the same asset as the create answered
+    expect("get_custom_asset Id", str(seen.get("Id", "")).lower(), asset_id.lower())
+    expect("get_custom_asset Name", seen.get("Name"), label)
+    expect("get_custom_asset ClientId", seen.get("ClientId"), SITE.test_client)
+
     renamed, description = f"{label} v2", f"{label}: updated"
     changed = full(
         await m.tool(
             "update_custom_asset",
             custom_asset_id=asset_id,
-            client_id=SITE.test_client,
             name=renamed,
             ip_address=CUSTOM_ASSET_IP_CHANGED,
             description=description,
@@ -1800,12 +2130,13 @@ async def area_custom_assets(m: Matrix) -> None:
     expect("update_custom_asset Description", changed.get("Description"), description)
     expect("update_custom_asset SerialNumber (left alone)", changed.get("SerialNumber"), serial)
     expect("update_custom_asset WarrantyEndDate (left alone)", date_text(changed.get("WarrantyEndDate")), warranty)
+    expect("update_custom_asset ClientId (left alone)", changed.get("ClientId"), SITE.test_client)
 
     cleared = full(
         await m.tool(
             "update_custom_asset",
             custom_asset_id=asset_id,
-            client_id=SITE.test_client,
+            client_id=SITE.test_client,  # the asset's current client: the tool reads the asset first and sees no move
             clear_fields=["description", "ip_address", "warranty_end_date"],
         ),
         "update_custom_asset",
@@ -1815,33 +2146,11 @@ async def area_custom_assets(m: Matrix) -> None:
         check(value is None or value == "", f"update_custom_asset clear_fields: {field_name} still reads back {kind_of(value)}")
     expect("update_custom_asset Name (left alone by clear_fields)", cleared.get("Name"), renamed)
     expect("update_custom_asset SerialNumber (left alone by clear_fields)", cleared.get("SerialNumber"), serial)
+    expect("update_custom_asset ClientId (the current client moved nothing)", cleared.get("ClientId"), SITE.test_client)
 
-    # The negative check: Gorelo must refuse a client that does not own the asset, with HTTP 400. The second client is the only
-    # other client the guard lets the PATCH name; the name sent is the current one, but the ClientId itself is the change: an
-    # (unexpected) acceptance MOVES the asset to the second client. So the manifest details say where the asset may be.
-    try:
-        await m.tool("update_custom_asset", custom_asset_id=asset_id, client_id=SITE.second_client, name=renamed)
-    except ToolFailed as exc:
-        if exc.sent and exc.status == 400 and exc.rejected:
-            m.note(f"update_custom_asset with another client_id: refused by Gorelo (HTTP {exc.status})")
-            return
-        if exc.sent and not exc.rejected:  # a 5xx, a timeout or an unconfirmed write: Gorelo may have processed it
-            m.manifest.update_details("custom_asset", asset_id, client_id=CUSTOM_ASSET_CLIENT_UNKNOWN)
-            where = f"unknown whether the asset moved to client {SITE.second_client}; look for {label!r} in the Gorelo app"
-            m.note(f"update_custom_asset with another client_id: outcome unknown ({exc.text[:80]}); {where}")
-            raise CheckFailed(f"update_custom_asset with another client was unexpected: {exc.text[:120]} ({where})") from None
-        # not sent (a local validation error) or a 4xx other than 400 (401, 403, 404, 429, ...): Gorelo did not process it
-        status = f"HTTP {exc.status}" if exc.status is not None else "no HTTP answer"
-        raise CheckFailed(
-            f"update_custom_asset with another client was not refused by Gorelo with HTTP 400, so the negative check was not "
-            f"evaluated ({status}): {exc.text[:120]} (the asset stays on the test client)"
-        ) from None
-    m.manifest.update_details("custom_asset", asset_id, client_id=SITE.second_client)
-    m.note(f"custom asset {asset_id} MOVED to client {SITE.second_client}: {custom_asset_residue(SITE.second_client)}")
-    raise CheckFailed(
-        "update_custom_asset with another client_id was ACCEPTED by Gorelo (the asset may now belong to client "
-        f"{SITE.second_client}; look for {label!r} in the Gorelo app)"
-    )
+    await refuse_move_without_location(m, asset_id, renamed)
+    if m.with_asset_move:
+        await move_custom_asset_out_and_back(m, asset_id, location, renamed, serial)
 
 
 def client_fields(record: dict[str, Any], tool: str) -> list[dict[str, Any]]:
@@ -1880,10 +2189,12 @@ def check_field_cleared(record: dict[str, Any], field_id: int, text: str, tool: 
 
 
 def unset_text_field(fields: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The custom field the area writes: among the fields that are not set (IsSet exactly false) and whose Type.Name contains
-    "text", the one with the lowest Id whose Value is not null (an unset field shows its default as its Value, so a clear can
-    restore it); only when none has a default, the one with the lowest Id. None when there is no unset text field."""
-    candidates = [entry for entry in fields if entry["IsSet"] is False and is_text_field(entry)]
+    """The custom field the area writes: among the fields that are not set (IsSet exactly false), whose Type.Name contains
+    "text" and that are not hidden (IsHidden true: its Value is always null, so the area could not read back what it wrote and
+    check_field_set would fail), the one with the lowest Id whose Value is not null (an unset field shows its default as its
+    Value, so a clear can restore it); only when none has a default, the one with the lowest Id. None when there is no such field.
+    A hidden field that is SET still counts as a set field for the skip rule of the area (IsSet is reported for hidden fields)."""
+    candidates = [entry for entry in fields if entry["IsSet"] is False and is_text_field(entry) and not is_hidden(entry)]
     pool = [entry for entry in candidates if entry.get("Value") is not None] or candidates
     return min(pool, key=lambda entry: entry["Id"]) if pool else None
 
@@ -1899,10 +2210,10 @@ def pick_reason(chosen: dict[str, Any]) -> str:
 
 
 def describe_fields(fields: list[dict[str, Any]], limit: int | None = FIELDS_SHOWN) -> str:
-    """Each custom field as "Id (Type.Name, IsSet true|false)", at most `limit` of them (all when None): ids and kinds, never a
+    """Each custom field as "Id (Type.Name, IsSet true|false)", plus ", hidden" for a hidden one, at most `limit` of them (all when None): ids and kinds, never a
     value. The reason of a skip is cut at DETAIL_LIMIT characters, so it names the first FIELDS_SHOWN and counts the rest."""
     shown = [
-        f"{entry['Id']} ({entry['Type']['Name']}, IsSet {str(entry['IsSet']).lower()})"
+        f"{entry['Id']} ({entry['Type']['Name']}, IsSet {str(entry['IsSet']).lower()}{', hidden' if is_hidden(entry) else ''})"
         for entry in (fields if limit is None else fields[:limit])
     ]
     more = f" and {len(fields) - limit} more" if limit is not None and len(fields) > limit else ""
@@ -2060,6 +2371,212 @@ async def area_custom_properties(m: Matrix) -> None:
     )
 
 
+def check_document(
+    record: dict[str, Any], tool: str, ident: str, *, title: str | None = None, parent: Any = _MISSING, status: int = DOCUMENT_ACTIVE
+) -> None:
+    """The document record a tool answered is the document `ident` of the test client with the status (and, when given, the title and
+    the parent: None = the top level) that the step asked for. Ids and the run's own title only in the messages."""
+    check(same_guid(record.get("Id"), ident), f"{tool}: the answer is for another document")
+    if title is not None:
+        expect(f"{tool} Title", record.get("Title"), title)
+    expect(f"{tool} ClientId", record.get("ClientId"), SITE.test_client)
+    expect(f"{tool} Status.Id", dig(record, "Status", "Id"), status)
+    if parent is not _MISSING:
+        shown = record.get("ParentDocumentId")
+        if parent is None:
+            expect(f"{tool} ParentDocumentId", shown, None)
+        else:
+            check(same_guid(shown, parent), f"{tool}: ParentDocumentId is not the parent that was asked for")
+
+
+def check_not_shared(record: dict[str, Any], tool: str) -> None:
+    """The document is not shared: the public link and the client portal are off (a new document, a copy, an unshared one)."""
+    for flag in ("PublicLinkEnabled", "PublishToPortalEnabled"):
+        expect(f"{tool} {flag}", record.get(flag), False)
+
+
+def attachment_names(record: dict[str, Any]) -> list[Any]:
+    """The Name of every attachment of a document record (the urls carry an access token and are never looked at)."""
+    return [dig(item, "Name") for item in (record.get("Attachments") or [])]
+
+
+def child_ids(record: dict[str, Any]) -> set[str]:
+    """The lower-cased Ids of the Children of a document record."""
+    return {
+        item["Id"].lower() for item in (record.get("Children") or []) if isinstance(item, dict) and is_guid(item.get("Id"))
+    }
+
+
+async def refuse_dropping_the_attachment(m: Matrix, document_id: str, other_name: str) -> None:
+    """The negative check of the attachments: update_document with a list that LEAVES OUT the current file must be refused locally.
+
+    Gorelo replaces the whole attachment list, so the tool reads the document first and refuses a list that would drop a current file
+    unless remove_attachment_names names it. It passes only on that refusal: a ToolFailed with no HTTP status whose text says the
+    attachment "would be removed", exactly one request (the read) and no write let through by the guard. Anything else is a
+    CheckFailed saying what happened. The file name is never printed."""
+    requests, writes = m.pacer.requests, m.guard.writes_allowed
+    try:
+        await m.tool(
+            "update_document",
+            document_id=document_id,
+            attachments=[{"name": other_name, "url": "https://files.example.invalid/" + other_name}],
+        )
+    except ToolFailed as exc:
+        sent, wrote = m.pacer.requests - requests, m.guard.writes_allowed - writes
+        if wrote:
+            raise CheckFailed(
+                f"update_document with a list that leaves the current file out let {wrote} write request(s) through to Gorelo; "
+                f"look at document {document_id} in the Gorelo app: its attachments may have been replaced"
+            ) from None
+        if exc.status is None and sent == 1 and "would be removed" in exc.text:
+            m.note("update_document with a list that leaves the current file out: refused locally after its read of the document, nothing was sent but that GET")
+            return
+        status = f"HTTP {exc.status}" if exc.status is not None else "no HTTP answer"
+        raise CheckFailed(
+            "update_document with a list that leaves the current file out was not refused locally after one GET and before any "
+            f"PATCH, so the negative check did not pass ({sent} request(s), {status})"
+        ) from None
+    raise CheckFailed(
+        "update_document ACCEPTED a list that leaves the current file out (a PATCH reached Gorelo): look at document "
+        f"{document_id} in the Gorelo app, its attachments may have been replaced"
+    )
+
+
+async def area_documents(m: Matrix) -> None:
+    """Two documents of the test client (a document and its copy), run through every document tool but share_document.
+
+    A document cannot be deleted through the API, so both are a known residue from the moment they exist: each is recorded in the
+    manifest before and after its create, the area archives both at the end (mark_archived) and the cleanup archives what a stopped
+    run left active. Sharing is never turned on: the tool set has no share_document and the guard refuses a true flag. Every answer
+    is checked and the notes say what Gorelo did, because these steps are also the probes of the document assumptions nobody has
+    tested live (see the module docstring)."""
+    if not m.with_documents:  # nothing is announced or sent: the document tools are not even callable without the flag
+        raise Skipped(DOCUMENTS_SKIP_REASON)
+    missing = await m.probe_scope("list_documents", page_size=1)  # a key without the Documents scope ends the area here, as a skip
+    if missing is not None:
+        raise Skipped(f"scope missing: {missing}")
+    run, client = m.manifest.run_id, SITE.test_client
+    label = m.manifest.label("document")
+    main = await m.create(
+        "document", label, {"client_id": client, "parent_document_id": None}, "create_document",
+        {"title": label, "client_id": client, "body": f"<p>{label}</p>"},
+    )
+    main_id = main["Id"]
+    check_document(main, "create_document", main_id, title=label, parent=None)
+    check_not_shared(main, "create_document")
+    m.note(f"document {main_id} of client {client} created at the top level, not shared; {DOCUMENT_RESIDUE_TAIL}")
+
+    title2, alternate = m.manifest.label("document (updated)"), m.manifest.label("portal name")
+    updated = await m.tool(
+        "update_document", document_id=main_id, title=title2, body=f"<p>{title2}</p>", alternate_name=alternate, is_starred=True
+    )
+    check_document(updated, "update_document", main_id, title=title2, parent=None)
+    expect("update_document AlternateName", updated.get("AlternateName"), alternate)
+    expect("update_document IsStarred", updated.get("IsStarred"), True)
+    check(run in str(updated.get("Body")), "update_document: the body in the answer does not hold the text that was sent")
+    fresh = await m.tool("get_document", document_id=main_id)
+    check_document(fresh, "get_document", main_id, title=title2, parent=None)
+    expect("get_document IsStarred", fresh.get("IsStarred"), True)
+
+    copy_label = m.manifest.label("document copy")
+    copy = await m.create(
+        "document", copy_label, {"client_id": client, "parent_document_id": None, "duplicate_of": main_id}, "duplicate_document",
+        {"document_id": main_id, "title": copy_label},
+    )
+    copy_id = copy["Id"]
+    check(not same_guid(copy_id, main_id), "duplicate_document answered the original's Id, not a copy")
+    check_document(copy, "duplicate_document", copy_id, title=copy_label, parent=None)
+    check_not_shared(copy, "duplicate_document")
+    expect("duplicate_document IsStarred (the star starts off)", copy.get("IsStarred"), False)
+    m.note("the copy of a starred document starts with the star, the public link and the portal off, as the spec says")
+    await m.document_listing("both documents", {main_id: True, copy_id: True})
+
+    file_name = f"{run}-document.txt"
+    upload_label = m.manifest.label("document attachment")
+    upload = await m.create(
+        "attachment", upload_label, {"document_id": main_id}, "upload_attachment",
+        {"item_type": "document", "item_id": main_id, "filename": file_name, "content_text": f"{upload_label}: a small text file."},
+        ident=lambda record: record["name"],
+    )
+    attached = await m.tool(
+        "update_document", document_id=main_id, attachments=[{"name": upload["name"], "url": upload["url"]}]
+    )
+    check(upload["name"] in attachment_names(attached), "update_document: the answer does not list the uploaded file")
+    await refuse_dropping_the_attachment(m, main_id, f"{run}-other.txt")
+    body2 = f"<p>{title2}: second body</p>"
+    kept = await m.tool("update_document", document_id=main_id, body=body2)
+    check(upload["name"] in attachment_names(kept), "update_document with a new body: the file is no longer attached")
+    m.note("a changed body kept the attachment (the document attachments belong to the current version, the spec says)")
+    cleared = await m.tool("update_document", document_id=main_id, clear_fields=["attachments"])
+    expect("update_document clear_fields=['attachments'] Attachments", attachment_names(cleared), [])
+
+    exported = await m.tool_result("export_document_pdf", document_id=main_id)
+    try:
+        m.note(f"export_document_pdf: {check_file(exported)}")
+    except ShapeError as exc:
+        raise CheckFailed(f"export_document_pdf: {exc}") from None
+
+    versions = await m.tool("list_document_versions", document_id=main_id, page_size=50)
+    rows = [row for row in (versions.get("items") or []) if isinstance(row, dict)]
+    check(len(rows) >= 2, f"list_document_versions lists {len(rows)} version(s) after a create and an update, expected at least 2")
+    expect("versions that are current", sum(1 for row in rows if row.get("IsCurrent") is True), 1)
+    originals = [row for row in rows if row.get("Title") == label and is_guid(row.get("VersionId"))]
+    check(len(originals) == 1, f"list_document_versions: {len(originals)} versions have the title the document was created with, expected 1")
+    version_id = originals[0]["VersionId"]
+    old = await m.tool("get_document_version", document_id=main_id, version_id=version_id)
+    check(same_guid(old.get("VersionId"), version_id), "get_document_version returned another version")
+    expect("get_document_version Title", old.get("Title"), label)
+    restored = await m.tool("restore_document_version", document_id=main_id, version_id=version_id)
+    check_document(restored, "restore_document_version", main_id, title=label, parent=None)
+    back = await m.tool("get_document", document_id=main_id)
+    expect("get_document Title after the restore of the oldest version", back.get("Title"), label)
+    m.note(f"{len(rows)} versions listed; the oldest was made current again and the document reads its title again")
+
+    linked = await m.tool("add_document_related_items", document_id=main_id, related_items=[{"item_type": "document", "item_id": copy_id}])
+    check(
+        any(dig(row, "ItemType", "Id") == 1 and same_guid(row.get("ItemId"), copy_id) for row in (linked.get("items") or [])),
+        "add_document_related_items: the answer does not list the link to the copy",
+    )
+    related = (await m.tool("list_document_related_items", document_id=main_id)).get("items") or []
+    links = [row for row in related if isinstance(row, dict) and same_guid(row.get("ItemId"), copy_id) and is_id(row.get("Id"))]
+    check(len(links) == 1, f"list_document_related_items shows {len(links)} links to the copy, expected 1")
+    link_id = links[0]["Id"]
+    gone = await m.tool("remove_document_related_item", document_id=main_id, related_item_id=link_id, confirm=True)
+    expect("remove_document_related_item Id", gone.get("Id"), link_id)
+    after = (await m.tool("list_document_related_items", document_id=main_id)).get("items") or []
+    check(
+        not any(isinstance(row, dict) and same_guid(row.get("ItemId"), copy_id) for row in after),
+        "list_document_related_items still shows the link that was removed",
+    )
+
+    into = await m.tool("move_document", document_id=main_id, parent_document_id=copy_id)
+    check_document(into, "move_document (under the copy)", main_id, parent=copy_id)
+    parent = await m.tool("get_document", document_id=copy_id)
+    check(main_id.lower() in child_ids(parent), "get_document of the copy does not list the moved document among its children")
+    m.note("a document moved under another one took its client (ClientId read back as the test client)")
+    top = await m.tool("move_document", document_id=main_id, client_id=client)
+    check_document(top, "move_document (back to the top level)", main_id, parent=None)
+    parent = await m.tool("get_document", document_id=copy_id)
+    check(main_id.lower() not in child_ids(parent), "get_document of the copy still lists the document that was moved out")
+
+    unshared = await m.tool("unshare_document", document_id=main_id, public_link=True, publish_to_portal=True)
+    check_document(unshared, "unshare_document", main_id, parent=None)
+    check_not_shared(unshared, "unshare_document")
+
+    archived = await m.tool("archive_document", document_id=copy_id)
+    check_document(archived, "archive_document (the copy)", copy_id, parent=None, status=DOCUMENT_ARCHIVED)
+    back_again = await m.tool("restore_document", document_id=copy_id)
+    check_document(back_again, "restore_document (the copy)", copy_id, parent=None)
+    m.note("an archived document was restored and reads Active again at the top level")
+
+    for ident, name in ((copy_id, "the copy"), (main_id, "the first document")):
+        done = await m.tool("archive_document", document_id=ident)
+        check_document(done, f"archive_document ({name})", ident, status=DOCUMENT_ARCHIVED)
+        m.mark_archived(ident, "archived by the write matrix (archive_document)")
+    await m.document_listing("the active list", {main_id: False, copy_id: False})
+    await m.document_listing("status_ids [2]", {main_id: True, copy_id: True}, status_ids=[DOCUMENT_ARCHIVED])
+
+
 async def area_invoices(m: Matrix) -> None:
     """A Draft invoice for the test client, created, read, listed, exported as a PDF and deleted again.
 
@@ -2152,18 +2669,19 @@ async def area_invoices(m: Matrix) -> None:
 
 
 async def check_nobody_can_be_emailed(m: Matrix) -> None:
-    """Raise Skipped unless nobody could be emailed the Approved invoice: every contact of the test client is Inactive and no
-    location of the test client names a billing contact. Two reads, nothing is written, and a failed read fails the area (it
-    cannot be said that nobody could be emailed). The reasons name ids only, never a contact."""
+    """Raise Skipped unless nobody could be emailed the Approved invoice: the test client has at least one contact (a list that is
+    empty proves nothing: contacts in a status that no StatusIds value lists are not returned) and every contact is in a state of
+    UNEMAILABLE_CONTACT_STATUS_IDS, and no location of the test client names a billing contact. Two reads, nothing is written, and a
+    failed read fails the area (it cannot be said that nobody could be emailed). The reasons name ids only, never a contact."""
     rows: list[Any] = []
-    arguments: dict[str, Any] = {"client_id": SITE.test_client, "page_size": 200}
+    arguments: dict[str, Any] = {"client_id": SITE.test_client, "page_size": 200, "status_ids": CONTACT_STATUS_IDS}
     for _ in range(CONTACT_PAGES):
         page = await m.tool("list_contacts", **arguments)
         found = page.get("items")
         if not isinstance(found, list):
             raise Skipped(
                 f"precondition not met: list_contacts did not answer a list, so it cannot be said that every contact of "
-                f"client {SITE.test_client} is Inactive; nothing was sent"
+                f"client {SITE.test_client} cannot be emailed; nothing was sent"
             )
         rows.extend(found)
         if page.get("has_more") is not True:
@@ -2172,19 +2690,26 @@ async def check_nobody_can_be_emailed(m: Matrix) -> None:
         if not (isinstance(cursor, str) and cursor):
             raise Skipped(
                 f"precondition not met: list_contacts has more contacts of client {SITE.test_client} but no cursor to read "
-                "them, so it cannot be said that every one is Inactive; nothing was sent"
+                "them, so it cannot be said that every one cannot be emailed; nothing was sent"
             )
         arguments["cursor"] = cursor
     else:
         raise Skipped(
             f"precondition not met: client {SITE.test_client} has more than {CONTACT_PAGES * 200} contacts, too many to "
-            "check that every one is Inactive; nothing was sent"
+            "check that every one cannot be emailed; nothing was sent"
         )
-    awake = [row for row in rows if not inactive_contact(row)]
+    if not rows:
+        raise Skipped(
+            f"precondition not met: list_contacts lists no contact of client {SITE.test_client}, which proves nothing: contacts in a "
+            "status that no StatusIds value lists are not returned, so it cannot be said "
+            "that nobody could be emailed; nothing was sent"
+        )
+    awake = [row for row in rows if not unemailable_contact(row)]
     if awake:
         raise Skipped(
-            f"precondition not met: {len(awake)} of the {len(rows)} contacts of client {SITE.test_client} are not Inactive "
-            f"(ids {row_ids(awake)}), so an Approved invoice might be emailed to one of them; nothing was sent"
+            f"precondition not met: {len(awake)} of the {len(rows)} contacts of client {SITE.test_client} are not in a state that "
+            f"cannot be emailed (status ids {', '.join(map(str, UNEMAILABLE_CONTACT_STATUS_IDS))}; contacts {row_ids(awake)}), so an "
+            "Approved invoice might be emailed to one of them; nothing was sent"
         )
     locations = (await m.tool("list_client_locations", client_id=SITE.test_client)).get("items")
     if not isinstance(locations, list):
@@ -2200,8 +2725,8 @@ async def check_nobody_can_be_emailed(m: Matrix) -> None:
             "might be emailed to them; nothing was sent"
         )
     m.note(
-        f"nobody could be emailed: all {len(rows)} contacts of client {SITE.test_client} are Inactive and none of its "
-        f"{len(locations)} locations names a billing contact"
+        f"nobody could be emailed: all {len(rows)} contacts of client {SITE.test_client} are in a state that cannot be emailed "
+        f"(status ids {', '.join(map(str, UNEMAILABLE_CONTACT_STATUS_IDS))}) and none of its {len(locations)} locations names a billing contact"
     )
 
 
@@ -2211,10 +2736,14 @@ async def area_approved_invoice(m: Matrix) -> None:
     alone (--with-approved-invoice, --only approved_invoice), behind a guard built with allow_approved_invoice.
 
     Nothing is sent without the flag, and nothing is written unless the preconditions hold (nobody could be emailed, an
-    item to bill). The invoice is recorded the moment it is created. It is never voided before ExternalId says it reached
-    the accounting system: an invoice that never syncs fails the area and is left, Approved, for the user."""
+    item to bill). Since 1.3.0 the first precondition cannot be proven (UNEMAILABLE_CONTACT_STATUS_IDS is empty), so the area is
+    skipped before its first request until the operator decides what proves it. The invoice is recorded the moment it is created.
+    It is never voided before ExternalId says it reached the accounting system: an invoice that never syncs fails the area and is
+    left, Approved, for the user."""
     if not m.with_approved_invoice:  # nothing is announced or sent: the tools are not even callable without the flag
         raise Skipped(APPROVED_INVOICE_SKIP_REASON)
+    if not UNEMAILABLE_CONTACT_STATUS_IDS:  # nothing proves that nobody could be emailed: FAIL CLOSED, before the first request
+        raise Skipped(APPROVED_INVOICE_GATE_CLOSED)
     await check_nobody_can_be_emailed(m)
     found = await m.tool("list_items", type="product", status="active", page_size=CATALOG_PAGE)
     item_id = billable_item(found.get("items"))
@@ -2541,6 +3070,7 @@ AREAS: tuple[Area, ...] = (
     Area("items", area_items),
     Area(CUSTOM_ASSETS_AREA, area_custom_assets),
     Area(CUSTOM_PROPERTIES_AREA, area_custom_properties),
+    Area(DOCUMENTS_AREA, area_documents),
     Area("invoices", area_invoices),
     Area(APPROVED_INVOICE_AREA, area_approved_invoice),
     Area("uptime", area_uptime),
@@ -2673,7 +3203,8 @@ class MatrixReport:
     interrupted: str | None = None
     voided: list[str] = field(default_factory=list)
     assets: list[str] = field(default_factory=list)
-    asset_clients: dict[str, Any] = field(default_factory=dict)  # asset id -> client_id of its manifest details (see residue_asset_clients)
+    asset_texts: dict[str, str] = field(default_factory=dict)  # asset id -> the residue text of its record (see residue_asset_texts)
+    documents: list[str] = field(default_factory=list)  # the documents of the run: none can be deleted through the API (residue_documents)
 
     @property
     def ok(self) -> bool:
@@ -2723,8 +3254,16 @@ class MatrixReport:
             for record in leftovers:  # a value the run set on the test client itself and could not clear: say where, and how
                 if record.kind == "custom_property":
                     lines.append(custom_property_summary(record, self.run_id, self.manifest_path))
-        for asset in self.assets:  # a custom asset cannot be deleted through the API: the operator removes it by hand
-            lines.append(f"reminder: custom asset {asset} {custom_asset_residue(self.asset_clients.get(asset))}")
+        # this harness never deletes a custom asset (the spec's soft DELETE is not used): the operator removes it by hand
+        for asset in self.assets:
+            lines.append(f"reminder: custom asset {asset} {self.asset_texts.get(asset, CUSTOM_ASSET_RESIDUE)}")
+        if self.assets:  # and a stranded one is moved back by hand: the cleanup never sends that PATCH
+            lines.append(f"reminder: {CUSTOM_ASSET_NEVER_MOVED_BACK}")
+        if self.documents:  # a document cannot be deleted through the API either: they stay in Gorelo, archived
+            lines.append(
+                f"reminder: {len(self.documents)} document(s) of this run stay in Gorelo {DOCUMENT_RESIDUE_TAIL}; the cleanup lines above "
+                f"say which are archived: search the Documents area of Gorelo for {self.run_id}"
+            )
         for name in self.voided:  # the last thing said before the result: an invoice voided in Gorelo may still be open in Xero
             lines.append(f"reminder: approved invoice {name}: {VOID_REMINDER}")
         lines.append("result: " + ("PASSED" if self.ok else "FAILED"))
@@ -2751,16 +3290,26 @@ def voided_invoices(manifest: Manifest) -> list[str]:
 
 
 def residue_assets(manifest: Manifest) -> list[str]:
-    """The ids of the custom assets of this run: none of them can be deleted through the API, so each stays on the test
-    client until the operator removes it in the Gorelo app (the cleanup reports each as a known residue, CUSTOM_ASSET_RESIDUE)."""
+    """The ids of the custom assets of this run: this harness never deletes a custom asset (the spec's soft DELETE is not used), so
+    each stays on the test client until the operator removes it in the Gorelo app (the cleanup reports each as a known residue,
+    CUSTOM_ASSET_RESIDUE)."""
     return [str(record.id) for record in manifest.all_created() if record.kind == "custom_asset"]
 
 
-def residue_asset_clients(manifest: Manifest) -> dict[str, Any]:
-    """Where each custom asset of this run may be: its id -> the client_id of its manifest details. The negative check changes
-    that to the second client (it was accepted) or to CUSTOM_ASSET_CLIENT_UNKNOWN (it is not known); the reminder names it."""
+def residue_documents(manifest: Manifest) -> list[str]:
+    """The ids of the documents of this run: none of them can be deleted through the API, so each stays in Gorelo (archived when the
+    run or the cleanup could do it), and the summary says so."""
+    return [str(record.id) for record in manifest.all_created() if record.kind == "document"]
+
+
+def residue_asset_texts(manifest: Manifest) -> dict[str, str]:
+    """Where each custom asset of this run may be, in the words of its record: its id -> the outcome the matrix or the cleanup wrote
+    last. An outcome ends with CUSTOM_ASSET_RESIDUE_TAIL, so the cleanup keeps it; an asset with no outcome yet reads as the residue
+    of its client_id (custom_asset_residue)."""
     return {
-        str(record.id): record.details.get("client_id") for record in manifest.all_created() if record.kind == "custom_asset"
+        str(record.id): record.outcome or custom_asset_residue(record.details.get("client_id"))
+        for record in manifest.all_created()
+        if record.kind == "custom_asset"
     }
 
 
@@ -2774,6 +3323,8 @@ async def run_matrix(
     with_approved_invoice: bool = False,
     with_custom_assets: bool = False,
     with_custom_properties: bool = False,
+    with_documents: bool = False,
+    with_asset_move: bool = False,
     settings: Settings | None = None,
     transport: Any = None,
     pace: float = PACE_SECONDS,
@@ -2793,8 +3344,8 @@ async def run_matrix(
                  it was selected with areas=["items"], and the three item tools cannot be called.
     with_custom_assets run the custom_assets area (--with-custom-assets). Without it the area is skipped with
                  CUSTOM_ASSETS_SKIP_REASON, also when it was selected with areas=["custom_assets"], and the three custom asset
-                 tools cannot be called. The asset it creates cannot be deleted through the API: the cleanup reports it as a
-                 known residue and the summary tells the operator to remove it in the Gorelo app. Not allowed beside
+                 tools cannot be called. This harness never deletes the asset it creates (the spec's soft DELETE is not used): the
+                 cleanup reports it as a known residue and the summary tells the operator to remove it in the Gorelo app. Not allowed beside
                  with_approved_invoice (that run takes no other flag).
     with_custom_properties run the custom_properties area (--with-custom-properties). Without it the area is skipped with
                  CUSTOM_PROPERTIES_SKIP_REASON, also when it was selected with areas=["custom_properties"], and nothing is sent
@@ -2803,6 +3354,16 @@ async def run_matrix(
                  runs only while no custom field of the test client is set, and every other field must read as at the first read
                  after each step; the field is recorded in the manifest before the first write and the cleanup clears it if the
                  run stopped in between. Not allowed beside with_approved_invoice (that run takes no other flag).
+    with_asset_move move the custom asset of the custom_assets area to the second client and back (--with-asset-move). It needs
+                 with_custom_assets (UsageError otherwise, before anything is created) and builds the guard with
+                 allow_custom_asset_move; the move is skipped, with a note, when the second client is not Active or has no location.
+    with_documents run the documents area (--with-documents). Without it the area is skipped with DOCUMENTS_SKIP_REASON, also when it
+                 was selected with areas=["documents"], and the sixteen document tools cannot be called. It creates two documents of
+                 the test client that cannot be deleted through the API: the area archives them, the cleanup archives what a
+                 stopped run left, and the summary tells the operator that they stay in Gorelo. Not allowed beside
+                 with_approved_invoice (that run takes no other flag).
+    A run needs the TEST CLIENT Active: right after the check of the client names run_matrix raises guard.ClientNotActive (a
+    SiteConfigError: "cannot start", exit status 2) when it is not, before a manifest is made or a request is sent.
     with_invoices run the invoices area (--with-invoices). Without it the area is skipped with INVOICES_SKIP_REASON,
                  also when it was selected with areas=["invoices"], and the six invoice tools cannot be called.
     with_approved_invoice run the approved_invoice area (--with-approved-invoice), which approves one $1 invoice on
@@ -2834,6 +3395,7 @@ async def run_matrix(
             for flag, given in (
                 ("--with-items", with_items), ("--with-invoices", with_invoices),
                 ("--with-custom-assets", with_custom_assets), ("--with-custom-properties", with_custom_properties),
+                ("--with-documents", with_documents), ("--with-asset-move", with_asset_move),
                 ("--leftovers", leftovers),
                 ("--skip-email", skip_email),
             )
@@ -2841,18 +3403,28 @@ async def run_matrix(
         ]
         if alongside:
             raise UsageError(f"--with-approved-invoice runs alone: it cannot be combined with {', '.join(alongside)}")
+    if with_asset_move and not with_custom_assets:
+        raise UsageError(
+            "--with-asset-move needs --with-custom-assets: only the custom_assets area creates the asset that moves to the second client and back"
+        )
     chosen = settings if settings is not None else live_settings()
-    needed = tools_for(with_items, with_invoices, with_approved_invoice, with_custom_assets)
-    offered = {spec.name for spec in REGISTRY.select(chosen.toolsets, chosen.destructive)}
+    needed = tools_for(with_items, with_invoices, with_approved_invoice, with_custom_assets, with_documents)
+    offered = {spec.name for spec in REGISTRY.select(chosen.toolsets, chosen.destructive, chosen.destructive_tools)}
     if needed - offered:  # a renamed or gated tool would otherwise show up half way through the run
         raise SetupError("the server does not offer the tools the matrix calls: " + ", ".join(sorted(needed - offered)))
-    await live_guard.verify_site_clients(chosen.api_key, transport=transport)  # the ids must be the named clients, before any write
-    manifest = Manifest.start(started, directory=directory)
+    # the ids must be the named clients, before any write; the same reads give the status of both: a write run needs the TEST client Active
+    facts = await live_guard.verify_site_clients(chosen.api_key, transport=transport, base_url=chosen.base_url)
+    # ClientNotActive (cannot start, exit 2): nothing but the two client reads was sent and no manifest is made
+    live_guard.require_active_test_client(facts)
+    second = facts.get(SITE.second_client) if isinstance(facts, dict) else None
+    manifest = Manifest.start(started, directory=directory, api_host=chosen.api_host)
+    echo(f"api host: {chosen.api_host}")
     echo(f"write matrix {manifest.run_id}: manifest {manifest.path}")
     echo("areas: " + ", ".join(area.key for area in selected))
     guard = LiveGuard(
         "write", manifest, require_intents=True, allow_approved_invoice=with_approved_invoice,
         allow_custom_assets=with_custom_assets, allow_custom_properties=with_custom_properties,
+        allow_custom_asset_move=with_asset_move, allow_documents=with_documents, base_url=chosen.base_url,
     )
     pacer = Pacer(pace)
     hooks = {"request": [guard, pacer]}
@@ -2882,6 +3454,9 @@ async def run_matrix(
                     with_approved_invoice=with_approved_invoice,
                     with_custom_assets=with_custom_assets,
                     with_custom_properties=with_custom_properties,
+                    with_documents=with_documents,
+                    with_asset_move=with_asset_move,
+                    second_client_active=second is not None and second.active,
                     sync_interval=sync_interval,
                     sync_polls=sync_polls,
                     gorelo=gorelo,
@@ -2924,7 +3499,8 @@ async def run_matrix(
             interrupted=interrupted,
             voided=voided_invoices(manifest),  # after the cleanup: it may have found an invoice void too
             assets=residue_assets(manifest),
-            asset_clients=residue_asset_clients(manifest),
+            asset_texts=residue_asset_texts(manifest),
+            documents=residue_documents(manifest),
         )
         for line in report.render():
             echo(scrub(line, chosen.api_key))
@@ -2962,9 +3538,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--with-custom-assets",
         action="store_true",
-        help="also run the custom_assets area (creates and updates ONE custom asset on the test client, which CANNOT be deleted "
-        "through the API: it stays there until removed in the Gorelo app); without it the area is skipped, also under "
-        "--only custom_assets",
+        help="also run the custom_assets area (creates and updates ONE custom asset on the test client; this harness never deletes "
+        "a custom asset (the spec's soft DELETE is not used), so it stays there until removed in the Gorelo app); without it the area "
+        "is skipped, also under --only custom_assets",
+    )
+    parser.add_argument(
+        "--with-asset-move",
+        action="store_true",
+        help="also MOVE the custom asset of the custom_assets area to the second client and back (only together with the custom "
+        "assets flag; the second client must be Active and have a location; the manifest names the second client before the move "
+        "is sent)",
+    )
+    parser.add_argument(
+        "--with-documents",
+        action="store_true",
+        help="also run the documents area (creates two documents on the test client, which CANNOT be deleted through the API: the "
+        "run archives them and they stay in Gorelo until removed in the Gorelo app; sharing is never turned on); without it the "
+        "area is skipped, also under --only documents",
     )
     parser.add_argument(
         "--with-custom-properties",
@@ -2985,7 +3575,9 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run the approved_invoice area, ALONE (needs --only approved_invoice and no other flag): it approves a "
         "$1 invoice on the test client, which pushes it to the connected accounting system, then voids it (a voided invoice "
-        "stays listed as Void); without the flag the area is skipped, also under --only approved_invoice",
+        "stays listed as Void); the area is skipped before its first request until UNEMAILABLE_CONTACT_STATUS_IDS names the "
+        "contact statuses that cannot be emailed (empty since 1.3.0, so the gate is closed); without the flag the area is skipped, "
+        "also under --only approved_invoice",
     )
     args = parser.parse_args(argv)
     try:
@@ -2999,6 +3591,8 @@ def main(argv: list[str] | None = None) -> int:
                 with_approved_invoice=args.with_approved_invoice,
                 with_custom_assets=args.with_custom_assets,
                 with_custom_properties=args.with_custom_properties,
+                with_documents=args.with_documents,
+                with_asset_move=args.with_asset_move,
             )
         )
     except UsageError as exc:

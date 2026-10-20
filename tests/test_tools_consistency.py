@@ -7,8 +7,8 @@ These checks look at ALL tools at once (every toolset on, delete tools enabled):
 * every write that can email says who is emailed (or that nobody is);
 * every paged list says how to read on: pass next_cursor back as cursor, same filters, until has_more is false;
 * no tool text names a destructive tool without saying that it exists only when the operator enabled the destructive
-  tools (", when deletes are enabled" for a delete or void tool, ", when enabled" for create_approved_invoice, the one
-  gated tool that is not a delete: it approves an invoice, which pushes it to accounting);
+  tools (", when deletes are enabled" for a delete or void tool, ", when enabled" for create_approved_invoice and
+  share_document, the two gated tools that are not deletes: the first approves an invoice, which pushes it to accounting);
 * every paged list refuses a blank cursor, every clear_fields lists its names in the schema, a tool outside the
   projects toolset says so when it points at a project tool, the attachments of every tool that takes them are the
   name and url upload_attachment returned, and no tool text carries a number that belongs to one tenant;
@@ -73,6 +73,8 @@ async def test_the_checked_listing_holds_every_registered_tool(server_factory):
         "delete_ticket_comment",
         "delete_time_entry",
         "delete_uptime_check",
+        "remove_document_related_item",
+        "share_document",
     }
 
 
@@ -208,6 +210,9 @@ PAGED_LISTS = {
     "list_uptime_checks",
     "list_contracts",
     "list_alerts",
+    "list_documents",
+    "list_document_versions",
+    "list_deletions",
 }
 
 
@@ -233,9 +238,13 @@ async def test_every_paged_list_says_to_pass_next_cursor_back_until_has_more_is_
 
 
 # The words that must follow the name of a destructive tool in a text that is not itself destructive. Every delete or
-# void tool is "when deletes are enabled". create_approved_invoice does not delete anything: the flag that registers it
-# is the same one, but the model is told "when enabled", which is true of it and does not promise a delete.
-GATE_CONDITIONS = {"create_approved_invoice": ", when enabled"}
+# void tool is "when deletes are enabled". create_approved_invoice and share_document do not delete anything: the flag that
+# registers them is the same one, but the model is told "when enabled", which is true of them and does not promise a delete.
+GATE_CONDITIONS = {
+    "create_approved_invoice": ", when enabled",
+    "share_document": ", when enabled",
+    "remove_document_related_item": ", when deletes are enabled",
+}
 DELETE_CONDITION = ", when deletes are enabled"
 
 
@@ -261,6 +270,9 @@ async def test_no_tool_text_names_a_destructive_tool_without_saying_deletes_must
         ("create_invoice", "delete_invoice"),
         ("create_item", "delete_item"),
         ("create_ticket_comment", "delete_ticket_comment"),
+        ("list_document_related_items", "remove_document_related_item"),
+        ("unshare_document", "share_document"),
+        ("update_document", "share_document"),
         ("update_time_entry", "delete_time_entry"),
     }
 
@@ -346,7 +358,9 @@ async def test_no_other_tool_text_talks_about_voiding_so_none_can_leave_the_acco
     for name in ("list_invoices", "get_invoice"):
         mentions = [text for text in texts_of(tools[name]).values() if VOID_WORD.search(text)]
         assert all(re.search(r"\bVoid\b", text) and "voided" not in text and "voids" not in text for text in mentions), name
-    assert [text for text in texts_of(tools["list_invoices"]).values() if "4 Void" in text] == ["1 Draft, 3 Paid, 4 Void, 5 Approved."]
+    assert [text for text in texts_of(tools["list_invoices"]).values() if "4 Void" in text] == [
+        "1 Draft, 2 Submitted, 3 Paid, 4 Void, 5 Approved. Omitted: every status; deleted invoices are never listed."
+    ]
     for name in ("list_invoices", "get_invoice"):
         assert "A Void invoice can still show AmountDue: read Status first." in flat(tools[name].description), name
 
@@ -357,6 +371,8 @@ async def test_no_other_tool_text_talks_about_voiding_so_none_can_leave_the_acco
 
 # The arguments each paged list needs besides the cursor (every other paged list needs none).
 PAGED_BASE_ARGS = {
+    "list_deletions": {"type_ids": [1]},
+    "list_document_versions": {"document_id": uid(1)},
     "list_ticket_comments": {"ticket_id": uid(1)},
     "list_form_responses": {"form_id": "form-1"},
     "list_project_comments": {"project_id": uid(1)},
@@ -382,7 +398,10 @@ async def test_every_paged_list_refuses_a_blank_cursor_before_any_http_call(serv
 async def test_every_clear_fields_parameter_lists_its_accepted_names_in_the_schema(server_factory):
     tools = await all_tools(server_factory)
     with_clear = {name for name, tool in tools.items() if "clear_fields" in tool.inputSchema["properties"]}
-    assert with_clear == {"update_contact", "update_custom_asset", "update_item", "update_project", "update_project_task", "update_ticket"}
+    assert with_clear == {
+        "update_contact", "update_custom_asset", "update_document", "update_item", "update_project", "update_project_task",
+        "update_ticket",
+    }
     for name in sorted(with_clear):
         clear = tools[name].inputSchema["properties"]["clear_fields"]
         assert clear["type"] == "array", name
@@ -436,7 +455,7 @@ async def test_the_task_id_pointers_use_the_same_phrase(server_factory):
 async def test_every_attachments_parameter_says_to_pass_only_the_name_and_url_from_upload_attachment(server_factory):
     tools = await all_tools(server_factory)
     with_attachments = {name for name, tool in tools.items() if "attachments" in tool.inputSchema["properties"]}
-    assert with_attachments == {"create_project_comment", "create_ticket_comment", "create_time_entry"}
+    assert with_attachments == {"create_project_comment", "create_ticket_comment", "create_time_entry", "update_document"}
     for name in sorted(with_attachments):
         text = flat(tools[name].inputSchema["properties"]["attachments"]["description"])
         assert re.search(r"Pass only (?:the )?name and url", text), (name, text)

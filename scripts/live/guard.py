@@ -18,6 +18,11 @@ Modes:  "read"   only GET (and never the invoice PDF).
                  `allow_custom_properties=True` (off by default; only write_matrix --with-custom-properties sets it, and
                  a cleanup of a manifest that holds a custom_property record) opens the one PATCH of the test client
                  named below ("The custom properties"), and nothing else.
+                 `allow_custom_asset_move=True` (off by default; only write_matrix --with-asset-move sets it, and it needs
+                 allow_custom_assets) lets the PATCH of a custom asset name the second client, which MOVES the asset
+                 (see PATCH /assets/custom/{customAssetId} below), and nothing else.
+                 `allow_documents=True` (off by default; only write_matrix --with-documents sets it, never a cleanup) opens
+                 the document writes named below ("The documents"), and nothing else.
 
 How a request is read: method; URL (https, the Gorelo API host, no credentials, base path /v1 stripped);
 every path segment is checked (no empty, dot, percent-encoded or odd segment), then the request is matched
@@ -58,7 +63,8 @@ Allowlist (write mode). "Run-created" means the id is in the manifest of this ru
                                   and 2 carry no ConversationId
     POST /tickets/{ticketId}/conversations/side-conversation   run-created ticket; Email and CcEmails allowed addresses
     POST /tickets/{ticketId}/conversations/approval            run-created ticket; ContactIds operator or run-created
-    POST /attachments             multipart; itemType Ticket, Task or Project and itemId a run-created record of it
+    POST /attachments             multipart; itemType Ticket, Task or Project and itemId a run-created record of it; itemType
+                                  Document only with allow_documents (never from a cleanup), itemId a run-created document
     POST /time-entries            TicketId (or TaskId) run-created; UserId is the operator user
     PATCH, DELETE /time-entries/{timeEntryId}, /items/{itemId}, /uptime/{checkId}   run-created record
     POST /items, /uptime, /projects    ClientId is the test client
@@ -76,12 +82,17 @@ Allowlist (write mode). "Run-created" means the id is in the manifest of this ru
                                   holds in read mode, where GET /api-keys is the one GET that is refused besides the PDF)
     POST /assets/custom           only with allow_custom_assets=True (write_matrix --with-custom-assets) and never from
                                   a cleanup; ClientId is the test client; Name starts with the run id (MCPTEST-...)
-    PATCH /assets/custom/{customAssetId}  only with allow_custom_assets=True; the path id is a custom asset this run
-                                  created; ClientId is required and is the test client, or the second client (the one
-                                  negative check of the custom_assets area sends a wrong client on purpose and expects
-                                  Gorelo to refuse it); Name, if present, starts with the run id
+    PATCH /assets/custom/{customAssetId}  only with allow_custom_assets=True (never from a cleanup); the path id is a
+                                  custom asset this run created; ClientId is optional (the tool sends it only to name the
+                                  asset's client or to move it): absent, or the test client, or, only with
+                                  allow_custom_asset_move, the second client = a MOVE of the asset, which also needs a
+                                  LocationId in the same body, no ContactId but null, and a manifest record of the asset whose
+                                  details client_id already names the second client (the area announces the move first); any
+                                  other client is refused; Name, if present, starts with the run id
     GET /assets/custom/hardware-types  a plain read
-    DELETE /assets/custom/{customAssetId}  never (a custom asset cannot be removed through the API)
+    GET /assets/custom/{customAssetId}  a plain read (contract a7954b24844b; the read-back of both custom asset writes)
+    GET /deletions                a plain read (the feed of deleted records, list_deletions)
+    DELETE /assets/custom/{customAssetId}  never: this harness never deletes a custom asset (the spec's soft DELETE is not used)
     POST /invoices                ClientId is the test client (a JSON integer); StatusId is present and exactly the JSON integer 1
                                   (a Draft: any other value, 5 (Approved, which pushes the invoice to the accounting
                                   system), "1", 1.0, true or no StatusId at all is refused); RecipientEmails absent,
@@ -98,6 +109,11 @@ Allowlist (write mode). "Run-created" means the id is in the manifest of this ru
                                   Void, still listed). The harness voids only with allow_approved_invoice=True, and then
                                   only an invoice recorded with status_id 5; any other invoice is refused (Paid 3, Void
                                   4 and an invoice with no recorded status are never deletable)
+    POST /documents, PATCH /documents/{documentId}, POST /documents/{documentId}/duplicate, POST and DELETE under
+    /documents/{documentId}/related-items, POST /documents/{documentId}/versions/{versionId}/restore
+                                  the document writes, only with allow_documents, never from a cleanup (except the one archive
+                                  described under "The documents" below); the GETs of a document, its PDF, its versions and its
+                                  related items are plain reads
     everything else               blocked
 
 Rules that apply to every JSON body: every string that looks like an email address must be an allowed
@@ -153,6 +169,31 @@ second client is never changed, and a run-created client never takes CustomPrope
 `writes_allowed` counts the requests the guard let through that are not a GET, so a harness can tell, by comparing it before and
 after a call, that the call sent no write (the negative check does).
 
+The documents (allow_documents=True, set only by write_matrix --with-documents, never by a cleanup): a document cannot be
+deleted through the API, so every document a run makes stays in Gorelo (the run archives it, StatusId 2). Every write is for a
+document THIS RUN created (kind "document" in the manifest) and for the test client alone, and nothing here ever turns sharing on:
+    POST /documents                       Title starts with the run id; exactly one place: ClientId the test client (a JSON
+                                          integer, a top-level document) or ParentDocumentId a run-created document (then no
+                                          ClientId: the document takes the parent's client); an INTERNAL document (neither) is
+                                          refused; Body embeds no data: image; with require_intents it needs an open "document" intent
+    PATCH /documents/{documentId}         the keys Title (starts with the run id), Body (no data: image), AlternateName (empty
+                                          or starts with the run id), IsStarred (a boolean), StatusId (exactly 1 or 2),
+                                          Attachments (a list of {Name, Url}: every Name a file this run uploaded to THAT
+                                          document, recorded in the manifest as an attachment with details document_id; [] removes
+                                          them all), Move ({ParentDocumentId: a run-created document other than the document
+                                          itself, no ClientId} or {ParentDocumentId: null, ClientId: the test client}; an
+                                          internal move is refused) and PublicLinkEnabled and PublishToPortalEnabled, which may only
+                                          be false: TRUE IS NEVER ALLOWED (a public link or the client portal makes the content
+                                          readable outside the MSP; share_document is not a tool of the matrix)
+    POST /documents/{id}/duplicate        a run-created source; Title, if present, starts with the run id; the body may be left out
+                                          entirely (the spec allows it); with require_intents it needs an open "document" intent
+    POST /documents/{id}/related-items    RelatedItems of 1 to 100 entries, each ItemTypeId exactly 1 (a Document) and an ItemId
+                                          that is a run-created document: no asset, device, contact or password is ever linked
+    DELETE /documents/{id}/related-items/{relatedItemId}   a run-created document, the link id a whole number
+    POST /documents/{id}/versions/{versionId}/restore      a run-created document, the version id a UUID
+A CLEANUP guard (cleanup=True) refuses all of these but one: PATCH /documents/{documentId} of a run-created document with the body
+{"StatusId": 2} and nothing else (the archive of what a stopped run left; allow_documents is not needed for it).
+
 The tickets' contacts: the guard sees a create request but not its answer, so it cannot learn a new ticket's
 id or who is stored on it. The harness records `contact_id` (int or None) and `cc_contact_ids` in the details of
 the ticket: the write matrix writes the STORED values it read back (manifest.update_details), not the ones it
@@ -163,10 +204,37 @@ harness records each one with the parent it belongs to (manifest.created("side_c
 label, {"ticket_id": ...}), and {"project_id": ..., "task_id": ...} for a task). A comment of type 3 or 4 goes
 only into a conversation recorded that way, of the right kind, on the very ticket (task) of the path.
 
-require_intents=True (opt-in) makes the manifest discipline mechanical: a request that creates a record (every
-POST except submission links) is refused unless the manifest holds an open intent of that kind, so a create
-the harness forgot to announce can never become an orphan. It checks that an intent is open, it does not count
-requests.
+require_intents=True (opt-in) makes the manifest discipline mechanical: a POST that creates a record is refused unless the
+manifest holds an open intent of the kind that goes with it (the kinds are the values of _CREATES), so a create the harness
+forgot to announce can never become an orphan. It checks that an intent is open, it does not count requests. The POSTs the
+guard lets through, with the intent kind each one needs (a POST with no kind needs none: it creates no record the harness
+has to find again):
+    POST /clients                                                             client
+    POST /contacts                                                            contact
+    POST /tickets                                                             ticket
+    POST /tickets/{ticketId}/comments                                         comment
+    POST /tickets/{ticketId}/conversations/side-conversation                  side_conversation
+    POST /tickets/{ticketId}/conversations/approval                           approval
+    POST /attachments                                                         attachment
+    POST /time-entries                                                        time_entry
+    POST /assets/custom                                                       custom_asset
+    POST /items                                                               item
+    POST /uptime                                                              uptime
+    POST /invoices                                                            invoice
+    POST /projects                                                            project
+    POST /projects/{projectId}/sections                                       section
+    POST /projects/{projectId}/tasks                                          task
+    POST /projects/{projectId}/comments                                       project_comment
+    POST /projects/{projectId}/tasks/{taskId}/comments                        project_comment
+    POST /projects/{projectId}/tasks/{taskId}/conversations/approval          approval
+    POST /projects/{projectId}/tasks/{taskId}/conversations/side-conversation side_conversation
+    POST /documents                                                           document
+    POST /documents/{documentId}/duplicate                                    document
+    POST /forms/{formId}/submission-links
+    POST /documents/{documentId}/related-items
+    POST /documents/{documentId}/versions/{versionId}/restore
+The options that open some of these (allow_custom_assets, allow_approved_invoice, allow_documents) and the rules of a
+cleanup guard are in the allowlist above.
 """
 
 from __future__ import annotations
@@ -188,6 +256,7 @@ import httpx
 from gorelo_client import GORELO_BASE_URL, SIDE_EFFECT_GETS, normalize_op_key
 from scripts.live.manifest import ID_TYPES, Manifest, normalize_id
 from scripts.site_config import SiteConfig, SiteConfigError, site
+from settings import SettingsError, parse_base_url
 from spec import SpecIndex, load_spec_index
 
 TEST_EMAIL_DOMAIN = "example.invalid"
@@ -196,6 +265,23 @@ TEMP_CLIENT_PREFIX = "MCPTEST-"
 # site config (scripts/site_config.py, site.local.toml); the guard refuses to be built without it.
 API_HOSTS = frozenset({"api.usw.gorelo.io"})
 API_BASE_PATH = "/v1"
+
+
+def _checked_base_url(base_url: str) -> str:
+    """`base_url` as settings.parse_base_url normalizes it (https://<host>/v1). ValueError, naming GORELO_BASE_URL, when it is blank
+    or refused: the guard must never be built for a host outside gorelo.io."""
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise ValueError("base_url must be the Gorelo base URL of the run (Settings.base_url), not blank")
+    try:
+        return parse_base_url(base_url)
+    except SettingsError as exc:
+        raise ValueError(str(exc)) from None
+
+
+def api_hosts(base_url: str) -> frozenset[str]:
+    """The one host a run may call: the host of `base_url` (the Settings.base_url of the run)."""
+    return frozenset({str(urlsplit(_checked_base_url(base_url)).hostname)})
+
 
 CONVERSATION_PUBLIC, CONVERSATION_PRIVATE, CONVERSATION_SIDE, CONVERSATION_APPROVAL = 1, 2, 3, 4
 INVOICE_DRAFT, INVOICE_APPROVED = 1, 5  # Invoice StatusId: the harness creates (and deletes) Drafts; with
@@ -206,6 +292,11 @@ APPROVED_INVOICE_LIMIT = 1.0  # the most the one Approved invoice's line may bil
 # it nowhere (it is no recorded field, like any other Id the run did not record): update_client must refuse it locally, after its
 # read of the client, so no PATCH that carries it is ever sent.
 CUSTOM_PROPERTY_UNKNOWN_ID = 9_000_000_000_000
+DOCUMENT_ACTIVE, DOCUMENT_ARCHIVED = 1, 2  # Document StatusId: the run archives what it creates, and restores one document
+CLIENT_ACTIVE = 1  # Client StatusId 1 Active (3 Credit hold, 4 Archived): the only status a write run accepts for the test client
+# An image embedded in a document body as a data: URL (Gorelo refuses it; the guard repeats the refusal so the rule table is true).
+_DATA_IMAGE = re.compile(r"data\s*:\s*image\s*/", re.IGNORECASE)
+_DIGITS_ONLY = re.compile(r"[0-9]{1,18}")
 
 _METHODS = ("GET", "POST", "PATCH", "DELETE")
 _METHOD_OVERRIDE_HEADERS = ("x-http-method-override", "x-http-method", "x-method-override")
@@ -235,6 +326,7 @@ _KIND_NAMES = {
     "invoice": "test invoice",
     "custom_asset": "custom asset",
     "custom_property": "custom property",
+    "document": "document",
 }
 
 # The manifest kind a comment's ConversationTypeId 3 or 4 may post into, with the words for it: (one, many).
@@ -249,7 +341,7 @@ _NEVER: dict[str, str] = {
     "GET /v1/api-keys": "the live harness never lists API keys (an API key is a credential)",
     "DELETE /v1/api-keys/{apiKeyId}": "the live harness never revokes API keys (an API key is a credential)",
     "DELETE /v1/assets/agents/{deviceId}": "deleting an agent asset UNINSTALLS the RMM agent from the host",
-    "DELETE /v1/assets/custom/{customAssetId}": "custom assets are never deleted (the API cannot remove one that was created)",
+    "DELETE /v1/assets/custom/{customAssetId}": "this harness never deletes a custom asset (the spec's soft DELETE is not used)",
     "DELETE /v1/contracts/{contractId}": "the live harness never deletes contracts",
     "POST /v1/payments": "the live harness never records payments (a payment is accounting data that reaches the connected system)",
     "DELETE /v1/payments/{paymentId}": "the live harness never deletes payments (a payment is accounting data)",
@@ -290,6 +382,7 @@ def _is_custom_asset_write(method: str, segments: tuple[str, ...]) -> bool:
 _TICKET = (("ticket", "ticketId"),)
 _PROJECT = (("project", "projectId"),)
 _PROJECT_TASK = (*_PROJECT, ("task", "taskId"))
+_DOCUMENT = (("document", "documentId"),)
 _PATH_KINDS: dict[str, tuple[tuple[str, str], ...]] = {
     "PATCH /v1/contacts/{contactId}": (("contact", "contactId"),),
     "PATCH /v1/tickets/{ticketId}": _TICKET,
@@ -323,6 +416,16 @@ _PATH_KINDS: dict[str, tuple[tuple[str, str], ...]] = {
     ),
     "POST /v1/projects/{projectId}/tasks/{taskId}/conversations/approval": _PROJECT_TASK,
     "POST /v1/projects/{projectId}/tasks/{taskId}/conversations/side-conversation": _PROJECT_TASK,
+    "PATCH /v1/documents/{documentId}": _DOCUMENT,
+    "POST /v1/documents/{documentId}/duplicate": _DOCUMENT,
+    "POST /v1/documents/{documentId}/related-items": _DOCUMENT,
+    "DELETE /v1/documents/{documentId}/related-items/{relatedItemId}": _DOCUMENT,
+    "POST /v1/documents/{documentId}/versions/{versionId}/restore": _DOCUMENT,
+}
+
+# The POST operations whose body the spec lets the caller leave out entirely (the tool sends none): an empty body is read as {}.
+_OPTIONAL_BODY: dict[str, str] = {
+    "POST /v1/documents/{documentId}/duplicate": "the spec says the request body may be omitted entirely (the copy then gets the default title)",
 }
 
 # The POST operations that create a record, and the manifest kind of what they create (for require_intents).
@@ -346,7 +449,12 @@ _CREATES: dict[str, str] = {
     "POST /v1/projects/{projectId}/tasks/{taskId}/comments": "project_comment",
     "POST /v1/projects/{projectId}/tasks/{taskId}/conversations/approval": "approval",
     "POST /v1/projects/{projectId}/tasks/{taskId}/conversations/side-conversation": "side_conversation",
+    "POST /v1/documents": "document",
+    "POST /v1/documents/{documentId}/duplicate": "document",
 }
+# The POST operations of the documents that are NOT creates, on purpose: a related-items POST adds links to a document and a version
+# restore changes which version of a run-created document is current; neither makes a record the harness has to find again, so
+# neither needs an intent (the rule table test names them, like the submission links).
 
 # Clients and contacts are never deleted by tools: the run's own, and with cleanup=True the listed leftovers.
 _SPECIAL_DELETES: dict[str, str] = {
@@ -630,15 +738,25 @@ class LiveGuard:
                invoice recorded with status_id 5 (DELETE /invoices/{invoiceId}). Only write_matrix --with-approved-invoice
                and cleanup --void-approved set it. With cleanup=True the create stays refused: a cleanup creates nothing.
     allow_custom_assets: write mode only, off by default: also allow POST /assets/custom and PATCH /assets/custom/{id}
-               under the rules of the module docstring. Only write_matrix --with-custom-assets sets it. A custom asset
-               cannot be deleted through the API, so the run that creates one leaves it on the test client.
+               under the rules of the module docstring. Only write_matrix --with-custom-assets sets it. This harness never
+               deletes a custom asset (the spec's soft DELETE is not used), so the run that creates one leaves it on the test
+               client.
     allow_custom_properties: write mode only, off by default: also allow the one PATCH of the TEST CLIENT that sets or clears a
                custom field the manifest records (module docstring, "The custom properties"). Only write_matrix
                --with-custom-properties sets it, and cleanup.run_cleanup when the manifest holds a custom_property record
                (with cleanup=True the guard allows the clear, the null Value, and nothing else).
+    allow_custom_asset_move: write mode only, off by default, and only together with allow_custom_assets: the PATCH of a custom asset
+               this run created may name the second client (a MOVE of the asset, which has to be announced in the manifest first and
+               carry a LocationId). Only write_matrix --with-asset-move sets it. Never from a cleanup.
+    allow_documents: write mode only, off by default: the document writes of the module docstring ("The documents"), for documents this
+               run created and for the test client. Only write_matrix --with-documents sets it. A cleanup guard (cleanup=True) never
+               has it and still archives (StatusId 2) a run-created document.
     Counters: allowed_count is every request let through, writes_allowed the ones among them that are not a GET.
     The other keyword arguments tune the constants of the allowlist (the defaults are the configured values);
-    `allowed_hosts` and `spec` exist for tests. probe_domains: the domains an uptime check may target.
+    `allowed_hosts` and `spec` exist for tests. base_url: the Settings.base_url of the run; the guard then allows that host only
+    (the configured host only). Without it, and without allowed_hosts, the guard allows the US host api.usw.gorelo.io
+    only: a run for a non-US host must pass base_url, and a forgotten one is blocked loudly, never allowed. probe_domains: the
+    domains an uptime check may target.
     require_intents: refuse a create unless the manifest holds an open intent of that kind (see the module docstring).
     """
 
@@ -655,12 +773,15 @@ class LiveGuard:
         approved_leftovers: Mapping[str, frozenset[int] | set[int]] | None = None,
         cleanup: bool = False,
         test_client: int | None = None,
-        allowed_hosts: frozenset[str] | set[str] = API_HOSTS,
+        allowed_hosts: frozenset[str] | set[str] | None = None,
+        base_url: str | None = None,
         probe_domains: frozenset[str] | set[str] | None = None,
         require_intents: bool = False,
         allow_approved_invoice: bool = False,
         allow_custom_assets: bool = False,
         allow_custom_properties: bool = False,
+        allow_custom_asset_move: bool = False,
+        allow_documents: bool = False,
         spec: SpecIndex | None = None,
     ) -> None:
         if mode not in ("read", "write"):
@@ -675,6 +796,15 @@ class LiveGuard:
             raise ValueError("allow_custom_assets=True only makes sense in write mode")
         if allow_custom_properties and mode != "write":
             raise ValueError("allow_custom_properties=True only makes sense in write mode")
+        if allow_custom_asset_move and mode != "write":
+            raise ValueError("allow_custom_asset_move=True only makes sense in write mode")
+        if allow_custom_asset_move and not allow_custom_assets:
+            raise ValueError("allow_custom_asset_move=True needs allow_custom_assets=True: only a custom asset of this run can move")
+        if allow_documents and mode != "write":
+            raise ValueError("allow_documents=True only makes sense in write mode")
+        if allowed_hosts is not None and base_url is not None:
+            raise ValueError("pass allowed_hosts or base_url, not both")
+        hosts = allowed_hosts if allowed_hosts is not None else api_hosts(base_url) if base_url is not None else API_HOSTS
         cfg = site()  # raises SiteConfigError (names the missing key and site.example.toml) when not configured
         if allowed_clients is None:
             allowed_clients = {cfg.test_client, cfg.second_client}
@@ -696,6 +826,8 @@ class LiveGuard:
         self.allow_approved_invoice = allow_approved_invoice
         self.allow_custom_assets = allow_custom_assets
         self.allow_custom_properties = allow_custom_properties
+        self.allow_custom_asset_move = allow_custom_asset_move
+        self.allow_documents = allow_documents
         self.allowed_clients = frozenset(allowed_clients)
         self.operator_contact = operator_contact
         self.operator_user = operator_user
@@ -704,7 +836,7 @@ class LiveGuard:
         source = approved_leftovers
         self.approved_leftovers: dict[str, frozenset[int]] = {kind: frozenset(ids) for kind, ids in source.items()}
         self.test_client = test_client
-        self.allowed_hosts = frozenset(host.lower() for host in allowed_hosts)
+        self.allowed_hosts = frozenset(host.lower() for host in hosts)
         self.probe_domains = frozenset(domain.lower() for domain in probe_domains)
         self.require_intents = require_intents
         self._routes = _build_routes(spec if spec is not None else load_spec_index())
@@ -910,7 +1042,7 @@ class LiveGuard:
                     texts.append((f"{name} file name", filename))
                     texts.append((f"{name} file content", payload.decode("utf-8", "replace")))
             elif route.fields is not None:
-                body = _load_json_object(content)
+                body = {} if (not content and route.key in _OPTIONAL_BODY) else _load_json_object(content)
                 unknown = sorted(key for key in body if key not in route.fields)
                 if unknown:
                     raise req.block(f"the body has a field the spec does not define for this operation: {_name(unknown[0])}")
@@ -1416,14 +1548,20 @@ class LiveGuard:
         for index, address in enumerate(copies or []):
             self._require_address(req, address, f"CcEmails[{index}]")
 
-    @_rule("POST /v1/attachments", "itemType Ticket, Task or Project; itemId a run-created record of that type")
+    @_rule(
+        "POST /v1/attachments",
+        "itemType Ticket, Task or Project, or Document only with allow_documents (never from a cleanup); itemId a run-created "
+        "record of that type",
+    )
     def _post_attachment(self, req: _Req) -> None:
         assert req.form is not None
         item_type = req.form.get("itemType")
-        kinds = {"ticket": "ticket", "task": "task", "project": "project"}
+        kinds = {"ticket": "ticket", "task": "task", "project": "project", "document": "document"}
         kind = kinds.get(item_type.strip().lower()) if isinstance(item_type, str) else None
         if kind is None:
-            raise req.block("itemType must be Ticket, Task or Project")
+            raise req.block("itemType must be Ticket, Task, Project or Document")
+        if kind == "document":
+            self._require_documents_option(req, "given a file")
         item_id = req.form.get("itemId")
         if item_id is None:
             raise req.block("itemId is required")
@@ -1450,28 +1588,52 @@ class LiveGuard:
         if not self.allow_custom_assets or self.cleanup:
             raise req.block(
                 "custom assets cannot be created unless the run enabled the custom_assets area (--with-custom-assets); "
-                "a custom asset cannot be deleted through the API, so it would stay on the test client"
+                "this harness never deletes a custom asset (the spec's soft DELETE is not used), so it would stay on the test "
+                "client"
             )
         self._require_test_client(req, self._scalar_int(req, "ClientId"), required=True)
         self._require_run_name(req)
 
     @_rule(
         "PATCH /v1/assets/custom/{customAssetId}",
-        "only with allow_custom_assets; ClientId is required and is the test client (or the second client, for the one "
-        "negative check); Name, if present, starts with the run id",
+        "only with allow_custom_assets (never from a cleanup); ClientId, if present, is the test client; the second client (a MOVE "
+        "of the asset) only with allow_custom_asset_move, with a LocationId in the same body, no ContactId but null and the "
+        "move announced in the manifest (details client_id names that client); Name, if present, starts with the run id",
     )
     def _patch_custom_asset(self, req: _Req) -> None:
         # the path id was already checked to be a custom asset this run created (_PATH_KINDS)
         if not self.allow_custom_assets or self.cleanup:
             raise req.block("custom assets cannot be changed unless the run enabled the custom_assets area (--with-custom-assets)")
-        client = self._scalar_int(req, "ClientId")
-        if client is None:
-            raise req.block(f"ClientId is required and must be {self.test_client} (the test client)")
-        if client != self.test_client:
-            second = sorted(self.allowed_clients - {self.test_client})
-            if client not in second:
-                raise req.block(f"ClientId must be {self.test_client} (the test client), not {client}")
+        client = self._scalar_int(req, "ClientId")  # absent or null: the asset's client is not named (nothing moves)
+        if client is not None and client != self.test_client:
+            self._check_asset_move(req, client)
         self._require_run_name(req, required=False)
+
+    def _check_asset_move(self, req: _Req, client: int) -> None:
+        """A PATCH of a custom asset that names a client other than the test client = a MOVE of the asset (since contract
+        a7954b24844b a new ClientId moves it). Only to the second client, only with allow_custom_asset_move, only with a LocationId
+        of the new client in the same body (Gorelo needs it and the tool insists on it), no contact but a clear, and only for a
+        move the area announced first: the manifest details of the asset must already name that client, so a move that was not
+        written down before it was sent can never happen."""
+        assert req.body is not None and self.manifest is not None
+        if client not in self.allowed_clients:
+            raise req.block(f"ClientId must be {self.test_client} (the test client), not {client}")
+        if not self.allow_custom_asset_move:
+            raise req.block(
+                f"ClientId {client} would MOVE the custom asset to the second client; a move needs the option allow_custom_asset_move "
+                "(write_matrix --with-asset-move). Only the test client may be named otherwise"
+            )
+        if self._scalar_int(req, "LocationId") is None:
+            raise req.block(f"a move to client {client} needs a LocationId of that client in the same body (a JSON integer)")
+        if req.body.get("ContactId") is not None:
+            raise req.block("a move never assigns a contact: ContactId must be absent or null")
+        asset = normalize_id("custom_asset", req.params["customAssetId"])
+        recorded = self.manifest.details("custom_asset", asset).get("client_id")
+        if recorded != client:
+            raise req.block(
+                f"the move of custom asset {asset} to client {client} was not announced: the manifest details client_id must name "
+                "that client before the PATCH is sent (update_details), so a crash leaves the residue text true"
+            )
 
     def _require_run_name(self, req: _Req, *, required: bool = True) -> None:
         assert req.body is not None and self.manifest is not None
@@ -1482,6 +1644,199 @@ class LiveGuard:
             return
         if not isinstance(name, str) or not name.startswith(self.manifest.run_id):
             raise req.block(f"Name must start with the run id {self.manifest.run_id}")
+
+    # -- documents -----------------------------------------------------------------
+
+    def _require_documents_option(self, req: _Req, what: str) -> None:
+        """Every document write but the archive of a cleanup needs allow_documents, and a cleanup never has it."""
+        if not self.allow_documents or self.cleanup:
+            raise req.block(
+                f"a document cannot be {what} unless the run enabled the documents area (--with-documents), and never from a "
+                "cleanup; a document cannot be deleted through the API, so what a run creates stays in Gorelo"
+            )
+
+    def _require_run_title(self, req: _Req, field: str, value: Any) -> None:
+        assert self.manifest is not None
+        if not isinstance(value, str) or not value.startswith(self.manifest.run_id):
+            raise req.block(f"{field} must be text that starts with the run id {self.manifest.run_id}")
+
+    @staticmethod
+    def _require_no_data_image(req: _Req, field: str, value: Any) -> None:
+        if not isinstance(value, str):
+            raise req.block(f"{field} must be text")
+        if _DATA_IMAGE.search(value):
+            raise req.block(f"{field} embeds an image as a data: URL, which Gorelo does not accept")
+
+    @_rule(
+        "POST /v1/documents",
+        "only with allow_documents (never from a cleanup); Title starts with the run id; exactly one place: ClientId the test "
+        "client, or ParentDocumentId a run-created document with no ClientId; an internal document is refused; Body embeds no "
+        "data: image",
+    )
+    def _post_document(self, req: _Req) -> None:
+        assert req.body is not None
+        body = req.body
+        self._require_documents_option(req, "created")
+        self._require_run_title(req, "Title", body.get("Title"))
+        if "Body" in body and body["Body"] is not None:
+            self._require_no_data_image(req, "Body", body["Body"])
+        parent, client = body.get("ParentDocumentId"), body.get("ClientId")
+        if parent is not None:
+            self._body_created(req, "document", "ParentDocumentId", parent)
+            if client is not None:
+                raise req.block("ClientId must be absent under a parent: the document takes the parent's client")
+            return
+        if client is None:
+            raise req.block(
+                f"an INTERNAL document (no ClientId and no ParentDocumentId) is refused: ClientId must be {self.test_client} "
+                "(the test client) or ParentDocumentId a document this run created"
+            )
+        self._require_test_client(req, self._json_int(req, "ClientId", client), required=True)
+
+    @_rule(
+        "PATCH /v1/documents/{documentId}",
+        "only with allow_documents, but a cleanup may archive (the body exactly {StatusId: 2}); Title starts with the run id; "
+        "StatusId 1 or 2; PublicLinkEnabled and PublishToPortalEnabled only false, never true; Attachments only files this run "
+        "uploaded to that document; Move only under a run-created document or to the top level of the test client, never "
+        "internal",
+    )
+    def _patch_document(self, req: _Req) -> None:
+        assert req.body is not None
+        body = req.body
+        if self.cleanup:  # the one thing a cleanup does to a document: archive what a stopped run left
+            if set(body) != {"StatusId"} or not _is_status(body["StatusId"], DOCUMENT_ARCHIVED):
+                raise req.block("a cleanup only archives a document (the body {\"StatusId\": 2}); it changes nothing else")
+            return
+        self._require_documents_option(req, "changed")
+        if not body:
+            raise req.block("the body names nothing to change")
+        for field in ("PublicLinkEnabled", "PublishToPortalEnabled"):
+            if field in body and body[field] is not False:
+                raise req.block(
+                    f"{field} may only be false: the live harness never turns sharing on (a public link or the client portal makes "
+                    "the document readable outside the MSP)"
+                )
+        if "Title" in body:
+            self._require_run_title(req, "Title", body["Title"])
+        if "Body" in body:
+            self._require_no_data_image(req, "Body", body["Body"])
+        if "AlternateName" in body:
+            name = body["AlternateName"]
+            if name != "":
+                self._require_run_title(req, "AlternateName", name)
+        if "IsStarred" in body and not isinstance(body["IsStarred"], bool):
+            raise req.block("IsStarred must be true or false")
+        if "StatusId" in body and not (
+            _is_status(body["StatusId"], DOCUMENT_ACTIVE) or _is_status(body["StatusId"], DOCUMENT_ARCHIVED)
+        ):
+            raise req.block(f"StatusId must be exactly the JSON integer 1 (Active) or 2 (Archived), not {_json_kind(body['StatusId'])}")
+        if "Attachments" in body:
+            self._check_document_attachments(req, body["Attachments"])
+        if "Move" in body:
+            self._check_document_move(req, body["Move"])
+
+    def _check_document_attachments(self, req: _Req, entries: Any) -> None:
+        """Attachments replaces the whole list: every entry must be a file THIS RUN uploaded to THIS document (the manifest records each
+        upload as an attachment with details document_id); [] removes them all."""
+        assert self.manifest is not None
+        if not isinstance(entries, list):
+            raise req.block("Attachments must be a list")
+        document = normalize_id("document", req.params["documentId"])
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict) or set(entry) != {"Name", "Url"}:
+                raise req.block(f"Attachments[{index}] must be an object with Name and Url and nothing else")
+            name, url = entry["Name"], entry["Url"]
+            if not isinstance(name, str) or not name.strip() or not isinstance(url, str) or not url.strip():
+                raise req.block(f"Attachments[{index}] needs a Name and a Url, both text")
+            try:
+                key = normalize_id("attachment", name)
+            except ValueError:
+                raise req.block(f"Attachments[{index}].Name is not a name this run recorded for an upload") from None
+            if key not in self._ids("attachment"):
+                raise req.block(
+                    f"Attachments[{index}].Name is not a file this run ({self.manifest.run_id}) uploaded: only files the run "
+                    "uploaded to this document may be attached"
+                )
+            parent = self.manifest.details("attachment", key).get("document_id")
+            try:
+                same = normalize_id("document", parent) == document
+            except ValueError:
+                same = False
+            if not same:
+                raise req.block(f"Attachments[{index}].Name was uploaded for another record than this document")
+
+    def _check_document_move(self, req: _Req, move: Any) -> None:
+        """Move: under a run-created document (then no ClientId) or to the top level of the TEST client. Never internal, never a
+        document under itself, never another client."""
+        if not isinstance(move, dict) or not move or not set(move) <= {"ParentDocumentId", "ClientId"}:
+            raise req.block("Move must be an object with ParentDocumentId and/or ClientId and nothing else")
+        parent = move.get("ParentDocumentId")
+        if parent is not None:
+            key = self._body_created(req, "document", "Move.ParentDocumentId", parent)
+            if key == normalize_id("document", req.params["documentId"]):
+                raise req.block("a document cannot be moved under itself")
+            if move.get("ClientId") is not None:
+                raise req.block("Move.ClientId must be absent under a parent: the document takes the parent's client")
+            return
+        if "ParentDocumentId" not in move:
+            raise req.block("Move to the top level needs ParentDocumentId: null next to the ClientId")
+        client = move.get("ClientId")
+        if client is None:
+            raise req.block(f"an INTERNAL move (ClientId null) is refused: the top level of client {self.test_client} (the test client) only")
+        self._require_test_client(req, self._json_int(req, "Move.ClientId", client), required=True)
+
+    @_rule(
+        "POST /v1/documents/{documentId}/duplicate",
+        "only with allow_documents (never from a cleanup); the source is a run-created document; Title, if present, starts with the "
+        "run id; the body may be left out",
+    )
+    def _post_document_duplicate(self, req: _Req) -> None:
+        assert req.body is not None
+        self._require_documents_option(req, "duplicated")
+        if "Title" in req.body and req.body["Title"] is not None:
+            self._require_run_title(req, "Title", req.body["Title"])
+
+    @_rule(
+        "POST /v1/documents/{documentId}/related-items",
+        "only with allow_documents (never from a cleanup); RelatedItems of 1 to 100 entries, each ItemTypeId exactly 1 (Document) "
+        "with an ItemId that is a run-created document",
+    )
+    def _post_document_related_items(self, req: _Req) -> None:
+        assert req.body is not None
+        self._require_documents_option(req, "linked to other records")
+        items = req.body.get("RelatedItems")
+        if not isinstance(items, list) or not items:
+            raise req.block("RelatedItems must be a list of 1 to 100 entries")
+        if len(items) > 100:
+            raise req.block(f"RelatedItems holds {len(items)} entries; at most 100 per call")
+        for index, entry in enumerate(items):
+            if not isinstance(entry, dict) or set(entry) != {"ItemId", "ItemTypeId"}:
+                raise req.block(f"RelatedItems[{index}] must be an object with ItemId and ItemTypeId and nothing else")
+            if not _is_status(entry["ItemTypeId"], 1):
+                raise req.block(
+                    f"RelatedItems[{index}].ItemTypeId must be exactly 1 (a Document): the live harness never links a client's "
+                    "asset, device, contact or password"
+                )
+            self._body_created(req, "document", f"RelatedItems[{index}].ItemId", entry["ItemId"])
+
+    @_rule(
+        "DELETE /v1/documents/{documentId}/related-items/{relatedItemId}",
+        "only with allow_documents (never from a cleanup); a run-created document; relatedItemId a whole number",
+    )
+    def _delete_document_related_item(self, req: _Req) -> None:
+        self._require_documents_option(req, "unlinked from another record")
+        link = req.params["relatedItemId"]
+        if not _DIGITS_ONLY.fullmatch(link) or int(link) < 1:
+            raise req.block("relatedItemId must be a whole number (the Id of a related item)")
+
+    @_rule(
+        "POST /v1/documents/{documentId}/versions/{versionId}/restore",
+        "only with allow_documents (never from a cleanup); a run-created document; versionId a UUID",
+    )
+    def _post_document_version_restore(self, req: _Req) -> None:
+        self._require_documents_option(req, "restored to an earlier version")
+        if not _UUID.fullmatch(req.params["versionId"]):
+            raise req.block("versionId must be a UUID")
 
     @_rule("POST /v1/items", "ClientId is the test client")
     def _post_item(self, req: _Req) -> None:
@@ -1719,7 +2074,7 @@ class LiveGuard:
 
 # Import-time check (the offline tests also compare every key of these tables exactly with the spec): the tables that
 # are looked up by the exact text of an operation must spell it alike, or a rule could silently protect nothing.
-_check_one_spelling_per_operation(_PATH_KINDS, _HANDLER_NAMES, _HANDLER_TEXT, _SPECIAL_DELETES, _CREATES)
+_check_one_spelling_per_operation(_PATH_KINDS, _HANDLER_NAMES, _HANDLER_TEXT, _SPECIAL_DELETES, _CREATES, _OPTIONAL_BODY)
 
 
 # --------------------------------------------------------------------------
@@ -1735,13 +2090,81 @@ def configured_clients(cfg: SiteConfig) -> list[tuple[int, str]]:
     return [(cfg.test_client, cfg.test_client_name), (cfg.second_client, cfg.second_client_name)]
 
 
-async def verify_site_clients(
-    api_key: str, *, transport: httpx.AsyncBaseTransport | None = None, cfg: SiteConfig | None = None
-) -> None:
-    """Raise SiteConfigError unless every configured client exists in Gorelo under exactly its configured name."""
+@dataclass(frozen=True)
+class ClientFacts:
+    """What the check of the site clients learned about one client besides its name: its status (GET /v1/clients/{id}: Status
+    {Id, Name}; 1 Active, 3 Credit hold, 4 Archived since contract a7954b24844b). Both are None when Gorelo's answer has no readable one."""
+
+    status_id: int | None
+    status_name: str | None
+
+    @property
+    def active(self) -> bool:
+        """True only for status 1 (Active), matched by the id, never by the name."""
+        return self.status_id == CLIENT_ACTIVE
+
+    def shown(self) -> str:
+        """The status for a message: its name and id when both are plain, else only what is known."""
+        plain = isinstance(self.status_name, str) and re.fullmatch(r"[A-Za-z ]{1,30}", self.status_name) is not None
+        if self.status_id is None:
+            return "of a status that could not be read"
+        return f"{self.status_name} (status {self.status_id})" if plain else f"in status {self.status_id}"
+
+
+class ClientNotActive(SiteConfigError):
+    """The test client is not Active (or its status could not be read), so a write run must not start. A SiteConfigError, so every
+    entry point that prints "cannot start: ..." and exits 2 for a bad site setup does the same for this."""
+
+
+def _client_facts(data: Any) -> ClientFacts:
+    status = data.get("Status") if isinstance(data, dict) else None
+    ident = status.get("Id") if isinstance(status, dict) else None
+    name = status.get("Name") if isinstance(status, dict) else None
+    return ClientFacts(
+        status_id=ident if isinstance(ident, int) and not isinstance(ident, bool) else None,
+        status_name=name if isinstance(name, str) else None,
+    )
+
+
+def require_active_test_client(facts: Mapping[int, ClientFacts] | None, cfg: SiteConfig | None = None) -> None:
+    """Raise ClientNotActive unless the test client is Active (status 1). `facts` is what verify_site_clients returned.
+
+    A write run (the write matrix) calls this right after the name check and before it creates a manifest, so an archived test client
+    stops it with nothing sent but the two client reads. The status is never changed by the harness: the operator makes the client
+    Active again in the Gorelo app.
+    A status that was not read (facts missing or without the client) is a refusal too: fail closed. A cleanup never calls this, because
+    it has to be able to clean up whatever a run left on a client in any status."""
     cfg = cfg if cfg is not None else site()
+    found = facts.get(cfg.test_client) if isinstance(facts, Mapping) else None
+    if found is None:
+        raise ClientNotActive(
+            f"the status of the test client {cfg.test_client} was not read, so a write run did not start and nothing but the two "
+            "client reads was sent; the operator has to check in the Gorelo app that the test client is Active"
+        )
+    if found.active:
+        return
+    raise ClientNotActive(
+        f"the test client {cfg.test_client} is {found.shown()}, so a write run did not start and nothing but the two client reads "
+        "was sent: it needs the test client Active (status 1). The operator has to make the test client Active again in the Gorelo app; "
+        "this harness never changes the status of a client itself"
+    )
+
+
+async def verify_site_clients(
+    api_key: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+    cfg: SiteConfig | None = None,
+    base_url: str = GORELO_BASE_URL,
+) -> dict[int, ClientFacts]:
+    """Raise SiteConfigError unless every configured client exists in Gorelo under exactly its configured name; return each client's
+    ClientFacts (its status), so a write run can refuse an archived test client (require_active_test_client) from the same read.
+    The names are read from `base_url` (the host of the run; default the US host), after the same check as api_hosts (ValueError
+    for a URL outside gorelo.io: the key must not go there)."""
+    cfg = cfg if cfg is not None else site()
+    facts: dict[int, ClientFacts] = {}
     async with httpx.AsyncClient(
-        base_url=GORELO_BASE_URL,
+        base_url=_checked_base_url(base_url),
         headers={"X-API-Key": api_key, "Accept": "application/json"},
         timeout=30.0,
         transport=transport,
@@ -1762,3 +2185,5 @@ async def verify_site_clients(
             if found != wanted:
                 shown = found if isinstance(found, str) else "(no name)"
                 raise SiteConfigError(f"client {client_id} is named {shown}, site config says {wanted}")
+            facts[client_id] = _client_facts(data)
+    return facts

@@ -1,7 +1,8 @@
 """Entry point of the Gorelo MCP server (the systemd unit runs `/opt/gorelo-mcp/app/.venv/bin/python main.py`, see docs/INSTALL.md and docs/OPERATIONS.md).
 
-Thin on purpose: keep argument values out of FastMCP's log records, read settings, build the OAuth
-provider, build the server, serve HTTP on 127.0.0.1:8765. Importing this module has no side effects
+Thin on purpose: install the log filter (server.LogValueFilter: it trims the records of rejected calls and of errors
+with a log summary), read settings, build the OAuth provider (redirect allowlist from the settings), build the server,
+serve HTTP on 127.0.0.1:8765. Importing this module has no side effects
 (no .env read, no logging setup, no directories); everything happens inside main().
 
 The service refuses to start (one error line, exit status 1, nothing served) when its settings are
@@ -20,7 +21,7 @@ from dotenv import load_dotenv
 from oauth_guard import GateError
 from oauth_store import StateFileError
 from personal_auth import PersonalAuthProvider
-from server import build_server, install_log_value_filter
+from server import build_server, install_log_value_filter, resolve_gated_tools
 from settings import Settings, SettingsError
 
 # The directory this file lives in. In production that is /opt/gorelo-mcp/app, which is also the
@@ -42,13 +43,18 @@ def main() -> None:
     install_log_value_filter()  # FastMCP's rejected-call logging prints argument values otherwise
     try:
         settings = Settings.from_env(os.environ)
+        gated = resolve_gated_tools(settings)  # a GORELO_ENABLE_DESTRUCTIVE list the tools cannot honor stops the start here
     except SettingsError as exc:
         logger.error("%s; refusing to start", exc)
         sys.exit(1)
+    extra = ",".join(settings.extra_redirect_domains) or "none"  # host names only, never a secret
+    logger.info("gorelo-mcp settings: api_host=%s extra_redirect_domains=%s", settings.api_host, extra)
+    logger.info("gorelo-mcp gated tools: %s", ",".join(gated) or "none")  # names only; the ready line below keeps its shape
     try:
         auth = PersonalAuthProvider(
             base_url=settings.public_base_url,
             password=settings.mcp_auth_password,
+            allowed_redirect_domains=settings.redirect_domains,  # claude.ai, claude.com, localhost, then MCP_EXTRA_REDIRECT_DOMAINS
             state_dir=str(APP_DIR / ".oauth-state"),
         )
         # The gate also checks its routes when the HTTP app is built, which happens inside run().

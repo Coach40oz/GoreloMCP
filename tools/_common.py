@@ -177,14 +177,20 @@ class Registry:
         """Every registered tool, in registration order."""
         return list(self._specs.values())
 
-    def select(self, toolsets: Iterable[str], destructive: bool) -> list[ToolSpec]:
-        """The tools to register on a server: in one of `toolsets`, and kind != destructive
-        unless `destructive` is true."""
+    def select(
+        self, toolsets: Iterable[str], destructive: bool, destructive_tools: Iterable[str] | None = None
+    ) -> list[ToolSpec]:
+        """The tools to register on a server: in one of `toolsets`, and kind != destructive unless `destructive`
+        is true. When `destructive` is true, `destructive_tools` None keeps every gated tool of those toolsets
+        and a collection of names keeps exactly the gated tools it names (a name that is not a gated tool of
+        those toolsets keeps nothing: server.resolve_gated_tools is what refuses such a name)."""
         wanted = set(toolsets)
+        only = None if destructive_tools is None else set(destructive_tools)
         return [
             spec
             for spec in self._specs.values()
-            if spec.toolset in wanted and (destructive or spec.kind != "destructive")
+            if spec.toolset in wanted
+            and (spec.kind != "destructive" or (destructive and (only is None or spec.name in only)))
         ]
 
     def tool(
@@ -537,13 +543,15 @@ def client_of(ctx: Context) -> GoreloClient:
 
 
 def server_info_of(ctx: Context) -> dict[str, Any]:
-    """What the lifespan exposes besides the client, for diagnostics such as health_check:
-    {"toolsets": sorted list or None, "destructive": bool or None, "spec_sha256": str or None}."""
+    """What the lifespan exposes besides the client, for diagnostics such as health_check: {"toolsets": sorted
+    list or None, "destructive": bool or None, "gated_tools": sorted list of the registered gated tool names (empty
+    when none) or None, "spec_sha256": str or None}."""
     state = _lifespan_dict(ctx)
     spec = state.get("spec")
     return {
         "toolsets": state.get("toolsets"),
         "destructive": state.get("destructive"),
+        "gated_tools": state.get("gated_tools"),
         "spec_sha256": getattr(spec, "sha256", None),
     }
 
@@ -710,7 +718,13 @@ def utc_iso(param: str, value: str | datetime | None) -> str | None:
             f"{param}: {value!r} has no UTC offset. Add Z for UTC or an offset such as -05:00, "
             f"for example {example}; naive datetimes are rejected so nothing is guessed"
         )
-    utc = moment.astimezone(timezone.utc)
+    try:
+        utc = moment.astimezone(timezone.utc)
+    except OverflowError:
+        raise ValueError(
+            f"{param}: {value!r} converts to a UTC time outside the years 0001 to 9999; "
+            "use a later date (or, near 9999, an earlier one)"
+        ) from None
     text = utc.isoformat(timespec="microseconds" if utc.microsecond else "seconds")
     return text.replace("+00:00", "Z")
 
@@ -1290,7 +1304,13 @@ def _notification_detail(err: GoreloAPIError, field_map: Mapping[str, str]) -> s
 def _scope_text(err: GoreloAPIError) -> str | None:
     for note in err.notifications:
         if note.get("code") == SCOPE_CODE:
-            quoted = re.search(r"'([^']+)'", str(note.get("message") or ""))
+            quoted = re.search(r"'([^']+)'(?: (read|write|delete) access\b)?", str(note.get("message") or ""))
+            if quoted and quoted.group(2):
+                name, verb = quoted.group(1), quoted.group(2)
+                return (
+                    f"the API key does not have the '{name}' scope with {verb} access ({name}:{verb}). "
+                    "Grant it on the API key in Gorelo, then retry"
+                )
             scope = f"the '{quoted.group(1)}' scope" if quoted else "a scope this tool needs"
             return (
                 f"the API key does not have {scope}. Grant it on the API key in Gorelo, then retry"

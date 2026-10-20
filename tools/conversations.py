@@ -585,7 +585,7 @@ async def get_ticket_approval(
         str, Field(description="Approval UUID (create_ticket_approval, or list_ticket_conversations).")
     ],
 ) -> dict:
-    """Get one approval on a ticket with its approvers; this is where approval status lives (Pending, Approved, Disapproved: Disapproved as soon as anyone disapproves, Approved once all approve). list_ticket_conversations has no status."""
+    """Get one approval on a ticket with its approvers; this is where approval status lives (Pending, Approved, Denied: Denied as soon as anyone denies, Approved once all approve). list_ticket_conversations has no status."""
     ticket = guid("ticket_id", ticket_id)
     approval = guid("approval_id", approval_id)
     data = await client_of(ctx).get_one(

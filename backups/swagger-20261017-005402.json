@@ -1,5 +1,5 @@
 {
-  "openapi": "3.0.1",
+  "openapi": "3.0.4",
   "info": {
     "title": "Public API",
     "description": "Gorelo Public API documentation.",
@@ -159,7 +159,7 @@
           {
             "name": "StatusIds",
             "in": "query",
-            "description": "Comma-separated status ids: New=1, Ignored=2, Ticketed=3. 0 (Unknown) matches any other status.",
+            "description": "Comma-separated status ids: New=1, Dismissed=2, Ticketed=3. Any other id is a 400.",
             "schema": {
               "type": "string"
             }
@@ -167,7 +167,7 @@
           {
             "name": "TypeIds",
             "in": "query",
-            "description": "Comma-separated type ids: Uptime=1, API=2, Script=3, External=4, Slide=5, Huntress=6,\r\nError Event Log=7, Disk Usage=8, Connectivity=9, Process=10, Service=11, Antivirus=12,\r\nRedfish=13, CPU=14, Memory=15, Ping=16, Windows Updates=17, Warranty Expiration=18,\r\nDomain Expiration=19, Contract Expiration=20. 7-17 are device-check alerts, identified by\r\ntheir check type rather than by how the alert was raised. 18-20 carry no device or check;\r\nContract and Domain carry a subject id, Warranty does not. 0 (Unknown) matches an alert this scale cannot\r\nname.",
+            "description": "Comma-separated type ids: Uptime=1, API=2, Script=3, External=4, Slide=5, Huntress=6,\r\nError Event Log=7, Disk Usage=8, Connectivity=9, Process=10, Service=11, Antivirus=12,\r\nRedfish=13, CPU=14, Memory=15, Ping=16, Windows Updates=17, Warranty Expiration=18,\r\nDomain Expiration=19, Contract Expiration=20. 7-17 are device-check alerts, identified by\r\ntheir check type rather than by how the alert was raised. 18-20 carry no device or check;\r\nContract and Domain carry a subject id, Warranty does not. 0 (N/A) matches an alert this scale cannot\r\nname. Any id outside 0-20 is a 400.",
             "schema": {
               "type": "string"
             }
@@ -320,7 +320,7 @@
           {
             "name": "StatusIds",
             "in": "query",
-            "description": "Comma-separated device status ids to include. Deleted and client-inactivated devices are excluded either way.",
+            "description": "Comma-separated device status ids to include: 1 Unreachable, 2 Active, 3 Inactive, 4 Pending Delete, 6 Pending client inactive. Up to 100 ids; any other value is a 400. Deleted and client-inactivated devices are excluded either way.",
             "schema": {
               "type": "string"
             }
@@ -740,6 +740,359 @@
         }
       }
     },
+    "/v1/assets/custom/{customAssetId}": {
+      "get": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Gets a single custom asset by id.",
+        "description": "Returns the same fields as an item of `GET /v1/assets/custom`.",
+        "operationId": "get_v1_assets_custom_customAssetId",
+        "parameters": [
+          {
+            "name": "customAssetId",
+            "in": "path",
+            "description": "Custom asset identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomAssetResponseBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomAssetResponseBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomAssetResponseBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Updates a custom asset. Send only the fields you want to change.",
+        "description": "An omitted field is left alone, and re-sending a value the asset already holds is a no-op\r\nrather than an error. Sending nothing at all is a 400.\r\n            \r\n`Description`, `ContactId`, `WarrantyEndDate`, `IpAddress` and\r\n`SerialNumber` are cleared by sending them as null. `Name`, `LocationId` and\r\n`HardwareTypeId` cannot be cleared; null leaves them unchanged.\r\n            \r\nA new `ClientId` moves the asset to that client. The asset's location and contact\r\nmust belong to the new client, so send a `LocationId` of the new client, and a\r\n`ContactId` of it or null, unless the ones the asset holds already belong to it.\r\n            \r\nThe primary contact is also listed under the asset's related items: assigning a contact\r\nadds it there, and replacing or clearing it removes the previous one.",
+        "operationId": "patch_v1_assets_custom_customAssetId",
+        "parameters": [
+          {
+            "name": "customAssetId",
+            "in": "path",
+            "description": "Custom asset to update.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Fields to change.",
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCustomAssetCommand"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCustomAssetCommand"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCustomAssetCommand"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCustomAssetCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateCustomAssetResultBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateCustomAssetResultBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateCustomAssetResultBaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Deletes a custom asset.",
+        "description": "The asset is deactivated rather than removed, the same soft-delete the app performs. Deleting\r\nan already-deleted custom asset succeeds, so a retried request is safe.",
+        "operationId": "delete_v1_assets_custom_customAssetId",
+        "parameters": [
+          {
+            "name": "customAssetId",
+            "in": "path",
+            "description": "Custom asset to delete.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteCustomAssetResultBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteCustomAssetResultBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteCustomAssetResultBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/assets/agents/{deviceId}": {
       "get": {
         "tags": [
@@ -996,257 +1349,6 @@
           },
           "401": {
             "description": "Unauthorized",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "text/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal Server Error",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "text/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/assets/custom/{customAssetId}": {
-      "patch": {
-        "tags": [
-          "Assets"
-        ],
-        "summary": "Updates a custom asset. Send only the fields you want to change.",
-        "description": "An omitted field is left alone, and re-sending a value the asset already holds is a no-op\r\nrather than an error. Sending nothing at all is a 400.\r\n            \r\n`Description`, `ContactId`, `WarrantyEndDate`, `IpAddress` and\r\n`SerialNumber` are cleared by sending them as null. `Name`, `LocationId` and\r\n`HardwareTypeId` cannot be cleared; null leaves them unchanged.\r\n            \r\nThe asset's client cannot be changed. `ClientId` is accepted only when it is the\r\nasset's current client.",
-        "operationId": "patch_v1_assets_custom_customAssetId",
-        "parameters": [
-          {
-            "name": "customAssetId",
-            "in": "path",
-            "description": "Custom asset to update.",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "description": "Fields to change.",
-          "content": {
-            "application/json-patch+json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateCustomAssetCommand"
-              }
-            },
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateCustomAssetCommand"
-              }
-            },
-            "text/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateCustomAssetCommand"
-              }
-            },
-            "application/*+json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateCustomAssetCommand"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "$ref": "#/components/schemas/UpdateCustomAssetResultBaseResponse"
-                }
-              },
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UpdateCustomAssetResultBaseResponse"
-                }
-              },
-              "text/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UpdateCustomAssetResultBaseResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "text/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "text/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "text/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal Server Error",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "text/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "Assets"
-        ],
-        "summary": "Deletes a custom asset.",
-        "description": "The asset is deactivated rather than removed, the same soft-delete the app performs. Deleting\r\nan already-deleted custom asset succeeds, so a retried request is safe.",
-        "operationId": "delete_v1_assets_custom_customAssetId",
-        "parameters": [
-          {
-            "name": "customAssetId",
-            "in": "path",
-            "description": "Custom asset to delete.",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "$ref": "#/components/schemas/DeleteCustomAssetResultBaseResponse"
-                }
-              },
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DeleteCustomAssetResultBaseResponse"
-                }
-              },
-              "text/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DeleteCustomAssetResultBaseResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              },
-              "text/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ObjectBaseResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
             "content": {
               "text/plain": {
                 "schema": {
@@ -1924,7 +2026,7 @@
           "Attachments"
         ],
         "summary": "Uploads a file and returns a link to it.",
-        "description": "Send it as `multipart/form-data` with the file part named `file`, plus\r\n`itemType` (`Ticket`, `Task` or `Project`) and `itemId`.\r\n            \r\nThe record has to exist and be yours - an upload against an unknown id is a 404 rather\r\nthan an orphaned file nothing will ever reference.\r\n            \r\nThe returned url carries a time-limited access token. Pass the **name and url together**\r\nto a comment endpoint to attach the file; the token is stripped before storage and a\r\nfresh one issued on every read, so do not store the url yourself.\r\n            \r\nThe largest accepted upload is 44 MB.",
+        "description": "Send it as `multipart/form-data` with the file part named `file`, plus\r\n`itemType` (`Ticket`, `Task`, `Project` or `Document`) and `itemId`.\r\n            \r\nThe record has to exist and be yours - an upload against an unknown id is a 404 rather\r\nthan an orphaned file nothing will ever reference.\r\n            \r\nThe returned url carries a time-limited access token. Pass the **name and url together**\r\nto a comment endpoint to attach the file; the token is stripped before storage and a\r\nfresh one issued on every read, so do not store the url yourself.\r\n            \r\nThe largest accepted upload is 44 MB, and 25 MB for a document. A document's files are\r\nattached by sending the name and url in `Attachments` on\r\n`PATCH /v1/documents/{documentId}`.",
         "operationId": "post_v1_attachments",
         "requestBody": {
           "content": {
@@ -3165,7 +3267,7 @@
           "Billing"
         ],
         "summary": "Lists billing contracts, each with the service lines it is made of.",
-        "description": "A contract is the agreement with a client; a service line is one set of labour terms and\r\nproducts inside it. Most contracts have a single service line. A service line's id is the\r\nsame identifier a time entry's `ServiceLineId` carries, so a contract's service lines\r\nare what a time entry can be billed against.\r\n\n\r\nService lines ride inside the contract rather than being fetched per contract, so a page of\r\ncontracts costs a fixed number of queries. Every filter is optional; the client filter is a\r\ncomma-separated list and a contract matches if its client is any of them. A well-formed value\r\nthat matches nothing - a client id that owns no contracts - is an empty page, not a 404.\r\nTimestamps are UTC; `StartDate` and `EndDate` are stored as dates, so they are\r\nalways midnight.\r\n\n`Status` is derived, because a contract has no stored status: `Archived` when the\r\ncontract has been archived, `Expired` when its end date is behind the service\r\nprovider's own today, and `Active` otherwise. Deleted contracts are not listed at all.\r\nArchived and expired contracts are listed, so a caller that wants only live contracts should\r\nkeep the ones whose status is `Active`.\r\n\n`RecurringAmount` and `RecurringCost` cover the products billed on the contract's\r\nown recurring schedule, excluding one-off lines. Amount is before tax; cost is the unit cost\r\nrecorded against each product line multiplied by its quantity, so the difference between\r\nthem is the periodic margin. A contract's two figures are exactly the sum of its service\r\nlines'.\r\n\n`LaborTerms` says how a service line bills time - Unlimited Hours, Hourly, Block Hours,\r\nNo labor terms, or Limited Hours - and `LaborRates` says how an hour is priced for the\r\ntwo that bill hourly, and is null for the rest.\r\n",
+        "description": "A contract is the agreement with a client; a service line is one set of labour terms and\r\nproducts inside it. Most contracts have a single service line. A service line's id is the\r\nsame identifier a time entry's `ServiceLineId` carries, so a contract's service lines\r\nare what a time entry can be billed against.\r\n\n\r\nService lines ride inside the contract rather than being fetched per contract, so a page of\r\ncontracts costs a fixed number of queries. Every filter is optional; the client filter is a\r\ncomma-separated list and a contract matches if its client is any of them. A well-formed value\r\nthat matches nothing - a client id that owns no contracts - is an empty page, not a 404.\r\nTimestamps are UTC; `StartDate` and `EndDate` are stored as dates, so they are\r\nalways midnight.\r\n\n`Status` is derived, because a contract has no stored status: 3 `Archived` when\r\nthe contract has been archived, 2 `Expired` when its end date is behind the service\r\nprovider's own today, and 1 `Active` otherwise. Deleted contracts are not listed at\r\nall. Archived contracts are left out unless `statusIds` names Archived; expired ones\r\nare listed by default, so a caller that wants only live contracts passes\r\n`statusIds=1`.\r\n\n`RecurringAmount` and `RecurringCost` cover the products billed on the contract's\r\nown recurring schedule, excluding one-off lines. Amount is before tax; cost is the unit cost\r\nrecorded against each product line multiplied by its quantity, so the difference between\r\nthem is the periodic margin. A contract's two figures are exactly the sum of its service\r\nlines'.\r\n\n`LaborTerms` says how a service line bills time - Unlimited Hours, Hourly, Block Hours,\r\nNo Labor Terms, or Limited Hours - and `LaborRates` says how an hour is priced for the\r\ntwo that bill hourly, and is null for the rest.\r\n",
         "operationId": "get_v1_contracts",
         "parameters": [
           {
@@ -3190,6 +3292,14 @@
             "name": "ClientIds",
             "in": "query",
             "description": "Comma-separated client ids; keeps only contracts billed to any of them.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "StatusIds",
+            "in": "query",
+            "description": "Comma-separated status ids: 1 Active, 2 Expired, 3 Archived. Omitted returns Active and Expired (archived excluded). Any other id is a 400.",
             "schema": {
               "type": "string"
             }
@@ -3543,7 +3653,7 @@
           {
             "name": "StatusIds",
             "in": "query",
-            "description": "Comma-separated status ids (1 Draft, 3 Paid, 4 Void, 5 Approved).",
+            "description": "Comma-separated status ids: 1 Draft, 2 Submitted, 3 Paid, 4 Void, 5 Approved. Any other id is a 400. Omitted returns every status; deleted invoices are never listed.",
             "schema": {
               "type": "string"
             }
@@ -4495,7 +4605,7 @@
           "Billing"
         ],
         "summary": "Lists the service provider's item catalog: products and bundles.",
-        "description": "All filters are optional and combine with AND.\r\n\n\r\nOne resource for both kinds of item — `Type` says which. A bundle is a product made\r\nof other products; an invoice line references either kind through one `ItemId`. Labor\r\nitems are internal to contract pricing, are not creatable in the app, and are never\r\nreturned here.\r\n\n`Status` reflects whether the item is archived.\r\n\n`CategoryId`, `SubcategoryId`, `ClientId` and `LocationId` are bare\r\nids — resolve a category/subcategory against `GET /v1/items/categories`.\r\n",
+        "description": "All filters are optional and combine with AND.\r\n\n\r\nOne resource for both kinds of item — `Type` says which. A bundle is a product made\r\nof other products; an invoice line references either kind through one `ItemId`. Labor\r\nitems are internal to contract pricing, are not creatable in the app, and are never\r\nreturned here.\r\n\n`Status` reflects whether the item is archived: 1 Active, 2 Archived. Archived items\r\nare left out unless `statusIds` names Archived.\r\n\n`CategoryId`, `SubcategoryId`, `ClientId` and `LocationId` are bare\r\nids — resolve a category/subcategory against `GET /v1/items/categories`.\r\n",
         "operationId": "get_v1_items",
         "parameters": [
           {
@@ -4575,7 +4685,7 @@
           {
             "name": "StatusIds",
             "in": "query",
-            "description": "Comma-separated status ids (1 Active, 2 Archived).",
+            "description": "Comma-separated status ids: 1 Active, 2 Archived. Omitted returns Active only (archived excluded). Any other id is a 400.",
             "schema": {
               "type": "string"
             }
@@ -5226,7 +5336,7 @@
           {
             "name": "StatusIds",
             "in": "query",
-            "description": "Comma-separated client status ids to include; when omitted, inactive (2) clients are excluded, and when supplied only the listed statuses are returned.",
+            "description": "Comma-separated client status ids to include: 1 Active, 3 Credit hold, 4 Archived. Default excludes Archived; when supplied, only the listed statuses are returned. Any other value is a 400. Up to 100 values. Deleted clients are never listed.",
             "schema": {
               "type": "string"
             }
@@ -5626,6 +5736,7 @@
           "Clients"
         ],
         "summary": "Gets a single client by id.",
+        "description": "A deleted client is not found (404), the same as an id that does not exist. An Archived client is returned.",
         "operationId": "get_v1_clients_clientId",
         "parameters": [
           {
@@ -6425,7 +6536,7 @@
           {
             "name": "StatusIds",
             "in": "query",
-            "description": "Comma-separated contact status ids to include: 1 Active, 2 Inactive, 3 Temporary, 4 Archive.",
+            "description": "Comma-separated contact status ids to include: 1 Active, 3 Temporary, 4 Archived. Default excludes Archived; when supplied, only the listed statuses are returned. Any other value is a 400. Up to 100 values. Deleted contacts are never listed.",
             "schema": {
               "type": "string"
             }
@@ -6694,6 +6805,1750 @@
         }
       }
     },
+    "/v1/deletions": {
+      "get": {
+        "tags": [
+          "Deletions"
+        ],
+        "summary": "Lists records that have been deleted, so a copy kept in sync through this API can remove\r\nthem. Results are sorted by `DeletedOn` ascending, then type id, then id, using cursor\r\npagination.",
+        "description": "Each record appears once, with its latest deletion; this is not a history. A record\r\nrestored in the Gorelo app leaves this feed and appears in its normal list again.\r\n`DeletedOn` is the deleted record's last update, so it can move later if the deleted\r\nrecord is edited.\r\n            \r\nA contact is listed here when it was deleted, and also when its client was deleted, since\r\n`GET /v1/contacts` stops listing a deleted client's contacts. Such a contact's\r\n`DeletedOn` is the later of the contact's and the client's last update. In the same\r\nway, a task is listed when it was deleted and also when its project was deleted, with the\r\nlater of the task's and the project's last update.\r\n            \r\nAn invoice is listed when it was deleted. A voided invoice is not deleted: it is still\r\nreturned by `GET /v1/invoices`.\r\n            \r\nA record with no recorded last update has no deletion time and is not listed.\r\n            \r\nEach type needs read access on its own scope: clients `Clients`, contacts\r\n`Contacts`, contracts, items and invoices `Billing`, tickets `Tickets`,\r\ncustom assets `Assets`, projects and tasks `Project`. Asking for a type the key\r\ncannot read is a 403 with code `070208` on `TypeIds`.",
+        "operationId": "get_v1_deletions",
+        "parameters": [
+          {
+            "name": "TypeIds",
+            "in": "query",
+            "description": "Required. Comma-separated record types to include: 1 Client, 2 Contact, 3 Contract, 4 Ticket, 5 Item, 6 Invoice, 7 Custom asset, 8 Project, 9 Task. Up to 10 values; any other value is a 400.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Since",
+            "in": "query",
+            "description": "ISO-8601 UTC timestamp; keeps only deletions at or after it.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "Cursor",
+            "in": "query",
+            "description": "Opaque pagination cursor from a previous page; omit for the first page.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "PageSize",
+            "in": "query",
+            "description": "Number of items per page, 1-200 (default 50). Out of range is rejected, not clamped.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionResponseListBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionResponseListBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionResponseListBaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/documents": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Lists the service provider's documents.",
+        "description": "Active documents only, unless statusIds names Archived. Archiving a\r\ndocument archives every document below it. To pick up only what changed since a previous\r\nsync, pass updatedSince and createdSince.",
+        "operationId": "get_v1_documents",
+        "parameters": [
+          {
+            "name": "Cursor",
+            "in": "query",
+            "description": "Opaque pagination cursor from a previous page; omit for the first page.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "PageSize",
+            "in": "query",
+            "description": "Number of items per page, 1-200 (default 50). Out of range is rejected, not clamped.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 50
+            }
+          },
+          {
+            "name": "StatusIds",
+            "in": "query",
+            "description": "Comma-separated status ids: 1 Active, 2 Archived. Omitted returns Active only (archived excluded). Any other id is a 400.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ClientIds",
+            "in": "query",
+            "description": "Comma-separated client ids. Returns only those clients' documents, never internal ones.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "IsInternal",
+            "in": "query",
+            "description": "`true` for internal documents only, `false` for client documents only.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "ParentDocumentId",
+            "in": "query",
+            "description": "Only the documents nested directly under this document.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "IsStarred",
+            "in": "query",
+            "description": "Keeps only starred (`true`) or unstarred (`false`) documents.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "IsPublishedToPortal",
+            "in": "query",
+            "description": "Keeps only documents published (`true`) or not published (`false`) to the client portal.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "IsPublicLinkEnabled",
+            "in": "query",
+            "description": "Keeps only documents whose public link is on (`true`) or off (`false`).",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "Query",
+            "in": "query",
+            "description": "Keyword matched against the title. Max 200 characters.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "UpdatedSince",
+            "in": "query",
+            "description": "Keeps only documents updated at or after this UTC instant (ISO 8601). Documents never updated are left out.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "UpdatedBefore",
+            "in": "query",
+            "description": "Keeps only documents updated strictly before this UTC instant.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "CreatedSince",
+            "in": "query",
+            "description": "Keeps only documents created at or after this UTC instant. Restoring a version resets a document's created time.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "CreatedBefore",
+            "in": "query",
+            "description": "Keeps only documents created strictly before this UTC instant.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "SortBy",
+            "in": "query",
+            "description": "Sort field: `createdOn` (default) or `updatedOn`.",
+            "schema": {
+              "type": "string",
+              "default": "createdOn"
+            }
+          },
+          {
+            "name": "SortOrder",
+            "in": "query",
+            "description": "Sort direction: `asc` or `desc` (default).",
+            "schema": {
+              "type": "string",
+              "default": "desc"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentListItemModelListBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentListItemModelListBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentListItemModelListBaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Creates a document.",
+        "description": "The document goes last among the documents that share its parent. Under a parent it takes\r\nthe parent's client; the parent has to exist and not be archived.\r\n            \r\n`Body` must not embed images as `data:` URLs: upload each image with\r\n`POST /v1/attachments` and use the url it returns. Links in the body to other\r\ndocuments, devices, custom assets, contacts, passwords and structured documents are added\r\nto the document's related items, as the app adds them.\r\n            \r\nAttach files after creating, with `PATCH /v1/documents/{documentId}`.",
+        "operationId": "post_v1_documents",
+        "requestBody": {
+          "description": "The document.",
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDocumentCommand"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDocumentCommand"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDocumentCommand"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDocumentCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/documents/{documentId}": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Gets a single document.",
+        "description": "The body is the current version's. `Children` are the documents nested directly under\r\nthis one. Version history is its own endpoint, `GET /v1/documents/{documentId}/versions`.",
+        "operationId": "get_v1_documents_documentId",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "path",
+            "description": "Document identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Updates a document.",
+        "description": "Send only what changes. A changed `Title` or `Body` is saved as a new version.\r\n            \r\n`StatusId` 2 archives the document and the documents directly under it; 1 restores an\r\narchived document to the top level, as the app does. `Move` puts the document under\r\nanother parent, or at the top level of a client (or internal), and gives everything nested\r\nunder it the same client; its position among its new siblings is unchanged.\r\n            \r\n`Attachments` replaces the whole list: upload each file with `POST /v1/attachments`\r\nand send every name and url, including the ones to keep. An empty array removes them all.",
+        "operationId": "patch_v1_documents_documentId",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "path",
+            "description": "Document to update.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Fields to change.",
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDocumentCommand"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDocumentCommand"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDocumentCommand"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDocumentCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/documents/{documentId}/duplicate": {
+      "post": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Duplicates a document.",
+        "description": "The duplicate has the current body and attachments, the same client and parent, and goes\r\nlast among its siblings. Children, related items and history are not duplicated, and the\r\nstar, portal and public link start off. Attachment files and images in the body are\r\ncopied, so the duplicate never shares a file with the original. An archived document\r\ncannot be duplicated (409). The request body may be omitted entirely.",
+        "operationId": "post_v1_documents_documentId_duplicate",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "path",
+            "description": "Document to duplicate.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional title for the duplicate.",
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/DuplicateDocumentCommand"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DuplicateDocumentCommand"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DuplicateDocumentCommand"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/DuplicateDocumentCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/documents/{documentId}/pdf": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Downloads a document as a PDF.",
+        "description": "A 200 is the PDF itself, `application/pdf`, named after the title; errors still use\r\nthe envelope. Rendered from the current version at request time: the title as a heading,\r\nthen the body.",
+        "operationId": "get_v1_documents_documentId_pdf",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "path",
+            "description": "Document identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/documents/{documentId}/versions": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Lists a document's versions, newest first.",
+        "description": "Every saved version, the current one included (`IsCurrent`). Restoring a version\r\nresets its `EditedOn` to the time of the restore, so it moves to the top.",
+        "operationId": "get_v1_documents_documentId_versions",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "path",
+            "description": "Document identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Cursor",
+            "in": "query",
+            "description": "Opaque pagination cursor from a previous page; omit for the first page.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "PageSize",
+            "in": "query",
+            "description": "Number of items per page, 1-200 (default 50). Out of range is rejected, not clamped.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentVersionListItemModelListBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentVersionListItemModelListBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentVersionListItemModelListBaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/documents/{documentId}/versions/{versionId}": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Gets one version of a document, with its body and attachments.",
+        "operationId": "get_v1_documents_documentId_versions_versionId",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "path",
+            "description": "Document identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "versionId",
+            "in": "path",
+            "description": "Version identifier; it must be one of this document's.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentVersionDetailModelBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentVersionDetailModelBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentVersionDetailModelBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/documents/{documentId}/versions/{versionId}/restore": {
+      "post": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Makes an earlier version the current one.",
+        "description": "No body. Restoring the version that is already current changes nothing.",
+        "operationId": "post_v1_documents_documentId_versions_versionId_restore",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "path",
+            "description": "Document identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "versionId",
+            "in": "path",
+            "description": "Version to restore; it must be one of this document's.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailModelBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/documents/{documentId}/related-items": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Lists the records a document is related to.",
+        "description": "Not paginated: a document's related items are returned whole. `ItemType` is\r\n1 Document, 2 Custom asset, 3 Contact, 4 Device, 5 Structured document or 6 Password.",
+        "operationId": "get_v1_documents_documentId_related-items",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "path",
+            "description": "Document identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentRelatedItemModelListBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentRelatedItemModelListBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentRelatedItemModelListBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Relates a document to other records.",
+        "description": "Up to 100 records per call. Each has to exist in your account, except structured documents\r\nand passwords, which are linked as given. A record already related is skipped.",
+        "operationId": "post_v1_documents_documentId_related-items",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "path",
+            "description": "Document identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The records to relate.",
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddDocumentRelatedItemsCommand"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddDocumentRelatedItemsCommand"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddDocumentRelatedItemsCommand"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddDocumentRelatedItemsCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentRelatedItemModelListBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentRelatedItemModelListBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentRelatedItemModelListBaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/documents/{documentId}/related-items/{relatedItemId}": {
+      "delete": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Removes one related item from a document.",
+        "description": "Removes the link only; neither record is deleted.",
+        "operationId": "delete_v1_documents_documentId_related-items_relatedItemId",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "path",
+            "description": "Document identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "relatedItemId",
+            "in": "path",
+            "description": "The related item's `Id`, from the related items list.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoveDocumentRelatedItemResultBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoveDocumentRelatedItemResultBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoveDocumentRelatedItemResultBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/forms": {
       "get": {
         "tags": [
@@ -6733,7 +8588,7 @@
           {
             "name": "StatusIds",
             "in": "query",
-            "description": "Comma-separated form status ids: Active=1, Archived=2. Defaults to Active.",
+            "description": "Comma-separated form status ids: 1 Active, 2 Archived. Omitted returns Active only (archived excluded). Any other id is a 400.",
             "schema": {
               "type": "string"
             }
@@ -7178,6 +9033,14 @@
               "type": "integer",
               "format": "int32",
               "default": 50
+            }
+          },
+          {
+            "name": "StatusIds",
+            "in": "query",
+            "description": "Comma-separated status ids: Pending=1, Active=2, Disabled=3. Omit for Pending and Active -\r\ndisabled users are listed only when 3 is named. Any other id is a 400.",
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -7672,7 +9535,7 @@
           "Projects"
         ],
         "summary": "Creates a project for the authenticated service provider.",
-        "description": "The project is created in the `NotStarted` status and numbered from the same sequence\r\nthe app uses, so its number and prefix match what the app would have given it. The same\r\ncreation timeline entry and the same project-created notification fire as when a project\r\nis created in the app.",
+        "description": "The project is created in status 1 (Not started) and numbered from the same sequence\r\nthe app uses, so its number and prefix match what the app would have given it. The same\r\ncreation timeline entry and the same project-created notification fire as when a project\r\nis created in the app.",
         "operationId": "post_v1_projects",
         "requestBody": {
           "description": "Project details.",
@@ -7828,7 +9691,7 @@
           {
             "name": "StatusIds",
             "in": "query",
-            "description": "Comma-separated project status ids: NotStarted=1, InProgress=2, OnHold=3, Completed=4, Closed=5.",
+            "description": "Comma-separated project status ids: 1 Not started, 2 In progress, 3 On hold, 4 Completed, 5 Closed. Any other id is a 400. Omitted returns every status.",
             "schema": {
               "type": "string"
             }
@@ -9185,7 +11048,7 @@
           {
             "name": "StatusIds",
             "in": "query",
-            "description": "Comma-separated status ids: NotStarted=1, WorkingOnIt=2, OnHold=3, Done=4.",
+            "description": "Comma-separated task status ids: 1 Not started, 2 Working on it, 3 On hold, 4 Done. Any other id is a 400. Omitted returns every status.",
             "schema": {
               "type": "string"
             }
@@ -11598,7 +13461,7 @@
           "Projects"
         ],
         "summary": "Gets one approval on a task, with its approvers.",
-        "description": "This is where approval status lives - the conversations list stays lean and does not\r\ncarry it. `Status` is worked out from the approvers: Disapproved as soon as anyone\r\ndisapproves, Approved once everyone approves, Pending otherwise.",
+        "description": "This is where approval status lives - the conversations list stays lean and does not\r\ncarry it. `Status` is worked out from the approvers: Denied as soon as anyone\r\ndenies, Approved once everyone approves, Pending otherwise.",
         "operationId": "get_v1_projects_projectId_tasks_taskId_approvals_approvalId",
         "parameters": [
           {
@@ -13347,7 +15210,7 @@
         "tags": [
           "Tickets"
         ],
-        "summary": "Gets a single approval on a ticket, with its approvers. This is where approval status\r\nlives — the conversations list stays lean and does not carry it. `Status` is worked\r\nout from the approvers: Disapproved as soon as anyone disapproves, Approved once everyone\r\napproves, Pending otherwise.",
+        "summary": "Gets a single approval on a ticket, with its approvers. This is where approval status\r\nlives — the conversations list stays lean and does not carry it. `Status` is worked\r\nout from the approvers: Denied as soon as anyone denies, Approved once everyone\r\napproves, Pending otherwise.",
         "operationId": "get_v1_tickets_ticketId_approvals_approvalId",
         "parameters": [
           {
@@ -13774,6 +15637,38 @@
   },
   "components": {
     "schemas": {
+      "AddDocumentRelatedItem": {
+        "type": "object",
+        "properties": {
+          "ItemId": {
+            "type": "string",
+            "description": "The record's id, as text: a Guid for a document, custom asset or device, a number for a contact.",
+            "nullable": true
+          },
+          "ItemTypeId": {
+            "type": "integer",
+            "description": "1 Document, 2 Custom asset, 3 Contact, 4 Device, 5 Structured document, 6 Password.",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false,
+        "description": "One record to link."
+      },
+      "AddDocumentRelatedItemsCommand": {
+        "type": "object",
+        "properties": {
+          "RelatedItems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AddDocumentRelatedItem"
+            },
+            "description": "The records to link, 1 to 100 of them. A record already linked is skipped.",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "Links a document to other records."
+      },
       "AlertListItemModel": {
         "type": "object",
         "properties": {
@@ -15650,7 +17545,10 @@
                 "Alerts:delete",
                 "Forms:read",
                 "Forms:write",
-                "Forms:delete"
+                "Forms:delete",
+                "Documents:read",
+                "Documents:write",
+                "Documents:delete"
               ],
               "type": "string"
             },
@@ -16026,7 +17924,7 @@
           },
           "WarrantyEndDate": {
             "type": "string",
-            "description": "Date the warranty ends, a calendar date (yyyy-MM-dd). Optional.",
+            "description": "Date the warranty ends, a calendar date in the form yyyy-MM-dd. A value with a time or a time zone is rejected. Optional.",
             "format": "date",
             "nullable": true,
             "example": "2027-03-31"
@@ -16084,6 +17982,35 @@
           }
         },
         "additionalProperties": false
+      },
+      "CreateDocumentCommand": {
+        "type": "object",
+        "properties": {
+          "Title": {
+            "type": "string",
+            "description": "Title. Required, max 200 characters.",
+            "nullable": true
+          },
+          "Body": {
+            "type": "string",
+            "description": "The body, as HTML. Must not embed images as `data:` URLs - upload them first.",
+            "nullable": true
+          },
+          "ParentDocumentId": {
+            "type": "string",
+            "description": "The document to nest this one under; omit or null for a top-level document.",
+            "format": "uuid",
+            "nullable": true
+          },
+          "ClientId": {
+            "type": "integer",
+            "description": "The client the document belongs to; omit or null for an internal document. Under a parent\r\nthe document takes the parent's client, and a different value here is rejected.",
+            "format": "int64",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "A new document."
       },
       "CreateInvoiceCommand": {
         "type": "object",
@@ -16596,11 +18523,6 @@
             "type": "string",
             "description": "The comment body, as HTML. Required."
           },
-          "BodyText": {
-            "type": "string",
-            "description": "The same body as markdown, if you keep one.",
-            "nullable": true
-          },
           "ConversationTypeId": {
             "type": "integer",
             "description": "Kind of conversation: `1` Public or `2` Private. **Defaults to 2 (Private)** -\r\na project comment posted by an integration is an internal note unless it says otherwise.\r\n            \r\nA project has no side conversations or approvals of its own, so `3` and `4` are\r\nrejected rather than silently written as something else.",
@@ -17021,7 +18943,7 @@
           },
           "StatusId": {
             "type": "integer",
-            "description": "Task status: NotStarted=1, WorkingOnIt=2, OnHold=3, Done=4. Defaults to NotStarted.",
+            "description": "Task status: 1 Not started, 2 Working on it, 3 On hold, 4 Done. Defaults to 1 Not started.",
             "format": "int64"
           },
           "DueDate": {
@@ -17071,11 +18993,6 @@
             "minLength": 1,
             "type": "string",
             "description": "The comment body, as HTML. Required."
-          },
-          "BodyText": {
-            "type": "string",
-            "description": "The same body as markdown, if you keep one.",
-            "nullable": true
           },
           "Attachments": {
             "type": "array",
@@ -17734,7 +19651,8 @@
           },
           "Description": {
             "type": "string",
-            "description": "Free-text description."
+            "description": "Free-text description. Null when the asset has none.",
+            "nullable": true
           },
           "Banner": {
             "type": "string",
@@ -17761,7 +19679,7 @@
           },
           "SerialNumber": {
             "type": "string",
-            "description": "Hardware serial number.",
+            "description": "Hardware serial number. Null when the asset has none.",
             "nullable": true
           },
           "WarrantyEndDate": {
@@ -17772,12 +19690,39 @@
           },
           "IpAddress": {
             "type": "string",
-            "description": "IP address.",
+            "description": "IP address. Null when the asset has none.",
             "nullable": true
           }
         },
         "additionalProperties": false,
         "description": "A custom (non-agent) asset. Timestamps are UTC."
+      },
+      "CustomAssetResponseBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "$ref": "#/components/schemas/CustomAssetResponse"
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "CustomAssetResponseListBaseResponse": {
         "type": "object",
@@ -17845,12 +19790,16 @@
           },
           "Value": {
             "type": "string",
-            "description": "The field's effective value, as the app shows it: the value saved on this record, else the\r\nfield's default, else null. Always a string regardless of Type.",
+            "description": "The field's effective value, as the app shows it: the value saved on this record, else the\r\nfield's default, else null. Always a string regardless of Type. Always null when\r\n`IsHidden` is true.",
             "nullable": true
           },
           "IsSet": {
             "type": "boolean",
-            "description": "True when a value is saved on this record; false when `Value` is the field's default\r\n(or null). A saved value that happens to equal the default is still true."
+            "description": "True when a value is saved on this record; false when `Value` is the field's default\r\n(or null). A saved value that happens to equal the default is still true. Reported for\r\nhidden fields too."
+          },
+          "IsHidden": {
+            "type": "boolean",
+            "description": "True when the service provider has hidden this field's value from the API, which is set\r\nper field in the Gorelo app. `Value` is then always null, whether or not a value is\r\nsaved. The value can still be written through the API."
           }
         },
         "additionalProperties": false,
@@ -18557,6 +20506,54 @@
         },
         "additionalProperties": false
       },
+      "DeletionResponse": {
+        "type": "object",
+        "properties": {
+          "Type": {
+            "$ref": "#/components/schemas/CodeModel"
+          },
+          "Id": {
+            "type": "string",
+            "description": "The deleted record's id, as a string, in the form that record type's own endpoints take: a\r\nnumber for clients, contacts and contracts, a GUID for tickets, items, invoices, custom\r\nassets, projects and tasks. Read it with `Type` to know which record it names.",
+            "example": "1042"
+          },
+          "DeletedOn": {
+            "type": "string",
+            "description": "When the record was deleted (UTC). This is the record's last update, so it moves if the\r\ndeleted record is edited later.",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false,
+        "description": "A record that has been deleted: which kind of record, its id, and when it was deleted."
+      },
+      "DeletionResponseListBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeletionResponse"
+            },
+            "nullable": true
+          },
+          "DataContext": {
+            "$ref": "#/components/schemas/PaginationDataContext"
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "DeviceListItemResponse": {
         "type": "object",
         "properties": {
@@ -18960,6 +20957,480 @@
           }
         },
         "additionalProperties": false
+      },
+      "DocumentChildModel": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "string",
+            "description": "Document identifier.",
+            "format": "uuid"
+          },
+          "Title": {
+            "type": "string",
+            "description": "Title."
+          },
+          "ChildCount": {
+            "type": "integer",
+            "description": "Number of documents nested directly under this one.",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false,
+        "description": "A document nested directly under another."
+      },
+      "DocumentDetailModel": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "string",
+            "description": "Document identifier.",
+            "format": "uuid"
+          },
+          "Title": {
+            "type": "string",
+            "description": "Title."
+          },
+          "Body": {
+            "type": "string",
+            "description": "The body of the current version, as HTML. Image links carry a time-limited access token."
+          },
+          "ParentDocumentId": {
+            "type": "string",
+            "description": "The document this one is nested under; null for a top-level document.",
+            "format": "uuid",
+            "nullable": true
+          },
+          "RootDocumentId": {
+            "type": "string",
+            "description": "The top-level document of this document's tree; its own id when it is top level.",
+            "format": "uuid"
+          },
+          "Depth": {
+            "type": "integer",
+            "description": "How deep the document is nested: 0 for a top-level document, 1 for its children, and so on.",
+            "format": "int32"
+          },
+          "ChildCount": {
+            "type": "integer",
+            "description": "Number of documents nested directly under this one, archived ones included.",
+            "format": "int32"
+          },
+          "DocumentOrder": {
+            "type": "integer",
+            "description": "Position among the documents that share its parent, lowest first. Read-only.",
+            "format": "int32"
+          },
+          "Children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocumentChildModel"
+            },
+            "description": "The documents nested directly under this one, in their display order."
+          },
+          "ClientId": {
+            "type": "integer",
+            "description": "The client the document belongs to; null for an internal document.",
+            "format": "int64",
+            "nullable": true
+          },
+          "IsStarred": {
+            "type": "boolean",
+            "description": "Whether the document is starred. A star is shared by everyone in the account, not kept per user."
+          },
+          "PublicLinkEnabled": {
+            "type": "boolean",
+            "description": "Whether the document can be read by anyone holding its public link."
+          },
+          "PublicLinkUrl": {
+            "type": "string",
+            "description": "The public link to the current version, in the form the app copies to the clipboard. Null\r\nwhile `PublicLinkEnabled` is false.",
+            "nullable": true
+          },
+          "PublishToPortalEnabled": {
+            "type": "boolean",
+            "description": "Whether the document is published to the client portal."
+          },
+          "AlternateName": {
+            "type": "string",
+            "description": "The name the document is shown under in the client portal; null when none is set.",
+            "nullable": true
+          },
+          "Status": {
+            "$ref": "#/components/schemas/CodeModel"
+          },
+          "Attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommentAttachmentModel"
+            },
+            "description": "Files attached to the current version. Each url carries a time-limited access token; do\r\nnot store it."
+          },
+          "RelatedItems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocumentRelatedItemModel"
+            },
+            "description": "The records this document is linked to."
+          },
+          "CreatedOn": {
+            "type": "string",
+            "description": "When the document was created (UTC).",
+            "format": "date-time"
+          },
+          "CreatedById": {
+            "type": "integer",
+            "description": "Technician who created the document; 0 when it was created through the API.",
+            "format": "int64"
+          },
+          "UpdatedOn": {
+            "type": "string",
+            "description": "When the document was last changed (UTC); null if it never has been.",
+            "format": "date-time",
+            "nullable": true
+          },
+          "UpdatedById": {
+            "type": "integer",
+            "description": "Technician who last changed the document; 0 when that change came through the API.",
+            "format": "int64",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "A single document, with its body, children, attachments and related items."
+      },
+      "DocumentDetailModelBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "$ref": "#/components/schemas/DocumentDetailModel"
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "DocumentListItemModel": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "string",
+            "description": "Document identifier.",
+            "format": "uuid"
+          },
+          "Title": {
+            "type": "string",
+            "description": "Title."
+          },
+          "ParentDocumentId": {
+            "type": "string",
+            "description": "The document this one is nested under; null for a top-level document.",
+            "format": "uuid",
+            "nullable": true
+          },
+          "RootDocumentId": {
+            "type": "string",
+            "description": "The top-level document of this document's tree; its own id when it is top level.",
+            "format": "uuid"
+          },
+          "Depth": {
+            "type": "integer",
+            "description": "How deep the document is nested: 0 for a top-level document, 1 for its children, and so on.",
+            "format": "int32"
+          },
+          "ChildCount": {
+            "type": "integer",
+            "description": "Number of documents nested directly under this one, archived ones included.",
+            "format": "int32"
+          },
+          "DocumentOrder": {
+            "type": "integer",
+            "description": "Position among the documents that share its parent, lowest first. Read-only.",
+            "format": "int32"
+          },
+          "ClientId": {
+            "type": "integer",
+            "description": "The client the document belongs to; null for an internal document.",
+            "format": "int64",
+            "nullable": true
+          },
+          "IsStarred": {
+            "type": "boolean",
+            "description": "Whether the document is starred. A star is shared by everyone in the account, not kept per user."
+          },
+          "PublicLinkEnabled": {
+            "type": "boolean",
+            "description": "Whether the document can be read by anyone holding its public link."
+          },
+          "PublishToPortalEnabled": {
+            "type": "boolean",
+            "description": "Whether the document is published to the client portal."
+          },
+          "AlternateName": {
+            "type": "string",
+            "description": "The name the document is shown under in the client portal; null when none is set.",
+            "nullable": true
+          },
+          "Status": {
+            "$ref": "#/components/schemas/CodeModel"
+          },
+          "CreatedOn": {
+            "type": "string",
+            "description": "When the document was created (UTC).",
+            "format": "date-time"
+          },
+          "CreatedById": {
+            "type": "integer",
+            "description": "Technician who created the document; 0 when it was created through the API.",
+            "format": "int64"
+          },
+          "UpdatedOn": {
+            "type": "string",
+            "description": "When the document was last changed (UTC); null if it never has been.",
+            "format": "date-time",
+            "nullable": true
+          },
+          "UpdatedById": {
+            "type": "integer",
+            "description": "Technician who last changed the document; 0 when that change came through the API.",
+            "format": "int64",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "A document as it appears in the document list."
+      },
+      "DocumentListItemModelListBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocumentListItemModel"
+            },
+            "nullable": true
+          },
+          "DataContext": {
+            "$ref": "#/components/schemas/PaginationDataContext"
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "DocumentRelatedItemModel": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "integer",
+            "description": "Identifier of the link itself - what the remove endpoint takes.",
+            "format": "int64"
+          },
+          "ItemId": {
+            "type": "string",
+            "description": "Identifier of the linked record, as text: a Guid for documents, custom assets and devices, a number for contacts."
+          },
+          "ItemType": {
+            "$ref": "#/components/schemas/CodeModel"
+          }
+        },
+        "additionalProperties": false,
+        "description": "A link between a document and another record."
+      },
+      "DocumentRelatedItemModelListBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocumentRelatedItemModel"
+            },
+            "nullable": true
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "DocumentVersionDetailModel": {
+        "type": "object",
+        "properties": {
+          "VersionId": {
+            "type": "string",
+            "description": "Version identifier.",
+            "format": "uuid"
+          },
+          "IsCurrent": {
+            "type": "boolean",
+            "description": "Whether this is the version the document currently shows."
+          },
+          "Title": {
+            "type": "string",
+            "description": "The document's title in this version."
+          },
+          "Body": {
+            "type": "string",
+            "description": "The body of this version, as HTML. Image links carry a time-limited access token."
+          },
+          "Attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommentAttachmentModel"
+            },
+            "description": "Files attached to this version. Each url carries a time-limited access token."
+          },
+          "EditedById": {
+            "type": "integer",
+            "description": "Technician who wrote this version; 0 when it was written through the API.",
+            "format": "int64"
+          },
+          "EditedOn": {
+            "type": "string",
+            "description": "When this version was written (UTC). Restoring a version resets it to the time of the restore.",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false,
+        "description": "One version of a document, with its body and attachments."
+      },
+      "DocumentVersionDetailModelBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "$ref": "#/components/schemas/DocumentVersionDetailModel"
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "DocumentVersionListItemModel": {
+        "type": "object",
+        "properties": {
+          "VersionId": {
+            "type": "string",
+            "description": "Version identifier.",
+            "format": "uuid"
+          },
+          "IsCurrent": {
+            "type": "boolean",
+            "description": "Whether this is the version the document currently shows."
+          },
+          "Title": {
+            "type": "string",
+            "description": "The document's title in this version."
+          },
+          "EditedById": {
+            "type": "integer",
+            "description": "Technician who wrote this version; 0 when it was written through the API.",
+            "format": "int64"
+          },
+          "EditedOn": {
+            "type": "string",
+            "description": "When this version was written (UTC). Restoring a version resets it to the time of the restore.",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false,
+        "description": "One version of a document, as it appears in its version history."
+      },
+      "DocumentVersionListItemModelListBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocumentVersionListItemModel"
+            },
+            "nullable": true
+          },
+          "DataContext": {
+            "$ref": "#/components/schemas/PaginationDataContext"
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "DuplicateDocumentCommand": {
+        "type": "object",
+        "properties": {
+          "Title": {
+            "type": "string",
+            "description": "The duplicate's title, max 200 characters; defaults to the original title followed by \" clone\".",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "A duplicate of a document. The body may be omitted entirely."
       },
       "Error": {
         "type": "object",
@@ -20256,7 +22727,7 @@
         "properties": {
           "UpdateType": {
             "type": "string",
-            "description": "Type of the last update (e.g. comment, status change)."
+            "description": "Type of the last update: New, CommentCreated, StatusUpdated, TechnicianMentioned,\r\nExternalCommentCreated, TechnicianUpdated, Read, Unread. Empty for any other update."
           },
           "Summary": {
             "type": "string",
@@ -20838,7 +23309,7 @@
         "properties": {
           "UpdateType": {
             "type": "string",
-            "description": "Type of the last update, e.g. `ProjectStatusUpdated`."
+            "description": "Type of the last update, from a fixed set. Empty, with an empty `Summary`, for any\r\nother recorded event.\r\n\n\r\nOn a project: `ProjectCreated`, `ProjectSectionCreated`,\r\n`ProjectSectionUpdated`, `ProjectSectionDeleted`, `TaskCreated`,\r\n`TaskSectionUpdated`, `TaskStatusUpdated`, `TaskDeleted`,\r\n`ProjectLeadAssigneeUpdated`, `ProjectContactsUpdated`, `ProjectDueDateUpdated`,\r\n`ProjectTypeUpdated`, `ProjectTagsUpdated`, `ProjectGroupsUpdated`,\r\n`ProjectStatusUpdated`, `ProjectCommentAdded`, `ProjectDeleted`,\r\n`ProjectRecovered`, `ProjectTitleUpdated`, `ProjectWatchersUpdated`,\r\n`ProjectClientUpdated`, `ProjectClientLocationUpdated`,\r\n`ProjectDescriptionUpdated`.\r\n\n\r\nOn a task: `TaskCreated`, `TaskSectionUpdated`, `TaskDeleted`,\r\n`TaskStatusUpdated`, `TaskPriorityUpdated`, `TaskDueDateUpdated`,\r\n`TaskLeadAssigneeUpdated`, `TaskAssistingAssigneesUpdated`, `TaskAssetsUpdated`,\r\n`TaskBlockersUpdated`, `TaskReadStatusUpdated`, `TaskTPCAdded`,\r\n`TaskShipmentTrackingAdded`, `TaskShipmentTrackingDeleted`,\r\n`TaskShipmentTrackingUpdated`, `TaskChecklistAdded`, `TaskChecklistDeleted`,\r\n`TaskChecklistItemAdded`, `TaskChecklistItemDeleted`,\r\n`TaskChecklistItemCompleted`, `TaskApprovalAdded`, `TaskCommentAdded`,\r\n`TaskTitleUpdated`, `TaskWatchersUpdated`, `TaskRecovered`, `TaskMerged`,\r\n`ProjectShortcutApplied`, `TaskDeviceFileExplorerUsed`,\r\n`TaskDeviceRemoteConnectLaunched`, `TaskEventScheduled`, `TaskEventRemoved`.\r\n"
           },
           "Summary": {
             "type": "string",
@@ -21176,6 +23647,45 @@
         },
         "additionalProperties": false
       },
+      "RemoveDocumentRelatedItemResult": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "integer",
+            "description": "Identifier of the removed link.",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false,
+        "description": "The link that was removed."
+      },
+      "RemoveDocumentRelatedItemResultBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "$ref": "#/components/schemas/RemoveDocumentRelatedItemResult"
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "SecurityPostureModel": {
         "type": "object",
         "properties": {
@@ -21206,7 +23716,7 @@
           },
           "Name": {
             "type": "string",
-            "description": "Status name, as the Gorelo app labels it.",
+            "description": "Status name, as the Gorelo app's asset list labels it. A fixed set: 1 `Up To Date`,\r\n2 `Updates Available`, 3 `Out of Date` (one name for every category, the\r\napp's own helper value), 4 `Enabled`, 5 `Disabled`, 6 `Missing`,\r\n7 `Unmanaged`, 8 `N/A`, 9 `Unknown`.",
             "example": "Up To Date"
           },
           "Passing": {
@@ -23244,7 +25754,7 @@
           },
           "StatusId": {
             "type": "integer",
-            "description": "New status identifier. Leave null to keep the current value.",
+            "description": "New status id: 1 Active, 3 Credit hold, 4 Archived. Leave null to keep the current value.\r\nAny other value is a 400; to delete a client use DELETE /v1/clients/{clientId}.",
             "format": "int32",
             "nullable": true
           },
@@ -23263,7 +25773,7 @@
             "items": {
               "$ref": "#/components/schemas/CustomPropertyUpdate"
             },
-            "description": "Custom field values to upsert. Identified by `Id`\r\n(the custom field id) only - an entry present updates that field's value, one absent from the array\r\nis left untouched, and omitting `CustomProperties` entirely leaves all custom properties\r\nuntouched. A `null``Value` clears the saved value so the field falls back to its\r\ndefault; an empty string saves an empty value. On a required field, either is rejected when it\r\nwould leave the field with no value.",
+            "description": "Custom field values to upsert. Identified by `Id`\r\n(the custom field id) only - an entry present updates that field's value, one absent from the array\r\nis left untouched, and omitting `CustomProperties` entirely leaves all custom properties\r\nuntouched. A `null``Value` clears the saved value so the field falls back to its\r\ndefault; an empty string saves an empty value. On a required field, either is rejected when it\r\nwould leave the field with no value. Each custom field id may appear once; a repeated id is a 400.",
             "nullable": true
           }
         },
@@ -23363,7 +25873,7 @@
           },
           "ClientId": {
             "type": "integer",
-            "description": "Identifier of the client the asset belongs to. The client cannot be changed: send the\r\nasset's current client or leave the field out.",
+            "description": "Identifier of the client the asset belongs to; must be an active client. A different client\r\nmoves the asset, and its location and contact must then belong to the new client. Null\r\nleaves it unchanged.",
             "format": "int64",
             "nullable": true,
             "example": 3521
@@ -23397,7 +25907,7 @@
           },
           "WarrantyEndDate": {
             "type": "string",
-            "description": "Date the warranty ends, a calendar date (yyyy-MM-dd). Send null to clear it.",
+            "description": "Date the warranty ends, a calendar date in the form yyyy-MM-dd. A value with a time or a time zone is rejected. Send null to clear it.",
             "format": "date",
             "nullable": true,
             "example": "2027-03-31"
@@ -23455,6 +25965,79 @@
           }
         },
         "additionalProperties": false
+      },
+      "UpdateDocumentCommand": {
+        "type": "object",
+        "properties": {
+          "Title": {
+            "type": "string",
+            "description": "Title, max 200 characters. Cannot be blank.",
+            "nullable": true
+          },
+          "Body": {
+            "type": "string",
+            "description": "The body, as HTML. A changed title or body is saved as a new version.",
+            "nullable": true
+          },
+          "IsStarred": {
+            "type": "boolean",
+            "description": "Star or unstar. A star is shared by everyone in the account.",
+            "nullable": true
+          },
+          "PublicLinkEnabled": {
+            "type": "boolean",
+            "description": "Turn the public link on or off.",
+            "nullable": true
+          },
+          "PublishToPortalEnabled": {
+            "type": "boolean",
+            "description": "Publish to or withdraw from the client portal.",
+            "nullable": true
+          },
+          "AlternateName": {
+            "type": "string",
+            "description": "The name shown in the client portal, max 200 characters. An empty string clears it.",
+            "nullable": true
+          },
+          "StatusId": {
+            "type": "integer",
+            "description": "2 archives the document and the documents directly under it; 1 restores an archived\r\ndocument to the top level.",
+            "format": "int64",
+            "nullable": true
+          },
+          "Attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommentAttachmentModel"
+            },
+            "description": "The whole attachment list, replacing the current one; an empty array removes every\r\nattachment. Each url must be one returned by `POST /v1/attachments`.",
+            "nullable": true
+          },
+          "Move": {
+            "$ref": "#/components/schemas/UpdateDocumentMove"
+          }
+        },
+        "additionalProperties": false,
+        "description": "Partial update of a document. Every field is optional; an omitted or null field is left as it\r\nis. Clearing, per field: `AlternateName` clears with an empty string; `Attachments`\r\nclears with an empty array; `Title` cannot be cleared."
+      },
+      "UpdateDocumentMove": {
+        "type": "object",
+        "properties": {
+          "ParentDocumentId": {
+            "type": "string",
+            "description": "The new parent; null moves the document to the top level.",
+            "format": "uuid",
+            "nullable": true
+          },
+          "ClientId": {
+            "type": "integer",
+            "description": "The client, when moving to the top level; null there means internal. Under a parent the\r\ndocument takes the parent's client, and a different value here is rejected.",
+            "format": "int64",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "Where to move a document."
       },
       "UpdateItemCommand": {
         "type": "object",
@@ -23713,7 +26296,7 @@
           },
           "StatusId": {
             "type": "integer",
-            "description": "New status: Not Started=1, In Progress=2, On Hold=3, Completed=4, Closed=5. Completed is\r\nnormally reached automatically once every task is Done; Closed is the manual end state\r\nand stamps `ClosedOn`. Moving a Closed project to any other status clears it.",
+            "description": "New status: 1 Not started, 2 In progress, 3 On hold, 4 Completed, 5 Closed. Completed is\r\nnormally reached automatically once every task is Done; Closed is the manual end state\r\nand stamps `ClosedOn`. Moving a Closed project to any other status clears it.",
             "format": "int64",
             "nullable": true
           },
@@ -23854,7 +26437,7 @@
           },
           "StatusId": {
             "type": "integer",
-            "description": "New status: NotStarted=1, WorkingOnIt=2, OnHold=3, Done=4.",
+            "description": "New status: 1 Not started, 2 Working on it, 3 On hold, 4 Done.",
             "format": "int64",
             "nullable": true
           },
@@ -24017,7 +26600,7 @@
           },
           "ClosedOn": {
             "type": "string",
-            "description": "The date the ticket was closed, for correcting the close date of a ticket migrated from\r\nanother system. The ticket must already be in a closed status, or be moved into one by this\r\nsame request. Must not be in the future or earlier than the ticket's CreatedOn. Omit to leave\r\nan already-closed ticket's close date untouched. Sending null is the same as omitting it -\r\nthe close date is not clearable here, since a closed ticket always has one.",
+            "description": "The date the ticket was closed, for correcting the close date of a ticket migrated from\r\nanother system. The ticket must already be in a closed status, or be moved into one by this\r\nsame request. Must not be in the future or earlier than the ticket's CreatedOn. Omit to leave\r\nan already-closed ticket's close date untouched. Sending null is the same as omitting it -\r\nthe close date is not clearable here, since a closed ticket always has one. A close that\r\ncarries ClosedOn is treated as history: it is recorded on the timeline but sends no\r\nstatus-changed email to the contact and triggers no automation rules.",
             "format": "date-time",
             "nullable": true
           },
@@ -24760,6 +27343,14 @@
     {
       "name": "Contacts",
       "description": "Contacts management operations"
+    },
+    {
+      "name": "Deletions",
+      "description": "Deletions management operations"
+    },
+    {
+      "name": "Documents",
+      "description": "Documents management operations"
     },
     {
       "name": "Forms",

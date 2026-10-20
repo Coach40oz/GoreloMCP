@@ -10,13 +10,17 @@ Safety infrastructure, built first and reviewed before anything runs live:
                  flag a cleanup never voids, and only the write matrix's approved_invoice area voids the one invoice it
                  approved itself); it also clears the custom field value that the custom_properties area (--with-custom-properties)
                  set on the test client, but only while the field still shows the run's text and no other custom field of
-                 that client is set
+                 that client is set; it also archives a document that a stopped documents area (--with-documents) left Active
+                 (a document cannot be deleted through the API, so it is a known residue)
 
 How a harness wires them together (the same guard goes on every client of the run):
 
-    manifest = Manifest.start()                                   # .live-runs/MCPTEST-<time>.json
-    guard = LiveGuard("write", manifest, require_intents=True)    # "read" and no manifest for a read-only run
-    server = build_server(live_settings(), event_hooks={"request": [guard, Pacer(1.0)]})
+    settings = live_settings()                                    # GORELO_BASE_URL decides the host the guard allows
+    facts = await verify_site_clients(settings.api_key, base_url=settings.base_url)    # the name and the status of each client
+    require_active_test_client(facts)                             # a write run starts only while the test client is Active
+    manifest = Manifest.start(api_host=settings.api_host)         # .live-runs/MCPTEST-<time>.json
+    guard = LiveGuard("write", manifest, require_intents=True, base_url=settings.base_url)    # "read" and no manifest for a read-only run
+    server = build_server(settings, event_hooks={"request": [guard, Pacer(1.0)]})
     try:
         async with Client(server) as tools:
             label = manifest.label("plain ticket")

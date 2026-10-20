@@ -5,8 +5,9 @@ public OpenAPI spec (never hand-edit it). The first group of tests pins facts
 that were verified against the live spec on 2026-10-01 and refreshed against
 each later spec: 2026-10-02 (contract e15cb5a18ec2, 96 operations), 2026-10-08
 (56005ff28330, 98), 2026-10-12 (bce2fad59937, 103: the api-keys and custom asset
-operations) and now 2026-10-14 (1b1c0cec0e9a, 103 operations and 288 schemas: the
-custom properties of clients and devices). If one of them
+operations), 2026-10-14 (1b1c0cec0e9a, 103 operations and 288 schemas: the
+custom properties of clients and devices) and now 2026-10-17 (a7954b24844b, 117 operations and 310 schemas:
+documents, deletions, the single custom asset). If one of them
 fails after a re-snapshot, Gorelo changed the API: read the report written by scripts/spec_diff.py --out FILE,
 check the raw spec, and only then decide whether the code or the assertion is wrong.
 
@@ -78,22 +79,25 @@ def _walk_keys(node, path=""):
 
 
 # --------------------------------------------------------------------------
-# Verified facts about the live spec (2026-10-14, contract 1b1c0cec0e9a; the facts that did not change were first
+# Verified facts about the live spec (2026-10-17, contract a7954b24844b; the facts that did not change were first
 # verified on 2026-10-01 or 2026-10-02)
 # --------------------------------------------------------------------------
 
 
-def test_op_count_is_103(index, ops):
+def test_op_count_is_117(index, ops):
     # 96 operations in contract e15cb5a18ec2 (2026-10-02); the 2026-10-08 spec (contract 56005ff28330) added POST /v1/payments and
     # DELETE /v1/payments/{paymentId}; the 2026-10-12 spec (contract bce2fad59937) added GET /v1/api-keys, DELETE /v1/api-keys/{apiKeyId},
     # POST /v1/assets/custom, PATCH /v1/assets/custom/{customAssetId} and GET /v1/assets/custom/hardware-types; the 2026-10-14 spec
-    # (contract 1b1c0cec0e9a) added no operation: it added custom properties to the client and device records and to the client update
-    assert index["op_count"] == 103
-    assert len(ops) == 103
-    assert index["contract_sha256"].startswith("1b1c0cec0e9a")
+    # (contract 1b1c0cec0e9a) added no operation: it added custom properties to the client and device records and to the client update;
+    # the 2026-10-17 spec (contract a7954b24844b) added fourteen: the twelve document operations, GET /v1/deletions and
+    # GET /v1/assets/custom/{customAssetId}
+    assert index["op_count"] == 117
+    assert len(ops) == 117
+    assert index["contract_sha256"].startswith("a7954b24844b")
     # 252 schemas on 2026-10-01, 268 on 2026-10-02, 274 on 2026-10-08, 286 on 2026-10-12; the 2026-10-14 spec added two:
-    # CustomPropertyUpdate and CustomPropertyValue
-    assert len(index["schemas"]) == 288
+    # CustomPropertyUpdate and CustomPropertyValue; the 2026-10-17 spec added twenty two (310 in all: the document, deletion
+    # and related item schemas)
+    assert len(index["schemas"]) == 310
 
 
 def test_index_has_no_description_or_summary_keys(index):
@@ -128,14 +132,24 @@ def test_list_tickets_is_paged_with_all_filters(ops):
     assert expected <= set(tickets["query_params"])
 
 
-@pytest.mark.parametrize("key", ["GET /v1/invoices", "GET /v1/items", "GET /v1/uptime"])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "GET /v1/invoices", "GET /v1/items", "GET /v1/uptime",
+        # the three paged operations the 2026-10-17 spec added reject an out-of-range page size too
+        "GET /v1/deletions", "GET /v1/documents", "GET /v1/documents/{documentId}/versions",
+    ],
+)
 def test_page_size_is_rejected_not_clamped(ops, key):
     assert ops[key]["page_size_rule"] == "reject"
 
 
-def test_exactly_20_ops_are_paged_and_paged_means_cursor(ops):
-    assert sum(1 for op in ops.values() if op["paged"]) == 20  # GET /v1/alerts is the 19th (2026-10-02), GET /v1/api-keys the 20th (2026-10-12)
+def test_exactly_23_ops_are_paged_and_paged_means_cursor(ops):
+    # GET /v1/alerts is the 19th (2026-10-02), GET /v1/api-keys the 20th (2026-10-12); the 2026-10-17 spec added GET /v1/deletions,
+    # GET /v1/documents and GET /v1/documents/{documentId}/versions (a document's related items are not paged)
+    assert sum(1 for op in ops.values() if op["paged"]) == 23
     assert ops["GET /v1/api-keys"]["paged"] is True
+    assert ops["GET /v1/documents/{documentId}/related-items"]["paged"] is False
     for key, op in ops.items():
         assert op["paged"] == ("Cursor" in op["query_params"]), key
 
@@ -200,6 +214,7 @@ def test_custom_properties_are_returned_on_the_single_client_and_device_and_set_
         "Type": {"ref": "CodeModel", "type": None, "nullable": False},
         "Value": {"type": "string", "nullable": True},  # the effective value, always text whatever Type is
         "IsSet": {"type": "boolean", "nullable": False},
+        "IsHidden": {"type": "boolean", "nullable": False},  # 2026-10-17: the provider hid the value; Value is then always null
     }
     values = {"type": "array", "nullable": False, "items": {"ref": "CustomPropertyValue", "type": None}}
     for single, row in (("ClientResponse", "ClientListItemResponse"), ("DeviceResponse", "DeviceListItemResponse")):
@@ -273,12 +288,13 @@ def test_attachment_upload_is_multipart(ops):
 
 def test_every_request_body_of_the_live_spec_is_an_object(ops):
     # 32 bodies are $ref object schemas (POST /v1/payments is the 30th, 2026-10-08; POST /v1/assets/custom and
-    # PATCH /v1/assets/custom/{customAssetId} are the 31st and 32nd, 2026-10-12) and the 33rd is the inline multipart object
-    # on POST /v1/attachments. A body that is not an object would carry "type" (and
+    # PATCH /v1/assets/custom/{customAssetId} are the 31st and 32nd, 2026-10-12), the 33rd is the inline multipart object
+    # on POST /v1/attachments, and the 2026-10-17 spec added four $ref object bodies (POST /v1/documents, PATCH /v1/documents/{documentId},
+    # POST /v1/documents/{documentId}/duplicate and POST /v1/documents/{documentId}/related-items), 37 in all. A body that is not an object would carry "type" (and
     # "format" or "items"); if one appears, Gorelo added a new body shape: read the
     # build warnings and the spec_diff.py report before relying on body["fields"].
     bodies = {key: op["body"] for key, op in ops.items() if op["body"] is not None}
-    assert len(bodies) == 33
+    assert len(bodies) == 37
     for key, body in bodies.items():
         assert not {"type", "format", "items"} & set(body), key
 
@@ -371,27 +387,27 @@ def test_live_spec_defaults_constraints_and_security_are_in_the_index(index, ops
 
 def test_live_spec_rejects_unknown_fields_on_every_object_schema(schemas):
     # additionalProperties false on every object schema is the mechanism behind
-    # "an unknown body field is a 400" (see docs/API-OBSERVED-BEHAVIOR.md). 284 object schemas (282 until the 2026-10-14 spec, which
-    # added CustomPropertyUpdate and CustomPropertyValue; 270 until the 2026-10-12 spec, 264 before the payments schemas of
-    # 2026-10-08), plus the free-form DataContext property that 77 response schemas carry. The other four schemas are enums.
+    # "an unknown body field is a 400" (see docs/API-OBSERVED-BEHAVIOR.md). 306 object schemas (284 until the 2026-10-17 spec, which
+    # added twenty two; 282 until the 2026-10-14 spec, which added CustomPropertyUpdate and CustomPropertyValue; 270 until the
+    # 2026-10-12 spec, 264 before the payments schemas of 2026-10-08), plus the free-form DataContext property that 82 response schemas carry (77 until the 2026-10-17 spec). The other four schemas are enums.
     objects = {name: schema for name, schema in schemas.items() if schema["type"] == "object"}
-    assert len(objects) == 284
+    assert len(objects) == 306
     assert [name for name, schema in objects.items() if schema.get("additional_properties") is not False] == []
     assert {"CustomPropertyUpdate", "CustomPropertyValue"} <= set(objects)  # both new schemas reject unknown fields too
     data_contexts = [
         (name, field) for name, schema in schemas.items() for field, entry in schema["fields"].items()
         if entry.get("additional_properties") is False
     ]
-    assert len(data_contexts) == 77
+    assert len(data_contexts) == 82
     assert {field for _, field in data_contexts} == {"DataContext"}
 
 
 @pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
 def test_index_records_every_default_constraint_and_additional_properties_of_the_raw_spec(index):
     # Cross-check against the raw spec: not one occurrence may be dropped. The raw spec
-    # uses default 36 times (all on query params), minLength 23, pattern 3 (two on path
-    # params, one on a schema field) and additionalProperties 361 (all false; 359 until the 2026-10-14 spec, whose two new
-    # schemas CustomPropertyUpdate and CustomPropertyValue each state it). The live spec
+    # uses default 41 times (all on query params; 36 until the 2026-10-17 spec), minLength 23, pattern 3 (two on path
+    # params, one on a schema field) and additionalProperties 388 (all false; 361 until the 2026-10-17 spec, 359 until the
+    # 2026-10-14 spec, whose two new schemas CustomPropertyUpdate and CustomPropertyValue each state it). The live spec
     # has no property called any of these, so counting keys is exact. Request bodies repeat
     # their schemas' fields, so only schemas and params are counted in the index.
     raw = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))
@@ -400,7 +416,7 @@ def test_index_records_every_default_constraint_and_additional_properties_of_the
         return sum(1 for node in nodes for _, key in _walk_keys(node) if key == name)
 
     raw_counts = {key: count([raw], key) for key in ("default", "minLength", "pattern", "additionalProperties")}
-    assert raw_counts == {"default": 36, "minLength": 23, "pattern": 3, "additionalProperties": 361}
+    assert raw_counts == {"default": 41, "minLength": 23, "pattern": 3, "additionalProperties": 388}
     schema_nodes = [index["schemas"]]
     param_nodes = [params for op in index["ops"].values() for params in (op["path_params"], op["query_params"])]
     assert count(param_nodes, "default") == raw_counts["default"]
@@ -2456,7 +2472,7 @@ def test_the_rich_synthetic_spec_records_every_constraint_key_somewhere():
         "spec/spec_index.json",
     ],
 )
-def test_phase_files_contain_no_em_or_en_dashes(relative):
+def test_spec_tooling_files_contain_no_em_or_en_dashes(relative):
     path = REPO_ROOT / relative
     assert path.is_file(), f"{relative} is missing"
     text = path.read_text(encoding="utf-8")

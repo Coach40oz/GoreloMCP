@@ -14,6 +14,11 @@ from scripts.live import guard as live_guard
 
 REAL_VERIFY = live_guard.verify_site_clients
 CLIENT_CHECKS: list[str] = []
+# What the stub of the client check reports for each configured client: both Active (status 1). A test that needs an archived or
+# otherwise inactive client changes an entry (monkeypatch.setitem(site_helper.CLIENT_STATUS, 9501, (4, "Archived"))); the autouse
+# fixture puts the defaults back for every test.
+CLIENT_STATUS: dict[int, tuple[int | None, str | None]] = {}
+DEFAULT_CLIENT_STATUS: dict[int, tuple[int | None, str | None]] = {9501: (1, "Active"), 9502: (1, "Active")}
 
 SITE_TOML = """\
 [clients]
@@ -50,11 +55,16 @@ def site_config_env(tmp_path_factory, monkeypatch):
         path.write_text(SITE_TOML, encoding="utf-8")
     monkeypatch.setenv("GORELO_SITE_CONFIG", str(path))
 
-    async def no_check(api_key, *, transport=None, cfg=None):
+    async def no_check(api_key, *, transport=None, cfg=None, base_url=None):
         CLIENT_CHECKS.append("checked")
+        return {
+            client: live_guard.ClientFacts(status_id=status[0], status_name=status[1]) for client, status in CLIENT_STATUS.items()
+        }
 
     monkeypatch.setattr(live_guard, "verify_site_clients", no_check)
     CLIENT_CHECKS.clear()
+    CLIENT_STATUS.clear()
+    CLIENT_STATUS.update(DEFAULT_CLIENT_STATUS)
     return path
 
 

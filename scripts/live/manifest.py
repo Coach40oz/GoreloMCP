@@ -20,6 +20,10 @@ so a crash leaves the old file or the new one, never half of one. If the write i
 state keeps the change and the error is raised: an intent that cannot be persisted must stop the create.
 One process at a time may write a manifest (there is no cross-process locking).
 
+The file also names the API host the run called (the top-level key api_host, Settings.api_host): start() writes it before
+the first write, and cleanup refuses to run against another host. A file without the key was written before 1.3.0, when the
+harness called only api.usw.gorelo.io, so it reads as that host.
+
 The guard and cleanup read these `details` keys, so the harness must record them:
 
     ticket             contact_id (int or None, REQUIRED: the guard's public-comment rule), cc_contact_ids (list);
@@ -34,8 +38,9 @@ The guard and cleanup read these `details` keys, so the harness must record them
                        the record they belong to: ticket_id, or project_id and task_id for a task's. The guard
                        lets a side conversation (approval) comment go only into one whose ticket_id (task_id)
                        is the ticket (task) of the request path
-    attachment         the parent: ticket_id, or project_id (and task_id); an uploaded file cannot be deleted
-                       through the API, so cleanup reports it as known undeletable once its parent is deleted
+    attachment         the parent: ticket_id, or project_id (and task_id), or document_id; an uploaded file cannot be deleted
+                       through the API, so cleanup reports it as known undeletable once its parent is deleted (a document:
+                       once it is archived, which is as far as a document goes)
     invoice            status_id (the status Gorelo STORED; REQUIRED for any DELETE of an invoice: 1 for a Draft, which
                        the guard lets be deleted, and 5 for the one Approved invoice of the approved_invoice area,
                        which the guard lets be voided only with allow_approved_invoice; 4 once it was voided, 3 when
@@ -63,8 +68,16 @@ The guard and cleanup read these `details` keys, so the harness must record them
                        ids, a list of integers): the record stays a leftover and every later cleanup reports those ids
                        again, until somebody deletes that entry from the manifest to acknowledge them
 
+    document           a document of the write matrix's documents area (--with-documents), always of the test client: client_id
+                       and parent_document_id (None for a top-level document), and duplicate_of (the source document) for a
+                       copy. A document cannot be deleted through the API, so every one of them is a known residue from the
+                       moment it exists: the run archives it (StatusId 2), a cleanup archives one that a stopped run left, and
+                       the outcome of an archived one ends with "(a document cannot be deleted through the API)", which cleanup
+                       counts as known undeletable, never as cleaned and never alone a failure. The guard takes a write to a
+                       document only for a run-created one, so this record is what unlocks it
+
 `id` is an int for client, contact, time_entry and custom_property, a UUID for ticket, comment, item, uptime, project,
-section, task, project_comment, invoice and custom_asset, and any short token for attachment, side_conversation and approval.
+section, task, project_comment, invoice, custom_asset and document, and any short token for attachment, side_conversation and approval.
 Never put secrets in `details` (the manifest refuses keys that look like one). An uploaded attachment's url
 carries an access token: record its name, not its url.
 """
@@ -102,6 +115,7 @@ KINDS: tuple[str, ...] = (
     "invoice",
     "custom_asset",
     "custom_property",
+    "document",
 )
 # "int": a positive integer. "uuid": a UUID (stored lowercase, hyphenated). "any": either of those or a short token.
 ID_TYPES: dict[str, str] = {
@@ -122,6 +136,7 @@ ID_TYPES: dict[str, str] = {
     "invoice": "uuid",
     "custom_asset": "uuid",
     "custom_property": "int",
+    "document": "uuid",
 }
 # the kinds of records that exist before a run (listed leftovers of earlier probes)
 LEFTOVER_KINDS = ("client", "contact")
@@ -130,6 +145,9 @@ RUN_PREFIX = "MCPTEST-"
 RUN_ID_PATTERN = re.compile(r"MCPTEST-[0-9]{14}")
 FORMAT_VERSION = 1
 RUNS_DIR = Path(__file__).resolve().parents[2] / ".live-runs"
+# the host of a file without the api_host key: the harness before 1.3.0 called only this one
+LEGACY_API_HOST = "api.usw.gorelo.io"
+_HOST_NAME = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)+")
 
 _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _DIGITS = re.compile(r"[0-9]{1,18}")
@@ -270,6 +288,16 @@ def _short(text: Any) -> str:
     return shown if len(shown) <= 80 else shown[:77] + "..."
 
 
+def _is_host_name(value: Any) -> bool:
+    return isinstance(value, str) and _HOST_NAME.fullmatch(value) is not None
+
+
+def _checked_host(value: Any) -> str:
+    if not _is_host_name(value):
+        raise ValueError(f"api_host {_short(value)!r} must be a host name, for example api.usw.gorelo.io")
+    return value
+
+
 def _validate_state(state: Any, source: str) -> dict[str, Any]:
     """Check a state read from disk; raises ValueError naming the first problem."""
 
@@ -288,6 +316,8 @@ def _validate_state(state: Any, source: str) -> dict[str, Any]:
             raise bad(f"{section} is missing or not a list")
     if not isinstance(state.get("next_seq"), int) or isinstance(state.get("next_seq"), bool):
         raise bad("next_seq is missing or not an integer")
+    if "api_host" in state and not _is_host_name(state["api_host"]):
+        raise bad("api_host is not a host name")
     seen: set[tuple[str, int | str]] = set()
     for record in state["records"]:
         if not isinstance(record, dict):
@@ -325,13 +355,16 @@ class Manifest:
     """What one live run created. See the module docstring for the write discipline.
 
     `Manifest(run_id, path)` creates the file (path defaults to .live-runs/<run id>.json) or, when it exists,
-    loads it and checks that it belongs to `run_id`. `Manifest.start()` makes a NEW run (fresh id, refuses to
-    reuse a file) and `Manifest.load(path)` opens an existing one (cleanup).
+    loads it and checks that it belongs to `run_id`. `api_host`, when given, is written into a NEW file, and an
+    existing file must have been made against that host. `Manifest.start()` makes a NEW run (fresh id, refuses to
+    reuse a file, names the API host of the run) and `Manifest.load(path)` opens an existing one (cleanup).
     """
 
-    def __init__(self, run_id: str, path: str | os.PathLike[str] | None = None) -> None:
+    def __init__(self, run_id: str, path: str | os.PathLike[str] | None = None, *, api_host: str | None = None) -> None:
         if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id):
             raise ValueError(f"run id {_short(run_id)!r} must look like MCPTEST-YYYYMMDDHHMMSS")
+        if api_host is not None:
+            api_host = _checked_host(api_host)
         self.run_id = run_id
         self.path = Path(path) if path is not None else RUNS_DIR / f"{run_id}.json"
         self._index: dict[tuple[str, int | str], dict[str, Any]] = {}
@@ -339,6 +372,9 @@ class Manifest:
             state = _validate_state(self._read(), str(self.path))
             if state["run_id"] != run_id:
                 raise ValueError(f"{self.path} belongs to run {state['run_id']}, not {run_id}")
+            stored = state.get("api_host", LEGACY_API_HOST)
+            if api_host is not None and api_host != stored:
+                raise ValueError(f"{self.path} was made against {stored}, not {api_host}")
             self._state = state
             for record in state["records"]:
                 self._index[(record["kind"], normalize_id(record["kind"], record["id"]))] = record
@@ -353,6 +389,8 @@ class Manifest:
                 "records": [],
                 "approved_leftovers": [],  # key name kept for compatibility with manifests already written
             }
+            if api_host is not None:
+                self._state["api_host"] = api_host  # in the first write: the file names the host before anything is created
             self._write()
 
     # -- construction ------------------------------------------------------
@@ -366,13 +404,17 @@ class Manifest:
         return RUN_PREFIX + moment.strftime("%Y%m%d%H%M%S")
 
     @classmethod
-    def start(cls, now: datetime | None = None, *, directory: str | os.PathLike[str] | None = None) -> Manifest:
-        """A NEW run: a fresh run id and an empty manifest file. Refuses to reuse an existing file."""
+    def start(
+        cls, now: datetime | None = None, *, directory: str | os.PathLike[str] | None = None, api_host: str
+    ) -> Manifest:
+        """A NEW run: a fresh run id and an empty manifest file that names `api_host` (the run's Settings.api_host) from its
+        first write on. Refuses to reuse an existing file."""
         run_id = cls.new_run_id(now)
+        host = _checked_host(api_host)  # refused before a file exists: a start always names its host
         path = (Path(directory) if directory is not None else RUNS_DIR) / f"{run_id}.json"
         if path.exists():
             raise FileExistsError(f"{path} already exists; wait a second or resume it with Manifest.load()")
-        return cls(run_id, path)
+        return cls(run_id, path, api_host=host)
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> Manifest:
@@ -497,6 +539,11 @@ class Manifest:
         self._save()
 
     # -- reading -----------------------------------------------------------
+
+    @property
+    def api_host(self) -> str:
+        """The API host the run called: the one start() wrote, or LEGACY_API_HOST for a file that has no api_host key."""
+        return self._state.get("api_host", LEGACY_API_HOST)
 
     def ids(self, kind: str) -> set[int | str]:
         """The canonical ids of every record of `kind` this run created (cleaned or not)."""

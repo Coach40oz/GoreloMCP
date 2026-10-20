@@ -12,12 +12,15 @@ from pathlib import Path
 import httpx
 import pytest
 from conftest import TEST_API_KEY, call_tool, call_tool_error, call_tool_raw, envelope, paged_envelope, path_params_for, uid
-from site_helper import site_config_env  # noqa: F401  (autouse: points GORELO_SITE_CONFIG at invented values)
+from site_helper import REAL_VERIFY, site_config_env  # noqa: F401  (autouse: points GORELO_SITE_CONFIG at invented values)
 
 from gorelo_client import normalize_op_key
+from scripts.live import _env, cleanup
 from scripts.live import guard as guard_module
 from scripts.live.guard import _CREATES, APPROVED_INVOICE_LIMIT, GuardViolation, LiveGuard
 from scripts.live.manifest import Manifest
+from scripts.site_config import SiteConfigError
+from settings import DEFAULT_BASE_URL
 from spec import SpecIndex, load_spec_index
 
 pytestmark = pytest.mark.anyio
@@ -699,7 +702,9 @@ def test_patch_clients_in_the_collection_form_is_gone_it_is_not_an_operation_of_
         (TEST_CLIENT, {}),
         (TEST_CLIENT, {"Name": "Renamed"}),
         (TEST_CLIENT, {"BillingName": "b"}),
+        (TEST_CLIENT, {"StatusId": 1}),
         (TEST_CLIENT, {"StatusId": 2}),
+        (TEST_CLIENT, {"StatusId": 4}),
         (SECOND, {"AlternateName": "x"}),
         (SECOND, {}),
     ],
@@ -1247,9 +1252,9 @@ def test_an_attachment_upload_to_a_run_ticket_task_or_project_is_allowed(guard, 
         ("Ticket", TASK, "is not a ticket created by this run"),  # the id is a run task, the type says ticket
         ("Task", PROJECT, "is not a project task created by this run"),
         ("Project", TICKET_NONE, "is not a project created by this run"),
-        ("Asset", TICKET_NONE, "itemType must be Ticket, Task or Project"),
-        ("Contact", TICKET_NONE, "itemType must be Ticket, Task or Project"),
-        ("", TICKET_NONE, "itemType must be Ticket, Task or Project"),
+        ("Asset", TICKET_NONE, "itemType must be Ticket, Task, Project or Document"),
+        ("Contact", TICKET_NONE, "itemType must be Ticket, Task, Project or Document"),
+        ("", TICKET_NONE, "itemType must be Ticket, Task, Project or Document"),
         ("Ticket", "not-a-uuid", "not a valid ticket id"),
         ("Ticket", "9501", "not a valid ticket id"),
         ("Ticket", TICKET_NONE.replace("-", ""), "not a valid ticket id"),
@@ -2276,7 +2281,7 @@ def test_the_pdf_export_stays_draft_only_with_the_option(option_guard, option_cl
         refused(subject, build("GET", f"/invoices/{FOREIGN}/pdf"), "only an invoice this run created may be exported")
 
 
-def test_the_option_opens_nothing_else(option_guard, option_cleanup_guard):
+def test_the_approved_invoice_option_opens_nothing_else(option_guard, option_cleanup_guard):
     # a Draft body still needs no recipient, a stranger's invoice is still not deleted, the other approvals stay shut
     for subject in (option_guard, option_cleanup_guard):
         refused(subject, build("DELETE", f"/invoices/{FOREIGN}"), "is not a test invoice created by this run")
@@ -2908,9 +2913,23 @@ def test_every_create_operation_is_known_to_require_intents():
     posts = {key for key in WRITE_OPS if key.startswith("POST ")}
     assert posts - set(_CREATES) == {
         "POST /v1/alerts", "POST /v1/api-keys", "POST /v1/forms/{formId}/submission-links", "POST /v1/payments",
+        # a related-items POST adds links to a document and a version restore changes which version is current: neither makes a record
+        # the harness has to find again, so neither needs an intent (the two creates of the documents are in _CREATES)
+        "POST /v1/documents/{documentId}/related-items", "POST /v1/documents/{documentId}/versions/{versionId}/restore",
     }
     assert set(_CREATES) <= posts
     assert _CREATES["POST /v1/invoices"] == "invoice"
+    assert _CREATES["POST /v1/documents"] == _CREATES["POST /v1/documents/{documentId}/duplicate"] == "document"
+
+
+def test_the_require_intents_paragraph_lists_every_post_the_guard_lets_through(manifest):
+    doc = " ".join(guard_module.__doc__.split())
+    rules = LiveGuard("write", manifest, allow_approved_invoice=True, allow_custom_assets=True, allow_documents=True).rule_table()
+    lets_through = [key for key, rule in rules.items() if key.startswith("POST ") and not rule.startswith("never")]
+    assert len(lets_through) > 20
+    for key in lets_through:
+        path = key.removeprefix("POST /v1")
+        assert re.search(rf"POST {re.escape(path)}(?= |$)", doc), key
 
 
 @pytest.mark.parametrize("key, kind", sorted(_CREATES.items()))
@@ -3021,7 +3040,7 @@ def test_the_rule_table_names_a_rule_for_every_operation_of_the_spec(guard):
 # entry protects nothing, and the tables that do match apply alone (the invoice DELETE would then pass on the run-created
 # check only, and an Approved invoice would be voided). So these tables are compared with the spec EXACTLY. Only what the
 # guard itself looks up by shape (_NEVER and SIDE_EFFECT_GETS) is compared by shape.
-EXACT_KEYED_TABLES = ("_PATH_KINDS", "_HANDLER_NAMES", "_HANDLER_TEXT", "_SPECIAL_DELETES", "_CREATES")
+EXACT_KEYED_TABLES = ("_PATH_KINDS", "_HANDLER_NAMES", "_HANDLER_TEXT", "_SPECIAL_DELETES", "_CREATES", "_OPTIONAL_BODY")
 
 
 def exact_keyed_tables() -> dict[str, dict]:
@@ -3162,7 +3181,7 @@ def test_the_constants_of_the_allowlist_are_the_approved_ones(manifest):
 
 
 @pytest.mark.parametrize("path", ["/v1/tickets"])
-def test_lead_assignee_zero_is_refused_now_that_the_unassign_probe_is_gone(guard, path):
+def test_lead_assignee_zero_is_refused_by_the_guard(guard, path):
     import httpx
     req = httpx.Request("POST", "https://api.usw.gorelo.io" + path, json={
         "Title": f"{guard.manifest.run_id} t", "ClientId": 9501, "StatusId": 1, "TypeId": 7101, "GroupId": 7201, "LeadAssigneeId": 0})
@@ -3290,8 +3309,9 @@ def test_a_custom_asset_is_changed_only_when_the_run_created_it_for_the_test_cli
     path = f"/assets/custom/{CUSTOM_ASSET}"
     assets_guard.check(build("PATCH", path, {"ClientId": TEST_CLIENT, "Name": f"{RUN}-asset renamed", "IpAddress": None}))
     assets_guard.check(build("PATCH", path, {"ClientId": TEST_CLIENT, "Description": None, "WarrantyEndDate": None}))
-    refused(assets_guard, build("PATCH", path, {"Description": "no client"}), "ClientId is required and must be 9501")
-    refused(assets_guard, build("PATCH", path, {"ClientId": None, "Description": "x"}), "ClientId is required")
+    # since contract a7954b24844b ClientId is optional: the tool sends it only to name the asset's client (or to move it)
+    assets_guard.check(build("PATCH", path, {"Description": "no client named"}))
+    assets_guard.check(build("PATCH", path, {"ClientId": None, "Description": "x"}))
     refused(assets_guard, build("PATCH", path, {"ClientId": 12345}), "ClientId must be 9501")
     refused(assets_guard, build("PATCH", path, {"ClientId": str(TEST_CLIENT)}), "ClientId must be a JSON integer")
     refused(assets_guard, build("PATCH", path, {"ClientId": TEST_CLIENT, "Name": "Customer laptop"}), "Name must start with the run id")
@@ -3301,9 +3321,9 @@ def test_a_custom_asset_is_changed_only_when_the_run_created_it_for_the_test_cli
     refused(assets_guard, build("PATCH", path, {"ClientId": TEST_CLIENT, "Surprise": 1}), "field the spec does not define")
 
 
-def test_the_negative_check_may_name_the_second_client_and_no_other(assets_guard):
+def test_the_second_client_in_a_patch_is_a_move_and_is_refused_without_the_move_option_with_the_reason(assets_guard):
     path = f"/assets/custom/{CUSTOM_ASSET}"
-    assets_guard.check(build("PATCH", path, {"ClientId": SECOND, "Name": f"{RUN}-asset wrong client"}))
+    refused(assets_guard, build("PATCH", path, {"ClientId": SECOND, "LocationId": 5002}), "would MOVE the custom asset to the second client; a move needs the option allow_custom_asset_move")
     refused(assets_guard, build("PATCH", path, {"ClientId": 777, "Name": f"{RUN}-asset"}), "ClientId must be 9501")
 
 
@@ -3314,7 +3334,9 @@ def test_custom_assets_are_never_deleted_and_the_option_opens_nothing_else(asset
     refused(assets_guard, build("PATCH", f"/assets/agents/{uid(5)}", {"ClientId": TEST_CLIENT}), "writes under /assets/ are never allowed")
     refused(assets_guard, build("POST", f"/assets/custom/{CUSTOM_ASSET}", {"ClientId": TEST_CLIENT}), "writes under /assets/ are never allowed")
     refused(assets_guard, build("POST", "/alerts", {"ClientId": TEST_CLIENT, "Name": "x", "Resource": "y"}), "never posts alerts")
-    assert assets_guard.rule_table()["DELETE /v1/assets/custom/{customAssetId}"].startswith("never: custom assets are never deleted")
+    assert assets_guard.rule_table()["DELETE /v1/assets/custom/{customAssetId}"].startswith(
+        "never: this harness never deletes a custom asset (the spec's soft DELETE is not used)"
+    )
 
 
 def test_the_custom_asset_rules_are_in_the_rule_table(guard):
@@ -3372,7 +3394,9 @@ def test_the_test_client_is_still_never_changed_without_the_option_not_even_by_a
     plain = LiveGuard("write", properties_manifest)
     assert plain.allow_custom_properties is False and cleanup_guard.allow_custom_properties is False  # opt-in, never a default
     for subject in (plain, guard, cleanup_guard):
-        for body in (property_body(), property_body(None), property_body(field=UNKNOWN), {"AlternateName": "x"}, {}):
+        for body in (
+            property_body(), property_body(None), property_body(field=UNKNOWN), {"AlternateName": "x"}, {}, {"StatusId": 1}, {"StatusId": 4},
+        ):
             refused(
                 subject,
                 build("PATCH", TEST_CLIENT_PATH, body),
@@ -3428,7 +3452,9 @@ def test_the_set_must_carry_exactly_the_text_the_manifest_records_for_that_field
         pytest.param({"CustomProperties": [{"Id": FIELD, "Value": RUN}], "BillingName": "x"}, "never changed, except that", id="and-a-billing-name"),
         pytest.param({"CustomProperties": [{"Id": FIELD, "Value": RUN}], "StatusId": 2}, "never changed, except that", id="and-a-status"),
         pytest.param({"AlternateName": "x"}, "never changed, except that", id="an-alternate-name-alone"),
+        pytest.param({"StatusId": 1}, "never changed, except that", id="a-status-1-alone"),
         pytest.param({"StatusId": 2}, "never changed, except that", id="a-status-alone"),
+        pytest.param({"StatusId": 4}, "never changed, except that", id="a-status-4-alone"),
         pytest.param({}, "never changed, except that", id="an-empty-body"),
         pytest.param({"CustomProperties": []}, "exactly one entry", id="no-entry"),
         pytest.param({"CustomProperties": [{"Id": FIELD, "Value": RUN}, {"Id": SET_BEFORE, "Value": None}]}, "exactly one entry", id="two-entries"),
@@ -3602,7 +3628,6 @@ def test_the_rule_table_and_the_docstring_describe_the_custom_property_rule(prop
         "`writes_allowed` counts the requests the guard let through that are not a GET",
     ):
         assert said in text, said
-    assert "never the test client or the second client" not in text  # the old rule: the test client is not totally frozen any more
     assert "Counters: allowed_count is every request let through, writes_allowed the ones among them that are not a GET" in " ".join(
         LiveGuard.__doc__.split()
     )
@@ -3633,3 +3658,612 @@ async def test_a_custom_property_write_through_the_real_hook_is_judged_before_it
         with pytest.raises(GuardViolation, match="never changed"):
             await client.patch(TEST_CLIENT_PATH, json={"AlternateName": "x"})
     assert len(mock_gorelo.requests) == 1 and mock_gorelo.requests[0].json == property_body()
+
+
+# --------------------------------------------------------------------------
+# the API host of a run: the region of GORELO_BASE_URL
+# --------------------------------------------------------------------------
+
+US_HOST, AU_HOST = "api.usw.gorelo.io", "api.aue.gorelo.io"
+AU_BASE = "https://api.aue.gorelo.io/v1"
+ENV_KEY = "k-test-0123456789"
+
+
+def host_env_file(tmp_path, text):
+    path = tmp_path / ".env"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_the_env_file_base_url_is_the_default_without_a_line_and_normalized_with_one(tmp_path):
+    assert _env.load_base_url(host_env_file(tmp_path, f"GORELO_API_KEY={ENV_KEY}\n")) == DEFAULT_BASE_URL
+    assert _env.load_base_url(host_env_file(tmp_path, "GORELO_BASE_URL=\n")) == DEFAULT_BASE_URL
+    two = "GORELO_BASE_URL=https://api.aue.gorelo.io\nGORELO_BASE_URL=https://api.usw.gorelo.io\n"
+    assert _env.load_base_url(host_env_file(tmp_path, two)) == DEFAULT_BASE_URL  # the last line wins, like python-dotenv
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "GORELO_BASE_URL=https://api.aue.gorelo.io",
+        "GORELO_BASE_URL=https://api.aue.gorelo.io/v1/",
+        'GORELO_BASE_URL="https://api.aue.gorelo.io"',
+        "export GORELO_BASE_URL='https://api.aue.gorelo.io/'",
+        "GORELO_BASE_URL = https://api.aue.gorelo.io # Australia",
+    ],
+)
+def test_the_base_url_line_is_read_like_the_key_line_and_normalized(tmp_path, line):
+    assert _env.load_base_url(host_env_file(tmp_path, f"# comment\n\n{line}\nOTHER=1\n")) == AU_BASE
+
+
+@pytest.mark.parametrize("value", ["http://api.aue.gorelo.io", "https://evil.example", "https://user:hunter2@api.aue.gorelo.io", "https://api.aue.gorelo.io/v2"])
+def test_a_refused_base_url_is_an_env_error_that_names_the_variable_and_the_file_but_no_key(tmp_path, value):
+    path = host_env_file(tmp_path, f"GORELO_API_KEY={ENV_KEY}\nGORELO_BASE_URL={value}\n")
+    for call in (_env.load_base_url, _env.live_settings):
+        with pytest.raises(_env.EnvError, match="GORELO_BASE_URL") as raised:
+            call(path)
+        text = str(raised.value)
+        assert str(path) in text and ENV_KEY not in text and "hunter2" not in text
+
+
+def test_an_unreadable_env_file_is_an_env_error_for_the_base_url_too(tmp_path):
+    with pytest.raises(_env.EnvError, match="cannot read the env file"):
+        _env.load_base_url(tmp_path / "missing.env")
+
+
+def test_live_settings_carry_the_region_of_the_env_file(tmp_path):
+    australian = _env.live_settings(host_env_file(tmp_path, f"GORELO_API_KEY={ENV_KEY}\nGORELO_BASE_URL=https://api.aue.gorelo.io\n"))
+    assert australian.base_url == AU_BASE and australian.api_key == ENV_KEY and australian.destructive is True
+    assert _env.live_settings(host_env_file(tmp_path, f"GORELO_API_KEY={ENV_KEY}\n")).base_url == DEFAULT_BASE_URL
+    assert ENV_KEY not in repr(australian)
+
+
+def test_api_hosts_is_the_single_host_of_a_base_url():
+    assert guard_module.api_hosts(AU_BASE) == frozenset({AU_HOST})
+    assert guard_module.api_hosts("https://API.AUE.gorelo.io") == frozenset({AU_HOST})  # normalized like the setting
+    assert guard_module.api_hosts(DEFAULT_BASE_URL) == guard_module.API_HOSTS == frozenset({US_HOST})
+
+
+@pytest.mark.parametrize("bad", ["http://api.aue.gorelo.io/v1", "https://evil.example/v1", "https://api.aue.gorelo.io:8443/v1", "", "   "])
+def test_api_hosts_refuses_what_the_setting_refuses_and_a_blank_url(bad):
+    with pytest.raises(ValueError, match="GORELO_BASE_URL|base_url"):
+        guard_module.api_hosts(bad)
+
+
+def test_a_guard_built_for_the_australian_region_allows_that_host_only(manifest):
+    for guard in (LiveGuard("read", None, base_url=AU_BASE), LiveGuard("write", manifest, base_url=AU_BASE)):
+        guard.check(httpx.Request("GET", f"https://{AU_HOST}/v1/clients"))
+        guard.check(httpx.Request("GET", f"https://{AU_HOST}:443/v1/clients"))
+        refused(guard, httpx.Request("GET", BASE + "/clients"), f"only https requests to {AU_HOST} are allowed")
+        refused(guard, httpx.Request("GET", f"https://{AU_HOST}.evil.example/v1/clients"), f"only https requests to {AU_HOST} are allowed")
+        refused(guard, httpx.Request("GET", f"http://{AU_HOST}/v1/clients"), "only https requests")
+        refused(guard, httpx.Request("GET", f"https://{AU_HOST}/v1/clients", headers={"Host": US_HOST}), "Host header")
+    write = LiveGuard("write", manifest, base_url=AU_BASE)
+    refused(write, build("PATCH", f"/tickets/{TICKET_NONE}", {"Title": "x"}), "only https requests")  # a US address is refused for writes too
+
+
+def test_the_default_guard_still_allows_the_us_host_only(read_guard):
+    read_guard.check(httpx.Request("GET", BASE + "/clients"))
+    refused(read_guard, httpx.Request("GET", f"https://{AU_HOST}/v1/clients"), f"only https requests to {US_HOST} are allowed")
+
+
+def test_allowed_hosts_and_base_url_cannot_be_given_together_and_a_foreign_base_url_is_refused():
+    with pytest.raises(ValueError, match="allowed_hosts or base_url, not both"):
+        LiveGuard("read", None, allowed_hosts={"gorelo.test"}, base_url=AU_BASE)
+    with pytest.raises(ValueError, match="GORELO_BASE_URL"):
+        LiveGuard("read", None, base_url="https://evil.example/v1")
+
+
+def host_names_transport(seen):
+    names = {9501: "Sandbox Alpha", 9502: "Sandbox Beta"}  # the invented site config of tests/site_helper.py
+
+    def handler(request):
+        seen.append(request)
+        client_id = int(request.url.path.rsplit("/", 1)[1])
+        return httpx.Response(200, json={"Data": {"Id": client_id, "Name": names[client_id]}})
+
+    return httpx.MockTransport(handler)
+
+
+async def test_the_client_names_are_read_from_the_configured_region():
+    seen = []
+    await REAL_VERIFY(TEST_API_KEY, transport=host_names_transport(seen), base_url=AU_BASE)
+    assert [(r.url.host, r.url.path) for r in seen] == [(AU_HOST, "/v1/clients/9501"), (AU_HOST, "/v1/clients/9502")]
+    assert all(r.headers["x-api-key"] == TEST_API_KEY for r in seen)
+
+
+async def test_the_client_names_are_read_from_the_us_host_when_no_base_url_is_given():
+    seen = []
+    await REAL_VERIFY(TEST_API_KEY, transport=host_names_transport(seen))
+    assert {r.url.host for r in seen} == {US_HOST}
+
+
+async def test_the_client_name_check_never_sends_the_key_to_a_host_outside_gorelo_io():
+    seen = []
+    with pytest.raises(ValueError, match="GORELO_BASE_URL"):
+        await REAL_VERIFY(TEST_API_KEY, transport=host_names_transport(seen), base_url="https://evil.example/v1")
+    assert seen == []
+
+
+async def test_cleanup_sends_every_request_of_both_clients_to_the_configured_region(tmp_path, mock_gorelo, make_settings):
+    manifest = Manifest(RUN, tmp_path / "au.json", api_host=AU_HOST)
+    manifest.created("ticket", TICKET_NONE, manifest.label("ticket"), {"contact_id": None})  # soft-deleted by the raw client
+    manifest.created("item", ITEM, manifest.label("item"))  # deleted by the delete_item tool of the in-process server
+    mock_gorelo.on("DELETE", "/v1/tickets/{ticketId}", envelope({"Id": "x"}))
+    mock_gorelo.on("DELETE", "/v1/items/{itemId}", envelope({"Id": ITEM}))
+    settings = make_settings(destructive=True, base_url=AU_BASE)
+    report = await cleanup.run_cleanup(
+        manifest, settings=settings, transport=mock_gorelo.transport, pace=0, echo=lambda line: None, verify_clients=False
+    )
+    assert report.ok
+    assert sorted((r.method, r.path) for r in mock_gorelo.requests) == [("DELETE", f"/v1/items/{ITEM}"), ("DELETE", f"/v1/tickets/{TICKET_NONE}")]
+    assert {r.headers["host"] for r in mock_gorelo.requests} == {AU_HOST}
+
+
+async def test_a_cleanup_whose_settings_name_another_host_refuses_and_sends_nothing(tmp_path, mock_gorelo, make_settings, monkeypatch):
+    checks = []
+
+    async def spy(api_key, *, transport=None, cfg=None, base_url=None):
+        checks.append(base_url)
+        return {}
+
+    monkeypatch.setattr(cleanup.live_guard, "verify_site_clients", spy)
+    manifest = Manifest(RUN, tmp_path / "us.json")  # no api_host key: the run reads as made against the US host
+    manifest.created("ticket", TICKET_NONE, manifest.label("ticket"), {"contact_id": None})
+    with pytest.raises(SiteConfigError) as refused:
+        await cleanup.run_cleanup(
+            manifest, settings=make_settings(destructive=True, base_url=AU_BASE), transport=mock_gorelo.transport, pace=0,
+            echo=lambda line: None,
+        )
+    assert str(refused.value) == (
+        f"this run was made against {US_HOST}; GORELO_BASE_URL now names {AU_HOST}: set it back to the run's host to clean up. "
+        "Nothing was sent."
+    )
+    assert mock_gorelo.requests == [] and checks == [] and not manifest.record("ticket", TICKET_NONE).cleaned
+
+
+def test_the_cleanup_command_prints_cannot_start_and_exits_2_for_another_host(tmp_path, make_settings, monkeypatch, capsys):
+    Manifest(RUN, tmp_path / "us.json")
+    monkeypatch.setattr(cleanup, "live_settings", lambda: make_settings(destructive=True, base_url=AU_BASE))
+    assert cleanup.main([str(tmp_path / "us.json")]) == 2
+    out = capsys.readouterr()
+    assert out.out == "" and out.err == (
+        f"cannot start: this run was made against {US_HOST}; GORELO_BASE_URL now names {AU_HOST}: "
+        "set it back to the run's host to clean up. Nothing was sent.\n"
+    )
+
+
+async def test_the_client_check_of_a_cleanup_reads_both_client_names_from_the_region_of_its_run(tmp_path, make_settings, monkeypatch):
+    checks, seen = [], []
+
+    async def spy(api_key, *, transport=None, cfg=None, base_url=None):
+        checks.append(base_url)  # the check is asked for the region of the settings, then reads both clients there
+        return await REAL_VERIFY(api_key, transport=transport, base_url=base_url)
+
+    monkeypatch.setattr(cleanup.live_guard, "verify_site_clients", spy)
+    manifest = Manifest(RUN, tmp_path / "au.json", api_host=AU_HOST)
+    report = await cleanup.run_cleanup(
+        manifest, settings=make_settings(destructive=True, base_url=AU_BASE), transport=host_names_transport(seen), pace=0,
+        echo=lambda line: None,
+    )
+    assert report.ok and checks == [AU_BASE]
+    assert [(r.url.host, r.url.path) for r in seen] == [(AU_HOST, "/v1/clients/9501"), (AU_HOST, "/v1/clients/9502")]
+
+
+# --------------------------------------------------------------------------
+# The move of a custom asset to the second client (contract a7954b24844b: a new ClientId moves the asset)
+# --------------------------------------------------------------------------
+
+SECOND_LOCATION = 5002
+
+
+@pytest.fixture
+def move_guard(assets_manifest) -> LiveGuard:
+    return LiveGuard("write", assets_manifest, allow_custom_assets=True, allow_custom_asset_move=True)
+
+
+def announce(manifest, client):
+    """What the area does BEFORE it sends a move: the manifest details of the asset name the client it is going to."""
+    manifest.update_details("custom_asset", CUSTOM_ASSET, client_id=client)
+
+
+MOVE_OUT = {"ClientId": SECOND, "LocationId": SECOND_LOCATION}
+
+
+def test_the_move_option_needs_write_mode_and_the_custom_asset_option(tmp_path):
+    with pytest.raises(ValueError, match="allow_custom_asset_move=True only makes sense in write mode"):
+        LiveGuard("read", None, allow_custom_asset_move=True)
+    with pytest.raises(ValueError, match="allow_custom_asset_move=True needs allow_custom_assets=True"):
+        LiveGuard("write", Manifest(RUN, tmp_path / "unused.json"), allow_custom_asset_move=True)
+
+
+def test_a_move_to_the_second_client_needs_the_option_a_location_an_announcement_and_no_contact(move_guard, assets_manifest):
+    path = f"/assets/custom/{CUSTOM_ASSET}"
+    refused(move_guard, build("PATCH", path, MOVE_OUT), "move of custom asset .* to client 9502 was not announced")
+    announce(assets_manifest, SECOND)
+    move_guard.check(build("PATCH", path, MOVE_OUT))
+    move_guard.check(build("PATCH", path, {**MOVE_OUT, "Name": f"{RUN}-asset v2", "ContactId": None}))
+    refused(move_guard, build("PATCH", path, {"ClientId": SECOND}), "needs a LocationId of that client")
+    refused(move_guard, build("PATCH", path, {"ClientId": SECOND, "LocationId": None}), "needs a LocationId of that client")
+    refused(move_guard, build("PATCH", path, {"ClientId": SECOND, "LocationId": str(SECOND_LOCATION)}), "LocationId must be a JSON integer")
+    refused(move_guard, build("PATCH", path, {**MOVE_OUT, "ContactId": OPERATOR_CONTACT}), "a move never assigns a contact")
+    refused(move_guard, build("PATCH", path, {**MOVE_OUT, "Name": "Customer laptop"}), "Name must start with the run id")
+    refused(move_guard, build("PATCH", path, {"ClientId": 777, "LocationId": 1}), "ClientId must be 9501")  # not even with the option
+    plain = LiveGuard("write", assets_manifest, allow_custom_assets=True)  # the option is what opens it, the announcement is not enough
+    refused(plain, build("PATCH", path, MOVE_OUT), "would MOVE the custom asset to the second client")
+
+
+def test_the_announcement_must_name_the_client_the_patch_names_and_the_way_back_needs_none(move_guard, assets_manifest):
+    path = f"/assets/custom/{CUSTOM_ASSET}"
+    announce(assets_manifest, TEST_CLIENT)
+    refused(move_guard, build("PATCH", path, MOVE_OUT), "was not announced")  # the details still say the test client
+    assets_manifest.update_details("custom_asset", CUSTOM_ASSET, client_id="unknown: test or second client")
+    refused(move_guard, build("PATCH", path, MOVE_OUT), "was not announced")  # and so does a text that is no client
+    announce(assets_manifest, SECOND)
+    move_guard.check(build("PATCH", path, {"ClientId": TEST_CLIENT, "LocationId": 5001}))  # the way back to the test client
+
+
+def test_a_cleanup_guard_never_moves_a_custom_asset_even_with_both_options(assets_manifest):
+    announce(assets_manifest, SECOND)
+    cleaner = LiveGuard("write", assets_manifest, cleanup=True, allow_custom_assets=True, allow_custom_asset_move=True)
+    refused(cleaner, build("PATCH", f"/assets/custom/{CUSTOM_ASSET}", MOVE_OUT), "cannot be changed")
+
+
+def test_the_move_option_opens_nothing_else(move_guard, assets_manifest):
+    announce(assets_manifest, SECOND)
+    for request, match in (
+        (build("PATCH", f"/assets/custom/{FOREIGN}", MOVE_OUT), "is not a custom asset created by this run"),
+        (build("DELETE", f"/assets/custom/{CUSTOM_ASSET}"), "writes under /assets/ are never allowed"),
+        (build("PATCH", f"/assets/agents/{uid(5)}", MOVE_OUT), "writes under /assets/ are never allowed"),
+        (build("PATCH", "/clients/9502", {"AlternateName": "x"}), "never changed"),
+        (build("POST", "/documents", {"Title": f"{RUN} d", "ClientId": TEST_CLIENT}), "unless the run enabled the documents area"),
+    ):
+        refused(move_guard, request, match)
+
+
+def test_the_rule_table_describes_the_move_rule(guard):
+    text = guard.rule_table()["PATCH /v1/assets/custom/{customAssetId}"]
+    assert text.startswith("path ids run-created: customAssetId; only with allow_custom_assets (never from a cleanup); ClientId, if present")
+    assert "the second client (a MOVE of the asset) only with allow_custom_asset_move" in text and "LocationId" in text and "announced" in text
+    source = " ".join(guard_module.__doc__.split())
+    assert "`allow_custom_asset_move=True` (off by default; only write_matrix --with-asset-move sets it, and it needs allow_custom_assets)" in source
+
+
+# --------------------------------------------------------------------------
+# Documents (contract a7954b24844b): one rule per operation, for documents this run created, for the test client alone
+# --------------------------------------------------------------------------
+
+DOC = uid(101)  # a top-level document this run created (the test client)
+DOC_COPY = uid(102)  # a second run-created document: the parent of the move, the copy
+DOC_FILE = f"{RUN}-document.txt"  # a file this run uploaded to DOC
+OTHER_FILE = f"{RUN}-ticket.txt"  # a file this run uploaded to a ticket
+DOC_URL = "https://files.example.invalid/f.txt?token=t1"
+VERSION = uid(111)
+DOC_TITLE = f"{RUN} document"
+DOC_BODY = {"Title": DOC_TITLE, "ClientId": TEST_CLIENT, "Body": f"<p>{RUN}</p>"}
+
+
+@pytest.fixture
+def docs_manifest(manifest) -> Manifest:
+    manifest.created("document", DOC, DOC_TITLE, {"client_id": TEST_CLIENT, "parent_document_id": None})
+    manifest.created("document", DOC_COPY, manifest.label("document copy"), {"client_id": TEST_CLIENT, "parent_document_id": None})
+    manifest.created("attachment", DOC_FILE, manifest.label("document attachment"), {"document_id": DOC})
+    manifest.created("attachment", OTHER_FILE, manifest.label("ticket attachment"), {"ticket_id": TICKET_NONE})
+    return manifest
+
+
+@pytest.fixture
+def docs_guard(docs_manifest) -> LiveGuard:
+    return LiveGuard("write", docs_manifest, allow_documents=True)
+
+
+def doc_path(suffix=""):
+    return f"/documents/{DOC}{suffix}"
+
+
+def test_the_documents_option_needs_write_mode_and_is_off_by_default(manifest):
+    with pytest.raises(ValueError, match="allow_documents=True only makes sense in write mode"):
+        LiveGuard("read", None, allow_documents=True)
+    assert LiveGuard("write", manifest).allow_documents is False
+
+
+DOCUMENT_WRITES = [
+    ("POST", "/documents", DOC_BODY),
+    ("PATCH", doc_path(), {"Title": DOC_TITLE}),
+    ("POST", doc_path("/duplicate"), {"Title": f"{RUN} copy"}),
+    ("POST", doc_path("/related-items"), {"RelatedItems": [{"ItemId": DOC_COPY, "ItemTypeId": 1}]}),
+    ("DELETE", doc_path("/related-items/7"), None),
+    ("POST", doc_path(f"/versions/{VERSION}/restore"), None),
+]
+
+
+@pytest.mark.parametrize("method, path, body", DOCUMENT_WRITES)
+def test_no_document_write_is_allowed_unless_the_run_enabled_the_area_and_a_cleanup_never_has_it(
+    docs_manifest, method, path, body
+):
+    for subject in (
+        LiveGuard("write", docs_manifest),  # no option
+        LiveGuard("write", docs_manifest, cleanup=True),
+        LiveGuard("write", docs_manifest, cleanup=True, allow_documents=True),
+    ):
+        with pytest.raises(GuardViolation, match="unless the run enabled the documents area|only archives a document"):
+            subject.check(build(method, path, body))
+    LiveGuard("write", docs_manifest, allow_documents=True).check(build(method, path, body))
+
+
+def test_the_reads_of_the_documents_the_deletions_and_one_custom_asset_are_plain_reads_in_both_modes(guard, read_guard):
+    for path in (
+        "/documents", doc_path(), doc_path("/pdf"), doc_path("/versions"), doc_path(f"/versions/{VERSION}"), doc_path("/related-items"),
+        "/deletions?TypeIds=1,2&PageSize=20", f"/assets/custom/{CUSTOM_ASSET}",
+    ):
+        for subject in (guard, read_guard):
+            subject.check(build("GET", path))
+    table = guard.rule_table()
+    for key in (
+        "GET /v1/documents", "GET /v1/documents/{documentId}", "GET /v1/documents/{documentId}/pdf",
+        "GET /v1/documents/{documentId}/versions", "GET /v1/documents/{documentId}/versions/{versionId}",
+        "GET /v1/documents/{documentId}/related-items", "GET /v1/deletions", "GET /v1/assets/custom/{customAssetId}",
+    ):
+        assert table[key] == "allowed", key
+
+
+def test_the_document_pdf_is_a_read_not_an_export_event(read_guard):
+    assert not guard_module._is_side_effect_get("GET /v1/documents/{documentId}/pdf")
+    read_guard.check(build("GET", doc_path("/pdf")))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{}, {"Body": DROP}, {"Body": None}, {"Title": f"{RUN}"}, {"ClientId": TEST_CLIENT, "Surprise": DROP}],
+)
+def test_a_top_level_document_is_created_for_the_test_client_with_the_run_title(docs_guard, overrides):
+    docs_guard.check(build("POST", "/documents", make(DOC_BODY, **overrides)))
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        ({"Title": "Customer notes"}, "Title must be text that starts with the run id"),
+        ({"Title": "MCPTEST-20000101000000 old"}, "Title must be text that starts with the run id"),
+        ({"Title": DROP}, "Title must be text that starts with the run id"),
+        ({"Title": 5}, "Title must be text that starts with the run id"),
+        ({"ClientId": SECOND}, "ClientId must be 9501"),
+        ({"ClientId": str(TEST_CLIENT)}, "ClientId must be a JSON integer"),
+        ({"ClientId": 777}, "ClientId must be 9501"),
+        ({"ClientId": DROP}, "an INTERNAL document .* is refused"),
+        ({"ClientId": None}, "an INTERNAL document .* is refused"),
+        ({"ClientId": DROP, "ParentDocumentId": FOREIGN}, "is not a document created by this run"),
+        ({"ClientId": DROP, "ParentDocumentId": "not-a-uuid"}, "is not a valid document id"),
+        ({"ClientId": DROP, "ParentDocumentId": 5}, "ParentDocumentId must be a UUID string"),
+        ({"ParentDocumentId": DOC}, "ClientId must be absent under a parent"),
+        ({"Body": '<img src="data:image/png;base64,AAAA">'}, "embeds an image as a data: URL"),
+        ({"Body": "<p>style=\"background:url( DATA : IMAGE /png;base64,AAAA)\"</p>"}, "embeds an image as a data: URL"),
+        ({"Body": 5}, "Body must be text"),
+        ({"Body": f"<p>{RUN} mail bob@customer.example</p>"}, "email address that is not allowed"),
+        ({"Surprise": 1}, "field the spec does not define"),
+    ],
+)
+def test_a_document_that_breaks_a_create_rule_is_refused(docs_guard, overrides, match):
+    refused(docs_guard, build("POST", "/documents", make(DOC_BODY, **overrides)), match)
+
+
+def test_a_nested_document_takes_the_parent_client_and_names_no_client(docs_guard):
+    docs_guard.check(build("POST", "/documents", {"Title": f"{RUN} child", "ParentDocumentId": DOC_COPY}))
+    docs_guard.check(build("POST", "/documents", {"Title": f"{RUN} child", "ParentDocumentId": DOC_COPY.upper(), "ClientId": None}))
+
+
+def test_a_document_create_needs_an_open_document_intent_when_intents_are_required(docs_manifest):
+    strict = LiveGuard("write", docs_manifest, require_intents=True, allow_documents=True)
+    refused(strict, build("POST", "/documents", DOC_BODY), "no open intent of kind 'document'")
+    refused(strict, build("POST", doc_path("/duplicate"), {"Title": f"{RUN} c"}), "no open intent of kind 'document'")
+    docs_manifest.intent("document", DOC_TITLE, {"client_id": TEST_CLIENT})
+    strict.check(build("POST", "/documents", DOC_BODY))
+    strict.check(build("POST", doc_path("/duplicate"), {"Title": f"{RUN} c"}))
+    strict.check(build("POST", doc_path("/related-items"), {"RelatedItems": [{"ItemId": DOC_COPY, "ItemTypeId": 1}]}))  # not a create: no intent
+
+
+PATCH_ALLOWED = [
+    {"Title": DOC_TITLE},
+    {"Title": f"{DOC_TITLE} (updated)", "Body": f"<p>{RUN}</p>", "AlternateName": f"{RUN} portal", "IsStarred": True},
+    {"AlternateName": ""},
+    {"IsStarred": False},
+    {"StatusId": 1},
+    {"StatusId": 2},
+    {"PublicLinkEnabled": False},
+    {"PublicLinkEnabled": False, "PublishToPortalEnabled": False},
+    {"Attachments": []},
+    {"Attachments": [{"Name": DOC_FILE, "Url": DOC_URL}]},
+    {"Move": {"ParentDocumentId": DOC_COPY}},
+    {"Move": {"ParentDocumentId": DOC_COPY.upper(), "ClientId": None}},
+    {"Move": {"ParentDocumentId": None, "ClientId": TEST_CLIENT}},
+]
+
+
+@pytest.mark.parametrize("body", PATCH_ALLOWED)
+def test_the_document_patches_the_tools_send_are_allowed(docs_guard, body):
+    docs_guard.check(build("PATCH", doc_path(), body))
+
+
+PATCH_REFUSED = [
+    ({}, "the body names nothing to change"),
+    ({"Title": "Customer notes"}, "Title must be text that starts with the run id"),
+    ({"Title": None}, "Title must be text that starts with the run id"),
+    ({"Body": '<img src="data:image/gif;base64,AAAA">'}, "embeds an image as a data: URL"),
+    ({"AlternateName": "Customer portal name"}, "AlternateName must be text that starts with the run id"),
+    ({"IsStarred": "true"}, "IsStarred must be true or false"),
+    ({"IsStarred": 1}, "IsStarred must be true or false"),
+    ({"StatusId": 3}, "StatusId must be exactly the JSON integer 1"),
+    ({"StatusId": "2"}, "StatusId must be exactly the JSON integer 1"),
+    ({"StatusId": 2.0}, "StatusId must be exactly the JSON integer 1"),
+    ({"StatusId": True}, "StatusId must be exactly the JSON integer 1"),
+    ({"StatusId": None}, "StatusId must be exactly the JSON integer 1"),
+    # sharing ON is never allowed live
+    ({"PublicLinkEnabled": True}, "PublicLinkEnabled may only be false"),
+    ({"PublishToPortalEnabled": True}, "PublishToPortalEnabled may only be false"),
+    ({"PublicLinkEnabled": False, "PublishToPortalEnabled": True}, "PublishToPortalEnabled may only be false"),
+    ({"PublicLinkEnabled": "true"}, "PublicLinkEnabled may only be false"),
+    ({"PublicLinkEnabled": 1}, "PublicLinkEnabled may only be false"),
+    ({"PublicLinkEnabled": None}, "PublicLinkEnabled may only be false"),
+    ({"Title": DOC_TITLE, "PublicLinkEnabled": True}, "PublicLinkEnabled may only be false"),
+    # attachments: only files this run uploaded to THIS document
+    ({"Attachments": "x"}, "Attachments must be a list"),
+    ({"Attachments": [{"Name": DOC_FILE}]}, "must be an object with Name and Url and nothing else"),
+    ({"Attachments": [{"Name": DOC_FILE, "Url": DOC_URL, "Extra": 1}]}, "must be an object with Name and Url and nothing else"),
+    ({"Attachments": ["x"]}, "must be an object with Name and Url and nothing else"),
+    ({"Attachments": [{"Name": "", "Url": DOC_URL}]}, "needs a Name and a Url, both text"),
+    ({"Attachments": [{"Name": DOC_FILE, "Url": 5}]}, "needs a Name and a Url, both text"),
+    ({"Attachments": [{"Name": "someone-elses.pdf", "Url": DOC_URL}]}, "is not a file this run .* uploaded"),
+    ({"Attachments": [{"Name": OTHER_FILE, "Url": DOC_URL}]}, "was uploaded for another record than this document"),
+    ({"Attachments": [{"Name": DOC_FILE, "Url": DOC_URL}, {"Name": "x.pdf", "Url": DOC_URL}]}, "Attachments\\[1\\].Name is not a file"),
+    # move: under a run-created document, or the top level of the TEST client; never internal, never another client
+    ({"Move": "x"}, "Move must be an object"),
+    ({"Move": {}}, "Move must be an object"),
+    ({"Move": {"Surprise": 1}}, "Move must be an object"),
+    ({"Move": {"ParentDocumentId": FOREIGN}}, "is not a document created by this run"),
+    ({"Move": {"ParentDocumentId": DOC}}, "a document cannot be moved under itself"),
+    ({"Move": {"ParentDocumentId": DOC_COPY, "ClientId": TEST_CLIENT}}, "Move.ClientId must be absent under a parent"),
+    ({"Move": {"ParentDocumentId": None}}, "an INTERNAL move"),
+    ({"Move": {"ParentDocumentId": None, "ClientId": None}}, "an INTERNAL move"),
+    ({"Move": {"ClientId": TEST_CLIENT}}, "Move to the top level needs ParentDocumentId: null"),
+    ({"Move": {"ParentDocumentId": None, "ClientId": SECOND}}, "ClientId must be 9501"),
+    ({"Move": {"ParentDocumentId": None, "ClientId": 777}}, "ClientId must be 9501"),
+    ({"Move": {"ParentDocumentId": None, "ClientId": str(TEST_CLIENT)}}, "must be a JSON integer"),
+    ({"Surprise": 1}, "field the spec does not define"),
+]
+
+
+@pytest.mark.parametrize("body, match", PATCH_REFUSED)
+def test_a_document_patch_that_breaks_a_rule_is_refused(docs_guard, body, match):
+    refused(docs_guard, build("PATCH", doc_path(), body), match)
+
+
+def test_a_document_the_run_did_not_create_is_never_written(docs_guard):
+    for method, suffix, body in (
+        ("PATCH", "", {"Title": DOC_TITLE}),
+        ("POST", "/duplicate", {"Title": f"{RUN} c"}),
+        ("POST", "/related-items", {"RelatedItems": [{"ItemId": DOC_COPY, "ItemTypeId": 1}]}),
+        ("DELETE", "/related-items/7", None),
+        ("POST", f"/versions/{VERSION}/restore", None),
+    ):
+        refused(docs_guard, build(method, f"/documents/{FOREIGN}{suffix}", body), "is not a document created by this run")
+    refused(docs_guard, build("PATCH", "/documents/not-a-uuid", {"Title": DOC_TITLE}), "not a valid document id")
+
+
+def test_a_document_cannot_be_deleted_by_the_harness_there_is_no_such_operation(docs_guard):
+    assert "DELETE /v1/documents/{documentId}" not in load_spec_index().ops
+    refused(docs_guard, build("DELETE", doc_path()), "not a known Gorelo operation")
+
+
+def test_a_cleanup_guard_archives_a_run_document_and_does_nothing_else_to_one(docs_manifest):
+    cleaner = LiveGuard("write", docs_manifest, cleanup=True)
+    cleaner.check(build("PATCH", doc_path(), {"StatusId": 2}))
+    cleaner.check(build("PATCH", f"/documents/{DOC_COPY}", {"StatusId": 2}))
+    for body in (
+        {"StatusId": 1}, {"StatusId": 2, "Title": DOC_TITLE}, {"StatusId": "2"}, {"StatusId": 2.0}, {"StatusId": True}, {"StatusId": None},
+        {"Title": DOC_TITLE}, {"PublicLinkEnabled": False}, {"PublicLinkEnabled": True}, {"Move": {"ParentDocumentId": DOC_COPY}}, {},
+    ):
+        refused(cleaner, build("PATCH", doc_path(), body), "a cleanup only archives a document")
+    refused(cleaner, build("PATCH", f"/documents/{FOREIGN}", {"StatusId": 2}), "is not a document created by this run")
+
+
+def test_a_duplicate_names_a_run_title_or_no_body_at_all(docs_guard):
+    docs_guard.check(build("POST", doc_path("/duplicate"), {"Title": f"{RUN} copy"}))
+    docs_guard.check(build("POST", doc_path("/duplicate"), {}))
+    docs_guard.check(httpx.Request("POST", BASE + doc_path("/duplicate")))  # the spec lets the body be left out entirely
+    docs_guard.check(build("POST", doc_path("/duplicate"), {"Title": None}))
+    refused(docs_guard, build("POST", doc_path("/duplicate"), {"Title": "Customer copy"}), "Title must be text that starts with the run id")
+    refused(docs_guard, raw("POST", doc_path("/duplicate"), "{not json"), "not valid JSON")
+    refused(docs_guard, httpx.Request("POST", BASE + doc_path("/related-items")), "the request has no JSON body")  # no optional body there
+
+
+@pytest.mark.parametrize(
+    "items, match",
+    [
+        ("x", "RelatedItems must be a list of 1 to 100 entries"),
+        ([], "RelatedItems must be a list of 1 to 100 entries"),
+        ([{"ItemId": DOC_COPY, "ItemTypeId": 1}] * 101, "at most 100 per call"),
+        (["x"], "must be an object with ItemId and ItemTypeId and nothing else"),
+        ([{"ItemId": DOC_COPY}], "must be an object with ItemId and ItemTypeId and nothing else"),
+        ([{"ItemId": DOC_COPY, "ItemTypeId": 1, "Extra": 1}], "must be an object with ItemId and ItemTypeId and nothing else"),
+        ([{"ItemId": uid(5), "ItemTypeId": 2}], "ItemTypeId must be exactly 1 .* never links a client's asset, device, contact or password"),
+        ([{"ItemId": "9600", "ItemTypeId": 3}], "ItemTypeId must be exactly 1"),
+        ([{"ItemId": uid(5), "ItemTypeId": 4}], "ItemTypeId must be exactly 1"),
+        ([{"ItemId": "x", "ItemTypeId": 6}], "ItemTypeId must be exactly 1"),
+        ([{"ItemId": DOC_COPY, "ItemTypeId": "1"}], "ItemTypeId must be exactly 1"),
+        ([{"ItemId": DOC_COPY, "ItemTypeId": True}], "ItemTypeId must be exactly 1"),
+        ([{"ItemId": FOREIGN, "ItemTypeId": 1}], "is not a document created by this run"),
+        ([{"ItemId": 5, "ItemTypeId": 1}], "ItemId must be a UUID string"),
+        ([{"ItemId": DOC_COPY, "ItemTypeId": 1}, {"ItemId": FOREIGN, "ItemTypeId": 1}], "RelatedItems\\[1\\].ItemId"),
+    ],
+)
+def test_related_items_link_only_run_created_documents(docs_guard, items, match):
+    refused(docs_guard, build("POST", doc_path("/related-items"), {"RelatedItems": items}), match)
+
+
+def test_a_related_item_link_and_a_version_restore_have_to_name_whole_numbers_and_uuids(docs_guard):
+    docs_guard.check(build("DELETE", doc_path("/related-items/123456789012345678")))
+    for link in ("0", "abc", "12a", "1234567890123456789"):
+        refused(docs_guard, build("DELETE", doc_path(f"/related-items/{link}")), "relatedItemId must be a whole number")
+    docs_guard.check(build("POST", doc_path(f"/versions/{VERSION}/restore")))
+    refused(docs_guard, build("POST", doc_path("/versions/latest/restore")), "versionId must be a UUID")
+    refused(docs_guard, build("POST", doc_path(f"/versions/{VERSION}/restore"), {"x": 1}), "takes no body")
+
+
+def test_a_document_upload_needs_the_option_and_a_run_created_document(docs_guard, guard, cleanup_guard):
+    docs_guard.check(upload("Document", DOC))
+    docs_guard.check(upload("document", DOC_COPY.upper()))
+    refused(docs_guard, upload("Document", FOREIGN), "is not a document created by this run")
+    refused(docs_guard, upload("Document", TICKET_NONE), "is not a document created by this run")
+    refused(docs_guard, upload("Ticket", DOC), "is not a ticket created by this run")
+    refused(docs_guard, upload("Document", "not-a-uuid"), "not a valid document id")
+    for subject in (guard, cleanup_guard):
+        refused(subject, upload("Document", DOC), "a document cannot be given a file unless the run enabled the documents area")
+
+
+def test_a_document_body_is_scanned_for_addresses_like_every_other_body(docs_guard):
+    refused(docs_guard, build("PATCH", doc_path(), {"Body": "<p>bob@customer.example</p>"}), "email address that is not allowed")
+    docs_guard.check(build("PATCH", doc_path(), {"Body": f"<p>{RUN} ops@example.com and a@example.invalid</p>"}))
+
+
+def test_the_rule_table_has_a_rule_for_every_document_operation_and_no_delete_of_a_document(guard):
+    table = guard.rule_table()
+    assert table["POST /v1/documents"].startswith("only with allow_documents (never from a cleanup); Title starts with the run id")
+    assert table["PATCH /v1/documents/{documentId}"].startswith("path ids run-created: documentId; only with allow_documents, but a cleanup may archive")
+    assert "PublicLinkEnabled and PublishToPortalEnabled only false, never true" in table["PATCH /v1/documents/{documentId}"]
+    for key in (
+        "POST /v1/documents/{documentId}/duplicate", "POST /v1/documents/{documentId}/related-items",
+        "DELETE /v1/documents/{documentId}/related-items/{relatedItemId}",
+        "POST /v1/documents/{documentId}/versions/{versionId}/restore",
+    ):
+        assert table[key].startswith("path ids run-created: documentId; only with allow_documents (never from a cleanup)"), key
+    assert table["POST /v1/attachments"].startswith("itemType Ticket, Task or Project, or Document only with allow_documents")
+    assert not any(key.startswith("DELETE /v1/documents/{documentId}") and key.endswith("}") and "related-items" not in key for key in table)
+
+
+def test_the_guard_docstring_describes_the_document_rules():
+    text = " ".join(guard_module.__doc__.split())
+    for said in (
+        "The documents (allow_documents=True, set only by write_matrix --with-documents, never by a cleanup)",
+        "a document cannot be deleted through the API, so every document a run makes stays in Gorelo (the run archives it, StatusId 2)",
+        "TRUE IS NEVER ALLOWED",
+        "an INTERNAL document (neither) is refused",
+        "A CLEANUP guard (cleanup=True) refuses all of these but one: PATCH /documents/{documentId} of a run-created document with the body",
+        '{"StatusId": 2} and nothing else',
+    ):
+        assert said in text, said
+    assert "share_document is not a tool of the matrix" in text
+
+
+# --------------------------------------------------------------------------
+# the status of the clients: verify_site_clients returns it, the write run refuses an archived test client
+# --------------------------------------------------------------------------
+
+
+def test_the_facts_of_a_client_are_active_only_for_status_1_matched_by_the_id():
+    facts = guard_module.ClientFacts
+    assert facts(1, "Active").active and not facts(3, "Credit hold").active and not facts(4, "Archived").active
+    assert not facts(None, None).active and not facts(1, "Active").shown().startswith("of a status")
+    assert facts(4, "Archived").shown() == "Archived (status 4)"
+    assert facts(None, None).shown() == "of a status that could not be read"
+    assert facts(4, "Arch<script>").shown() == "in status 4"  # a name that is not plain text is not repeated
+    assert facts(4, None).shown() == "in status 4"

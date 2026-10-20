@@ -471,7 +471,7 @@ async def test_the_parameters_are_the_documented_ones_none_is_required_and_every
     properties = tool.inputSchema["properties"]
     assert properties["sort_order"]["default"] == "desc" and properties["sort_order"]["enum"] == ["desc", "asc"]
     assert properties["page_size"]["default"] == 50
-    assert properties["status"]["items"]["enum"] == ["new", "ignored", "ticketed"]
+    assert properties["status"]["items"]["enum"] == ["new", "dismissed", "ticketed"]
     assert properties["client_ids"]["type"] == properties["type_ids"]["type"] == "array"
 
 
@@ -481,7 +481,7 @@ async def test_the_parameter_texts_carry_the_id_sources_and_what_was_seen_of_the
     assert "list_clients" in text["client_ids"]
     # the model must be told the two facts it needs. Uptime and External alerts have no ClientId (the spec's
     # AlertListItemModel says so), so a client filter may leave them out: a model that filters by client and finds no
-    # External alert must know to look without the filter. And live 2026-10-04: a Script alert whose ClientId is null
+    # External alert must know to look without the filter. And a Script alert whose ClientId is null
     # matched ClientIds through its device's client. "may", not "never": nothing was observed of Uptime and External alerts
     assert text["client_ids"] == (
         "From list_clients. Uptime and External alerts have no ClientId, so this filter may leave them out; "
@@ -490,10 +490,6 @@ async def test_the_parameter_texts_carry_the_id_sources_and_what_was_seen_of_the
     assert "Uptime and External alerts have no ClientId" in text["client_ids"] and "may leave them out" in text["client_ids"]
     assert "a Script alert without one matched through its device" in text["client_ids"]
     assert len(text["client_ids"]) <= 160  # the concision limit of a parameter text (153 characters today)
-    # ... and it does not repeat what the spec says and production contradicted ("never matches"): see
-    # test_the_type_and_status_tables_are_the_ones_in_the_spec_text for the spec text, kept there as a fact about the spec
-    for old in ("never match", "Uptime, External and Script alerts"):
-        assert old not in text["client_ids"]
     assert "never" not in text["client_ids"].lower() and "always" not in text["client_ids"].lower()  # a hedge, no promise
     # the old text said "Not verified for Uptime and External alerts" and never told the model that they have no ClientId
     assert "Not verified" not in text["client_ids"] and "can still match through its device's client" not in text["client_ids"]
@@ -501,6 +497,10 @@ async def test_the_parameter_texts_carry_the_id_sources_and_what_was_seen_of_the
     assert "At or after" in text["created_since"] and "Strictly before" in text["created_before"]
     assert "UTC offset" in text["created_since"] and "UTC offset" in text["created_before"]
     assert "named in the tool text" in text["type_ids"]
+    assert text["status"] == "new=1, dismissed=2, ticketed=3. Omit for no status filter."
+    assert text["type_ids"] == (
+        "Alert type ids, named in the tool text. 0 (N/A) matches an alert this scale cannot name; outside 0-20 is refused."
+    )
     assert text["cursor"] == "next_cursor from the previous call; same filters and sort; repeat until has_more is false."
     assert text["sort_order"] == "desc: newest first. asc: oldest first."
 
@@ -508,23 +508,22 @@ async def test_the_parameter_texts_carry_the_id_sources_and_what_was_seen_of_the
 def test_the_docstring_gives_the_type_names_and_what_the_model_must_know():
     doc = " ".join(inspect.getdoc(alerts_module.list_alerts).split())
     assert TYPE_HELP in doc and alerts_module.TYPE_HELP == TYPE_HELP
-    assert "(7-17 are device checks; 0 matches a type with no name)" in doc
+    assert "(7-17 are device checks; 0 (N/A) matches an alert this scale cannot name; an id outside 0-20 is refused)" in doc
+    assert "status: new=1, dismissed=2, ticketed=3." in doc
     assert "including those sent with post_alert" in doc
     assert "Alerts cannot be deleted." in doc
     assert "DismissedOn and DismissedBy are set only while an alert is dismissed" in doc
     assert "newest first unless sort_order is asc" in doc
-    assert "never match" not in doc  # the spec says so of the client filter; production does not (see the client_ids text)
     assert 40 < len(inspect.getdoc(alerts_module.list_alerts)) <= 700
 
 
-def test_the_module_text_gives_the_spec_claim_as_the_specs_own_and_the_live_observation_as_what_was_seen():
+def test_the_module_text_keeps_the_spec_claim_apart_from_what_was_seen():
     module = flat(alerts_module.__doc__)
     assert (
         "The spec says an alert type that carries no client id (Uptime, External and Script alerts) never matches the "
         "ClientIds filter. Production disagrees (live, 2026-10-04): a Script alert whose ClientId was null matched "
         "through its device's client. Nothing was observed for Uptime or External alerts"
     ) in module
-    assert "the filter never matches an alert whose type carries no client id" not in module  # the old, unqualified claim
     assert "a check for an alert that post_alert raised must not filter by client" in module
     # the parameter text gives the model both facts (the hedge for Uptime and External, the Script alert seen live)
     assert (
@@ -535,13 +534,12 @@ def test_the_module_text_gives_the_spec_claim_as_the_specs_own_and_the_live_obse
     assert "promises nothing either way" not in module  # the old sentence, from before the text told the model the facts
     not_confirmed = flat(alerts_module._not_confirmed.__doc__)
     assert "the spec says the client_ids filter never matches such an alert" in not_confirmed
-    assert "the client_ids filter never matches an alert whose type carries no client id, and an external alert" not in not_confirmed
 
 
 @pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
 def test_the_type_and_status_tables_are_the_ones_in_the_spec_text():
     """spec/spec_index.json keeps no description text, so the scales the tool offers are pinned to the parameter text
-    of the full OpenAPI snapshot of contract e15cb5a18ec2."""
+    of the full OpenAPI snapshot of contract a7954b24844b."""
     parameters = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["paths"]["/v1/alerts"]["get"]["parameters"]
 
     def text(name):
@@ -550,12 +548,14 @@ def test_the_type_and_status_tables_are_the_ones_in_the_spec_text():
     types = {int(number): name.strip() for name, number in re.findall(r"([A-Za-z][A-Za-z ]*?)=(\d+)", text("TypeIds"))}
     assert types == {key: name for key, name in alerts_module.ALERT_TYPES.items() if key}
     assert len(types) == 20
-    assert "0 (Unknown) matches an alert this scale cannot name" in text("TypeIds") and alerts_module.ALERT_TYPES[0] == "Unknown"
+    assert "0 (N/A) matches an alert this scale cannot name" in text("TypeIds") and alerts_module.ALERT_TYPES[0] == "N/A"
+    assert "Any id outside 0-20 is a 400" in text("TypeIds")
     statuses = {name.lower(): int(number) for name, number in re.findall(r"([A-Za-z]+)=(\d+)", text("StatusIds"))}
-    assert statuses == alerts_module.ALERT_STATUS_IDS == {"new": 1, "ignored": 2, "ticketed": 3}
-    # A fact about the SPEC, kept as the spec words it. Production contradicts it (2026-10-04: a Script alert whose
-    # ClientId is null was returned for ClientIds=9102 through its device's client), so the text of the tool follows
-    # the live behavior and does not repeat this sentence (see the client_ids text test above).
+    assert statuses == alerts_module.ALERT_STATUS_IDS == {"new": 1, "dismissed": 2, "ticketed": 3}
+    assert "Any other id is a 400" in text("StatusIds")
+    # A fact about the SPEC, kept as the spec words it. The text of the tool does not repeat it: a Script alert whose
+    # ClientId is null was returned for ClientIds=9102 through its device's client, so the text follows what was seen
+    # and does not repeat this sentence (see the client_ids text test above).
     assert "An alert type that carries no client id never matches this filter." in text("ClientIds")
     assert "`desc` (default, newest first) or `asc`" in text("SortOrder")
     assert "strictly before" in text("CreatedBefore") and "at or after" in text("CreatedSince")
@@ -625,10 +625,10 @@ async def test_every_filter_goes_out_under_its_spec_name(full_server, mock_gorel
     "status, wire, echoed",
     [
         (["new"], "1", ["new"]),
-        (["ignored"], "2", ["ignored"]),
+        (["dismissed"], "2", ["dismissed"]),
         (["ticketed"], "3", ["ticketed"]),
-        (["ignored", "ticketed"], "2,3", ["ignored", "ticketed"]),
-        (["ticketed", "new", "ignored"], "3,1,2", ["ticketed", "new", "ignored"]),
+        (["dismissed", "ticketed"], "2,3", ["dismissed", "ticketed"]),
+        (["ticketed", "new", "dismissed"], "3,1,2", ["ticketed", "new", "dismissed"]),
         (["new", "new", "ticketed", "new"], "1,3", ["new", "ticketed"]),  # a repeat is dropped, the order kept
     ],
 )
@@ -638,10 +638,19 @@ async def test_status_words_become_status_ids(full_server, mock_gorelo, status, 
     assert mock_gorelo.last.query["StatusIds"] == wire and result["filters"]["status"] == echoed
 
 
-async def test_status_zero_is_not_offered_as_a_word(full_server, mock_gorelo):
-    for bad in (["unknown"], ["New"], ["1"], [1], [None], ["new", "gone"]):
+async def test_status_zero_and_the_old_word_ignored_are_not_offered(full_server, mock_gorelo):
+    for bad in (["unknown"], ["New"], ["1"], [1], [0], [None], ["ignored"], ["new", "gone"]):
         text = await call_tool_error(full_server, "list_alerts", {"status": bad})
         assert "status" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_the_old_status_word_ignored_is_refused_by_the_schema_and_by_a_direct_call(full_server, client_factory, mock_gorelo):
+    text = await call_tool_error(full_server, "list_alerts", {"status": ["ignored"]})
+    assert "status" in text
+    with pytest.raises(ToolError) as info:
+        await call_list_directly(client_factory, status=["ignored"])
+    assert "status: expected one of 'new', 'dismissed', 'ticketed', got a string" in str(info.value)
     assert mock_gorelo.requests == []
 
 
@@ -650,7 +659,7 @@ async def test_status_zero_is_not_offered_as_a_word(full_server, mock_gorelo):
     [
         ([1], "1", [1]),
         ([4], "4", [4]),
-        ([0], "0", [0]),  # 0 (Unknown) is a documented value of the filter
+        ([0], "0", [0]),  # 0 (N/A) is a documented value of the filter
         ([20], "20", [20]),
         ([1, 4, 20, 0], "1,4,20,0", [1, 4, 20, 0]),
         ([4, 4, 1, 4], "4,1", [4, 1]),
@@ -665,8 +674,8 @@ async def test_type_ids_on_the_published_scale_are_sent_as_given(full_server, mo
 async def test_the_type_table_covers_the_documented_scale_and_nothing_else():
     assert sorted(alerts_module.ALERT_TYPES) == list(range(0, 21))
     assert alerts_module.ALERT_TYPES[1] == "Uptime" and alerts_module.ALERT_TYPES[4] == "External"
-    assert alerts_module.ALERT_TYPES[20] == "Contract Expiration" and alerts_module.ALERT_TYPES[0] == "Unknown"
-    assert alerts_module.ALERT_STATUS_IDS == {"new": 1, "ignored": 2, "ticketed": 3}
+    assert alerts_module.ALERT_TYPES[20] == "Contract Expiration" and alerts_module.ALERT_TYPES[0] == "N/A"
+    assert alerts_module.ALERT_STATUS_IDS == {"new": 1, "dismissed": 2, "ticketed": 3}
 
 
 @pytest.mark.parametrize("given, used", [(0, 1), (-5, 1), (1, 1), (50, 50), (200, 200), (201, 200), (5000, 200)])
@@ -702,7 +711,7 @@ async def test_paging_follows_next_cursor_with_the_same_filters_and_sort(full_se
 async def test_the_echoed_filters_can_be_sent_back_unchanged_for_the_next_page(full_server, mock_gorelo):
     mock_gorelo.on("GET", ALERTS, paged_envelope([]))
     first = await call_tool(
-        full_server, "list_alerts", {"status": ["ignored"], "created_since": "2026-10-01T08:00:00+02:00", "client_ids": [5]}
+        full_server, "list_alerts", {"status": ["dismissed"], "created_since": "2026-10-01T08:00:00+02:00", "client_ids": [5]}
     )
     again = await call_tool(full_server, "list_alerts", {**first["filters"], "cursor": "c-2"})
     assert again["filters"] == first["filters"]
@@ -718,7 +727,7 @@ async def test_an_empty_page_is_reported_as_one_with_its_total(full_server, mock
 async def test_the_rows_come_back_unchanged_including_a_dismissed_one_and_one_without_a_client(full_server, mock_gorelo):
     dismissed = alert_row(
         2,
-        Status={"Id": 2, "Name": "Ignored"},
+        Status={"Id": 2, "Name": "Dismissed"},
         DismissedOn="2026-10-02T17:30:00Z",
         DismissedBy=9201,
         UpdatedOn="2026-10-02T17:30:00Z",
@@ -734,7 +743,7 @@ async def test_the_rows_come_back_unchanged_including_a_dismissed_one_and_one_wi
 
 
 async def test_a_row_without_a_client_id_that_gorelo_matched_through_its_device_is_returned_as_it_is(full_server, mock_gorelo):
-    """Live 2026-10-04: list_alerts(client_ids=[9102]) returned a Script alert whose ClientId is null but whose DeviceId
+    """list_alerts(client_ids=[9102]) returned a Script alert whose ClientId is null but whose DeviceId
     belongs to that client (the spec says such an alert never matches ClientIds). The filter is Gorelo's: the tool
     sends it as given and keeps every row of the answer, so it never drops a row for its null ClientId and never fills
     the ClientId in."""
@@ -813,13 +822,13 @@ async def test_a_server_error_on_the_read_is_reported_with_its_trace_id(full_ser
 
 
 LOCAL_LIST_ERRORS = [
-    pytest.param({"status": []}, "status: must contain at least one of 'new', 'ignored', 'ticketed' (omit it for every status)", id="empty-status"),
+    pytest.param({"status": []}, "status: must contain at least one of 'new', 'dismissed', 'ticketed' (omit it for no status filter)", id="empty-status"),
     pytest.param({"status": "new"}, "status: expected a list such as ['new', 'ticketed'], got a string", id="status-not-a-list"),
-    pytest.param({"status": ["bogus"]}, "status: expected one of 'new', 'ignored', 'ticketed', got a string", id="unknown-status"),
-    pytest.param({"status": [1]}, "status: expected one of 'new', 'ignored', 'ticketed', got a number", id="numeric-status"),
+    pytest.param({"status": ["bogus"]}, "status: expected one of 'new', 'dismissed', 'ticketed', got a string", id="unknown-status"),
+    pytest.param({"status": [1]}, "status: expected one of 'new', 'dismissed', 'ticketed', got a number", id="numeric-status"),
     pytest.param({"type_ids": []}, "type_ids: expected at least one id, got an empty list (omit type_ids if you have none to give)", id="empty-type-ids"),
     pytest.param({"type_ids": 4}, "type_ids: expected a list of ids such as [1, 4], got a number", id="type-ids-not-a-list"),
-    pytest.param({"type_ids": [1, 21]}, "type_ids[1]: 21 is not an alert type id; valid ids: 0 Unknown, 1 Uptime, 2 API", id="type-21"),
+    pytest.param({"type_ids": [1, 21]}, "type_ids[1]: 21 is not an alert type id; valid ids: 0 N/A, 1 Uptime, 2 API", id="type-21"),
     pytest.param({"type_ids": [-1]}, "type_ids[0]: -1 is not an alert type id", id="negative-type"),
     pytest.param({"type_ids": [True]}, "type_ids[0]: a boolean is not an alert type id", id="bool-type"),
     pytest.param({"type_ids": ["4"]}, "type_ids[0]: a string is not an alert type id", id="text-type"),
@@ -854,6 +863,13 @@ async def test_local_validation_errors_name_the_param_and_send_nothing(client_fa
     with pytest.raises(ToolError) as info:
         await call_list_directly(client_factory, **args)
     assert fragment in str(info.value)
+    assert mock_gorelo.requests == []
+
+
+async def test_type_zero_is_named_na_in_the_refusal_text(client_factory, mock_gorelo):
+    with pytest.raises(ToolError) as info:
+        await call_list_directly(client_factory, type_ids=[1, 21])
+    assert "valid ids: 0 N/A, 1 Uptime" in str(info.value)
     assert mock_gorelo.requests == []
 
 
@@ -929,7 +945,6 @@ async def test_the_advice_after_an_unconfirmed_post_names_a_tool_that_exists_and
     description = properties["client_ids"]["description"]
     assert "Uptime and External alerts have no ClientId" in description and "may leave them out" in description
     assert "a Script alert without one matched through its device" in description
-    assert "never match" not in description
 
 
 async def test_the_post_alert_docstring_and_the_list_alerts_docstring_name_each_other():

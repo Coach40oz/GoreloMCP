@@ -29,8 +29,8 @@ applies, so that each one is small, has no framework state and is tested on its 
   refresh, an expired session or a replay.
 * Redirect validator (`redirect_problem`): the one definition of an acceptable redirect address, applied to the
   pydantic-normalized string (the form that is stored and redirected to) at registration and again at /authorize.
-* Safe log values (`safe`, `safe_host`): attacker-controlled text reaches the journal only as printable ASCII, escaped
-  and shortened.
+* Safe log values (`safe`, `safe_host`): the attacker-controlled text that the gate and the sign-in write to the journal
+  goes through these, so it reaches the journal only as printable ASCII, escaped and shortened.
 * Consent response headers and the fixed error pages (`consent_headers`, `INVALID_REQUEST_PAGE`, ...): the same bytes
   every time, whatever the request said.
 * Fail closed (`check_framework_versions`, `require_password`, `approved`, `take_approval`): the gate refuses to start on

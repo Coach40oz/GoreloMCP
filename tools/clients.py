@@ -19,6 +19,13 @@ true partial update that treats null as "leave unchanged" for its four plain fie
 "" and null both leave a value unchanged, so name, status, billing name and alternate name cannot be cleared
 through the API and update_client has no clear option for them (it rejects "" and says why).
 
+Status scale (contract a7954b24844b, 2026-10-17): UpdateClientCommand.StatusId and the GET /v1/clients StatusIds filter
+take 1 Active, 3 Credit hold, 4 Archived; any other value is a 400 and 2 (Inactive) is gone. The default list leaves
+Archived out, a supplied list returns only those statuses (up to 100 values), deleted clients are never listed,
+GET /v1/clients/{clientId} answers 404 for a deleted client like an unknown id and returns an Archived one.
+update_client and list_clients check the status against that scale before any request (CLIENT_STATUS_LABELS).
+DELETE /v1/clients/{clientId}, which the spec names for deleting, stays in FORBIDDEN_OPS.
+
 The client id travels in the PATH only. The published UpdateClientCommand (contract e15cb5a18ec2, 2026-10-02) has
 no Id field, so update_client sends none. The update used to be published with the id in the body and no id in
 the path; that form answered 405 live on 2026-10-02 and a live override swapped the path form in until Gorelo
@@ -27,9 +34,11 @@ published it (the history is in spec/live_overrides.json, section retired). A mi
 The list rows are ClientListItemResponse records (Id, Name, AlternateName, BillingName, Status, Domains,
 IsDefault, CreatedOn, UpdatedOn). The single record (ClientResponse: what get_client returns and what create_client
 and update_client answer) is that list shape PLUS CustomProperties, which the list deliberately leaves out
-(contract 1b1c0cec0e9a, 2026-10-12): every custom field the service provider has defined for clients, each a
-CustomPropertyValue {Id, Variable, Name, Type, Value, IsSet}. Value is the effective text (the saved value, else the
-field's default, else null; a string whatever the Type) and IsSet is true when a value is saved on this client.
+(contract 1b1c0cec0e9a, 2026-10-14): every custom field the service provider has defined for clients, each a
+CustomPropertyValue {Id, Variable, Name, Type, Value, IsSet, IsHidden}. Value is the effective text (the saved value, else the
+field's default, else null; a string whatever the Type) and IsSet is true when a value is saved on this client. IsHidden
+(contract a7954b24844b, 2026-10-17) is true when the service provider has hidden the field's value from the API: Value is then
+always null whether or not a value is saved, IsSet is still reported, and the value can still be written through the API.
 
 Custom fields are what update_client CAN clear. UpdateClientCommand.CustomProperties (contract 1b1c0cec0e9a) is an
 upsert by Id: an entry sent changes that field, one left out keeps its value, and a null Value clears the saved value
@@ -37,6 +46,8 @@ so the field falls back to its default (an empty string would SAVE an empty valu
 field when it would leave it with no value). The tool sends custom_properties as {Id, Value: text} entries and, after
 them, clear_custom_property_ids as {Id, Value: null} entries, in the one array. It never sends an empty string: a blank
 value is refused locally and the message names clear_custom_property_ids. An id is given once across both lists.
+Gorelo refuses a repeated id with a 400 as well (UpdateClientCommand.CustomProperties text of contract a7954b24844b),
+so the local refusal is not stricter than Gorelo.
 
 The reads around the write. The published text says CustomProperties is an upsert, but no live call has shown that,
 and if production applied it as a replace, an update of one field would silently wipe every other custom field of a
@@ -70,13 +81,23 @@ previous state. It tells the model to tell the user at once, to ask before putti
 update_client call that puts the fields back together with what this call meant to set; a field that cannot be put
 back that way (an empty previous value, a required field that was unset) is fixed in the Gorelo app.
 
+Hidden custom fields (IsHidden true). The value of such a field is never readable, so no check can depend on it. IsHidden
+is optional in a read (absent means not hidden) and must be a boolean when present, else the read is unusable; the Value of a hidden
+field is dropped when a read is taken apart, so it is never compared, restored or quoted in an error (the record update_client
+returns is Gorelo's read, unchanged). A saved hidden field is confirmed by IsSet alone, and the record update_client returns then
+carries one extra key, warning, that says its value was not read back and could not be checked (never that it was checked); a
+cleared hidden field is confirmed by IsSet false like any other. A field that was not sent is compared on IsSet and presence only,
+and every error that lists fields says that a change of a hidden value cannot be seen. A restore call never offers a value it
+could not read: a hidden field that held a value is fixed in the Gorelo app or written again with a value the user gives, and
+an unset one may be cleared like any unset field.
+
 If the second read fails or cannot be used, the update was sent and answered with success but nothing can be said
 about what it did. The tool still holds what every custom field held before, so the error lists all of them (Id, Name,
 previous value or unset), tells the model to compare that list with get_client, and, if a field that was not in the
 call has changed, to tell the user, ask, and use the one call written out from the first read (plus what the call meant
 to set). Without it the wiped values would be lost for good.
 
-If the PATCH itself ends in a timeout, a connection error or a 5xx (the failures Gorelo marks write_unconfirmed), the
+If the PATCH itself ends in a timeout, a connection error, a 5xx or a 3xx (the failures Gorelo marks write_unconfirmed), the
 update may have been applied and the failure says nothing about the custom fields, so no second read is tried. The
 error is the same kind of error, with the same list of what every custom field held before, the order to compare it
 with get_client and the one call to put the fields back, built from the first read. Its text keeps the standard meaning
@@ -94,8 +115,10 @@ echoed in an error. FastMCP's own DEBUG line with the arguments of a call is not
 the sent values, at DEBUG only.
 
 Not probed (not tested live yet): what Gorelo answers for an Id that is not a client custom field, the PropertyName of
-its custom property errors, and how it checks a value against the field's Type. Gorelo's item number in an error is
-assumed to count the one array that was sent, the saved entries first, so update_client relabels such an error
+its custom property errors, and the format each Type needs. Gorelo's release notes of 2026-10-16 say it now checks
+Number, Checkbox and Dropdown values against the field Type; the published text of UpdateClientCommand.CustomProperties
+says only that a repeated id is a 400, so no local format rule exists and the tool texts only advise. Gorelo's item number
+in an error is assumed to count the one array that was sent, the saved entries first, so update_client relabels such an error
 itself (_relabel_custom_property_errors): "CustomProperties[1].Value" becomes "custom_properties (item 2, custom
 field 9, Value; Gorelo: CustomProperties 1 Value)", or "clear_custom_property_ids (item 1, custom field 7, Value;
 Gorelo: ...)" past the saved entries. Because that reading of the index is an assumption, every label ends with
@@ -121,6 +144,7 @@ from pydantic import BaseModel, ConfigDict, Field, Strict
 
 from gorelo_client import GoreloAPIError
 from tools._common import (
+    MAX_ID,
     StrictId,
     build_body,
     clamp_page_size,
@@ -144,6 +168,12 @@ GET_OP = "GET /v1/clients/{clientId}"
 LOCATIONS_OP = "GET /v1/clients/{clientId}/locations"
 CREATE_OP = "POST /v1/clients"
 UPDATE_OP = "PATCH /v1/clients/{clientId}"
+
+# The client status scale of UpdateClientCommand.StatusId and of the GET /v1/clients StatusIds filter (contract
+# a7954b24844b, 2026-10-17): "1 Active, 3 Credit hold, 4 Archived", any other value is a 400. 2 (Inactive) is gone.
+CLIENT_STATUS_LABELS = {1: "Active", 3: "Credit hold", 4: "Archived"}
+CLIENT_STATUS_SCALE = ", ".join(f"{status} {label}" for status, label in CLIENT_STATUS_LABELS.items())
+STATUS_IDS_MAX = 100  # "Up to 100 values" (the StatusIds text)
 
 SINCE_HELP = "ISO 8601 with UTC offset, e.g. 2026-10-01T00:00:00Z."
 
@@ -208,6 +238,29 @@ GET_FIELD_MAP = {"client_id": "clientId"}
 LOCATIONS_FIELD_MAP = {"client_id": "clientId"}
 
 
+def _status(param: str, value: Any) -> int:
+    """One client status: 1 Active, 3 Credit hold or 4 Archived. A whole number outside the scale (0 and the negatives
+    included, so positive_id's "such as 123" does not suggest that any id will do) is answered with the scale and quoted
+    back; whatever else is not an id (a boolean, a decimal, text, a number beyond int64) keeps the message of positive_id."""
+    if isinstance(value, int) and not isinstance(value, bool) and -MAX_ID <= value < 1:
+        status = int(value)
+    else:
+        status = positive_id(param, value)
+    if status not in CLIENT_STATUS_LABELS:
+        raise ValueError(f"{param}: expected {CLIENT_STATUS_SCALE}, got {status}")
+    return status
+
+
+def _statuses(param: str, values: Any) -> list[int] | None:
+    """The status_ids filter of list_clients: at most STATUS_IDS_MAX items, each on the scale, a bad one named by its
+    index. None, an empty list and a value that is not a list keep the messages of positive_ids."""
+    if isinstance(values, (list, tuple)) and values:
+        if len(values) > STATUS_IDS_MAX:
+            raise ValueError(f"{param}: at most {STATUS_IDS_MAX} values, got {len(values)}")
+        return [_status(f"{param}[{index}]", item) for index, item in enumerate(values)]
+    return positive_ids(param, values)
+
+
 class CustomPropertySet(BaseModel):
     # One custom field to save on a client: an entry of UpdateClientCommand.CustomProperties (CustomPropertyUpdate) in
     # snake_case. value is typed `str | None` and defaults to None only so that a missing or null value reaches
@@ -230,8 +283,8 @@ async def list_clients(
     status_ids: Annotated[
         list[StrictId] | None,
         Field(
-            description="Status.Id values from client records (no lookup tool). Omit it and inactive clients (status 2) "
-            "are left out; give it and only those statuses are returned."
+            description="1 Active, 3 Credit hold, 4 Archived, up to 100. Omit it and Archived clients are left out; "
+            "give it and only those are returned."
         ),
     ] = None,
     created_since: Annotated[str | None, Field(description=f"Created at or after; {SINCE_HELP}")] = None,
@@ -242,10 +295,10 @@ async def list_clients(
     cursor: Annotated[str | None, Field(description="next_cursor from the previous call.")] = None,
 ) -> dict:
     """List clients one page per call; returns {items, has_more, next_cursor, total_count, ...}.
-    Inactive clients are left out unless status_ids asks for the inactive status. Rows leave out CustomProperties: get_client has them. Paging: pass next_cursor as cursor, same filters, until has_more is false.
+    Archived clients are left out unless status_ids asks for status 4; deleted clients are never listed. Rows leave out CustomProperties: get_client has them. Paging: pass next_cursor as cursor, same filters, until has_more is false.
     """
     keyword = non_empty("query", query)
-    ids = csv_ids("status_ids", positive_ids("status_ids", status_ids))
+    ids = csv_ids("status_ids", _statuses("status_ids", status_ids))
     created_after = utc_iso("created_since", created_since)
     created_until = utc_iso("created_before", created_before)
     updated_after = utc_iso("updated_since", updated_since)
@@ -285,7 +338,7 @@ async def get_client(
     client_id: Annotated[StrictId, Field(description="Client id (list_clients).")],
 ) -> dict:
     """Get one client by id; returns Gorelo's client record.
-    The record includes CustomProperties (each client custom field: Id, Name, Type, Value, IsSet true when a value is saved).
+    The record includes CustomProperties (each client custom field: Id, Name, Type, Value, IsSet true when a value is saved, IsHidden true when the Value is hidden from the API and always null). A deleted client is a 404 like an unknown id; an Archived client is returned.
     """
     cid = positive_id("client_id", client_id)
     record = await client_of(ctx).get_one(GET_OP, path_params={"clientId": cid}, tool="get_client")
@@ -406,7 +459,7 @@ def _custom_property_changes(
             if identifier in item_of:
                 raise ValueError(
                     f"{_where(position, 'id')}: custom field {identifier} is already in item {item_of[identifier]}; "
-                    "give each id once"
+                    "give each id once (Gorelo refuses a repeated id with a 400 too)"
                 )
             text = data.get("value")
             if text is None or (isinstance(text, str) and not text.strip()):
@@ -425,12 +478,13 @@ def _custom_property_changes(
         if identifier in item_of:
             raise ValueError(
                 f"clear_custom_property_ids[{index}]: custom field {identifier} is also in custom_properties "
-                f"(item {item_of[identifier]}); an id is either saved or cleared in one call, not both"
+                f"(item {item_of[identifier]}); an id is either saved or cleared in one call, not both "
+                "(Gorelo refuses a repeated id with a 400 too)"
             )
         if identifier in cleared:
             raise ValueError(
                 f"clear_custom_property_ids[{index}]: custom field {identifier} is already at "
-                f"[{cleared.index(identifier)}]; give each id once"
+                f"[{cleared.index(identifier)}]; give each id once (Gorelo refuses a repeated id with a 400 too)"
             )
         cleared.append(identifier)
     return saved, cleared
@@ -445,11 +499,16 @@ def _has_text(value: Any) -> bool:
 
 
 class _CustomField(NamedTuple):
-    """One custom field of the client as a read of it shows it: the state that two reads are compared by."""
+    """One custom field of the client as a read of it shows it: the state that two reads are compared by.
+
+    `hidden` is IsHidden (contract a7954b24844b): the provider hides the field's value from the API. The value of a hidden
+    field is always None here (Gorelo's Value is null then, and whatever else arrives is dropped), so two reads of it differ
+    only in is_set."""
 
     name: str | None
     is_set: bool
     value: str | None
+    hidden: bool = False
 
 
 class _UnusableRead(Exception):
@@ -460,7 +519,8 @@ def _custom_fields_of(data: Any) -> dict[int, _CustomField]:
     """The custom fields in what GET /v1/clients/{clientId} answered, by Id.
 
     The record must be a non-empty object whose CustomProperties is a list of objects, each with an integer Id (once), a
-    boolean IsSet and a Value that is text or null; anything else raises _UnusableRead. Both reads around a write are
+    boolean IsSet and a Value that is text or null; anything else raises _UnusableRead. IsHidden, when present, must be a
+    boolean (absent means not hidden); the Value of a hidden field is dropped (None). Both reads around a write are
     taken apart by this one function, because the checks compare the two and only a rendering that can be read proves
     anything.
     """
@@ -481,11 +541,15 @@ def _custom_fields_of(data: Any) -> dict[int, _CustomField]:
         if identifier in fields:
             raise _UnusableRead(f"custom field {identifier} is listed more than once")
         name, is_set, value = entry.get("Name"), entry.get("IsSet"), entry.get("Value")
+        hidden = entry.get("IsHidden", False)  # absent (an older rendering) means not hidden
         if not isinstance(is_set, bool):
             raise _UnusableRead(f"custom field {identifier} has no boolean IsSet")
-        if value is not None and not isinstance(value, str):
+        if not isinstance(hidden, bool):
+            raise _UnusableRead(f"custom field {identifier} has an IsHidden that is neither true nor false")
+        # a hidden field's Value is never read: whatever arrives (the spec says null) is dropped below, never refused
+        if not hidden and value is not None and not isinstance(value, str):
             raise _UnusableRead(f"custom field {identifier} has a Value that is neither text nor null")
-        fields[identifier] = _CustomField(name if _has_text(name) else None, is_set, value)
+        fields[identifier] = _CustomField(name if _has_text(name) else None, is_set, None if hidden else value, hidden)
     return fields
 
 
@@ -604,7 +668,8 @@ def _collateral_changes(
 ) -> list[tuple[int, _CustomField, str]]:
     """The fields of the read before that were NOT sent and that the read after does not show as they were: (id, state
     before, how the read after differs). A field missing from it, with another IsSet or with another Value counts; a
-    field only the read after lists does not. In the order of the read before."""
+    field only the read after lists does not. In the order of the read before. A field hidden in either read is compared
+    on IsSet and presence only (its Value is always null)."""
     changes: list[tuple[int, _CustomField, str]] = []
     for identifier, field in before.items():
         if identifier in sent:
@@ -614,7 +679,7 @@ def _collateral_changes(
             now = "now missing from that read"
         elif shown.is_set != field.is_set:
             now = "now reads set" if shown.is_set else "now reads unset"
-        elif shown.value != field.value:
+        elif shown.value != field.value and not (field.hidden or shown.hidden):
             now = "now shows a different value"
         else:
             continue
@@ -651,10 +716,34 @@ def _named(field: _CustomField) -> str:
     return f" ({_quoted(field.name)})" if field.name else ""
 
 
+def _hidden_ids(*reads: Mapping[int, _CustomField]) -> list[int]:
+    """The ids, ascending, of the custom fields that any of the reads shows as hidden."""
+    return sorted({identifier for read in reads for identifier, field in read.items() if field.hidden})
+
+
+def _hidden_note(ids: Iterable[int]) -> str:
+    """The sentence that tells the model a change of a hidden value cannot be seen (only IsSet can be compared)."""
+    return (
+        f"Custom field(s) {_ids(list(ids))} are hidden from the API (IsHidden true): only whether they hold a value (IsSet) "
+        "can be read, so a change of their value cannot be seen; check them in the Gorelo app if it matters. "
+    )
+
+
+def _unread_warning(ids: Iterable[int]) -> str:
+    """The `warning` of an answer in which a saved custom field is hidden: its value was never read back."""
+    return (
+        f"custom field(s) {_ids(list(ids))} are hidden from the API (IsHidden true): Gorelo confirms that a value is saved "
+        "(IsSet true) but never shows it, so the value you sent was not read back and could not be checked. Check it in the "
+        "Gorelo app if it matters."
+    )
+
+
 def _held(field: _CustomField) -> tuple[str, str]:
-    """What a custom field held, as words ("was set to "x"") and as a kind: "unset", "text" or "empty"."""
+    """What a custom field held, as words ("was set to "x"") and as a kind: "unset", "text", "empty" or "hidden"."""
     if not field.is_set:
         return "was unset", "unset"
+    if field.hidden:
+        return "was set (its value is hidden from the API and could not be read)", "hidden"
     if _has_text(field.value):
         return f"was set to {_quoted(field.value)}", "text"  # type: ignore[arg-type]
     return "was set to an empty value", "empty"
@@ -666,10 +755,11 @@ class _Restore(NamedTuple):
     put_back: list[str]  # the entries of custom_properties, for the fields that held text
     unset: list[int]  # the fields that were unset: they go to clear_custom_property_ids
     empty: list[int]  # the fields that held an empty value, which this tool cannot send
+    hidden: list[int]  # the fields that held a value Gorelo hides from the API: fixed in the Gorelo app or written again with a value the user gives
 
 
 def _restore_of(fields: Iterable[tuple[int, _CustomField]]) -> _Restore:
-    restore = _Restore([], [], [])
+    restore = _Restore([], [], [], [])
     for identifier, field in fields:
         kind = _held(field)[1]
         if kind == "unset":
@@ -677,6 +767,8 @@ def _restore_of(fields: Iterable[tuple[int, _CustomField]]) -> _Restore:
         elif kind == "text":
             quoted = _quoted(field.value)  # type: ignore[arg-type]
             restore.put_back.append(f'{{"id": {identifier}, "value": {quoted}}}')
+        elif kind == "hidden":
+            restore.hidden.append(identifier)
         else:
             restore.empty.append(identifier)
     return restore
@@ -684,9 +776,10 @@ def _restore_of(fields: Iterable[tuple[int, _CustomField]]) -> _Restore:
 
 def _restore_advice(restore: _Restore, client_id: int, *, known_to_differ: bool) -> str:
     """The advice that follows "ask before putting anything back": the ONE update_client call that puts the fields back
-    together with what this call meant to set (ids and previous values filled in), and the fields that only the Gorelo
-    app can fix. `known_to_differ` is false when the fields come from the read before the update alone (the read after
-    it failed): then some of them may not have changed, and the advice says to keep only what now differs."""
+    together with what this call meant to set (ids and previous values filled in), and the fields that the Gorelo app
+    fixes (a hidden field that held a value is fixed there or written again with a value the user gives). `known_to_differ`
+    is false when the fields come from the read before the update alone (the read after it failed): then some of them may
+    not have changed, and the advice says to keep only what now differs."""
     text = ""
     if restore.put_back or restore.unset:
         arguments = []
@@ -710,6 +803,13 @@ def _restore_advice(restore: _Restore, client_id: int, *, known_to_differ: bool)
             f"Custom field(s) {_ids(restore.empty)} were set to an empty value, which this tool cannot send: {fix} in "
             "the Gorelo app. "
         )
+    if restore.hidden:
+        fix = "fix them" if known_to_differ else "if they differ, fix them"
+        text += (
+            f"Custom field(s) {_ids(restore.hidden)} were set to a value that Gorelo hides from the API, which this tool "
+            f"could not read, so it cannot offer it back: {fix} in the Gorelo app, or ask the user for the value and "
+            "write it with update_client. "
+        )
     if restore.unset:
         text += (
             "If Gorelo refuses to clear one of the unset fields (a required field), fix that one in the Gorelo app. "
@@ -722,7 +822,7 @@ class CollateralChangeError(GoreloAPIError):
 
     That is the user's own data, needed to put the fields back, and possibly a password or a licence key. It is raised
     when custom fields changed although they were not in the call, when the read after the update fails or cannot be
-    used, and when the PATCH itself ends in a timeout, a connection error or a 5xx (the tool holds what each field held
+    used, and when the PATCH itself ends in a timeout, a connection error, a 5xx or a 3xx (the tool holds what each field held
     in every case). So it also carries `log_summary`, the text for the server log: the operation, the client and the
     field ids, with no value. server.LogValueFilter logs a record whose exception, or any exception in its cause or
     context chain, has that attribute with that text and without the traceback (the attribute is
@@ -761,14 +861,17 @@ def _collateral_error(
     problems: list[str],
     client_id: int,
     answer_problem: str | None = None,
+    *,
+    hidden_ids: Iterable[int] = (),
 ) -> CollateralChangeError:
     """The error for fields that changed without being sent.
 
     It says what the read after shows and what each field was (the previous value is shown on purpose), then the order
     to tell the user at once and to ask before putting anything back, the ONE call that puts the fields back together
-    with what this call meant to set, the fields that only the Gorelo app can fix, the problems with the fields that
-    were sent, and the answer to the update if that could not be used either. The values the caller sent are not in
-    it."""
+    with what this call meant to set, the fields that the Gorelo app has to fix (a hidden field that held a value is
+    fixed there or written again with a value the user gives), the note on the hidden fields (`hidden_ids`), the problems
+    with the fields that were sent, and the answer to the update if that could not be used either. The values the caller
+    sent are not in it."""
     parts = [
         f"custom field {identifier}{_named(field)} {_held(field)[0]}, {now}" for identifier, field, now in changes
     ]
@@ -778,6 +881,9 @@ def _collateral_error(
     )
     restore = _restore_of((identifier, field) for identifier, field, _ in changes)
     text += _restore_advice(restore, client_id, known_to_differ=True)
+    hidden = list(hidden_ids)
+    if hidden:
+        text += _hidden_note(hidden)
     if problems:
         text += f"The read after the update also does not confirm the fields that were sent ({'; '.join(problems)}). "
     if answer_problem:
@@ -820,6 +926,9 @@ def _states_and_advice(before: Mapping[int, _CustomField], sent: Iterable[int], 
         f"Before the update this tool read the client's custom fields: {'; '.join(states)}. "
         f"Compare that list with get_client(client_id={client_id}). "
     )
+    hidden = _hidden_ids(before)
+    if hidden:
+        text += _hidden_note(hidden)
     sent_ids = set(sent)
     unsent = [(identifier, field) for identifier, field in before.items() if identifier not in sent_ids]
     if unsent:
@@ -852,7 +961,7 @@ def _patch_failure(err: GoreloAPIError) -> str:
 def _unconfirmed_patch_error(
     before: Mapping[int, _CustomField], err: GoreloAPIError, sent: Iterable[int], client_id: int
 ) -> CollateralChangeError:
-    """The error for a PATCH that ended in a timeout, a connection error or a 5xx: Gorelo may have applied the update.
+    """The error for a PATCH that ended in a timeout, a connection error, a 5xx or a 3xx: Gorelo may have applied the update.
 
     Its answer, if there is one, says nothing about the custom fields, but the tool still holds what every one of them
     held before (the first read), and under an update applied as a replace those values would be lost for good. So the
@@ -889,7 +998,7 @@ def _confirm_custom_properties(
     cleared: list[int],
     client_id: int,
     answer_problem: str | None = None,
-) -> None:
+) -> list[int]:
     """Raise the write-unconfirmed shape error unless the read after the write shows the custom fields as sent.
 
     `before` and `after` are two reads of the client with the same rendering (_custom_fields_of); the PATCH answer
@@ -899,7 +1008,9 @@ def _confirm_custom_properties(
     tool never sends an empty value, and it must not still show its previous Value when it was set before and a
     different text was sent (an ignored update, or the same value written another way); a field that was cleared
     reads IsSet false. A non-blank Value is otherwise NOT compared with what was sent: Gorelo shows display text and
-    may normalise a number or a date.
+    may normalise a number or a date. A saved field that the second read shows as hidden is confirmed by IsSet alone (no
+    text rule, no previous-value rule); the function returns the ids of those fields, in the order of `saved`, so the
+    caller can say that their value was not read back. A hidden field is compared on IsSet only in the collateral check.
 
     Every field in `before` that was not sent must have the same IsSet and the same Value in `after`: a difference, or
     a missing field, is its own error, listed first (see _collateral_error), and the problems with the sent fields
@@ -913,7 +1024,10 @@ def _confirm_custom_properties(
     valueless = [
         identifier
         for identifier in saved_ids
-        if identifier in after and after[identifier].is_set and not _has_text(after[identifier].value)
+        if identifier in after
+        and after[identifier].is_set
+        and not after[identifier].hidden
+        and not _has_text(after[identifier].value)
     ]
     unchanged = [
         identifier
@@ -922,6 +1036,8 @@ def _confirm_custom_properties(
         and identifier in after
         and identifier not in unsaved
         and identifier not in valueless
+        and not before[identifier].hidden
+        and not after[identifier].hidden
         and before[identifier].is_set
         and text != before[identifier].value
         and after[identifier].value == before[identifier].value
@@ -943,7 +1059,7 @@ def _confirm_custom_properties(
         problems.append(f"IsSet is not false for custom field(s) {_ids(still_saved)}, which were sent to be cleared")
     changes = _collateral_changes(before, after, set(sent_ids))
     if changes:
-        raise _collateral_error(changes, problems, client_id, answer_problem)
+        raise _collateral_error(changes, problems, client_id, answer_problem, hidden_ids=_hidden_ids(before, after))
     if problems:
         text = (
             f"{UPDATE_OP}: the update was sent, but a read of the client after it does not confirm the custom fields "
@@ -957,7 +1073,9 @@ def _confirm_custom_properties(
             f"fields, but the answer to the update cannot be used as the client record: {answer_problem}. "
         )
     else:
-        return
+        # every saved id is in `after` here (an absent one would have been a problem): the saved hidden fields are
+        # confirmed by IsSet alone, and the caller says so in a warning
+        return [identifier for identifier in saved_ids if after[identifier].hidden]
     raise GoreloAPIError(
         text + _closing(client_id), status=200, op_key=UPDATE_OP, kind="shape", write_unconfirmed=True
     )
@@ -1078,8 +1196,7 @@ async def update_client(
     status_id: Annotated[
         StrictId | None,
         Field(
-            description="Status.Id from a client record (no lookup tool). An inactive status hides the client "
-            "from default lists like a delete does; its devices drop out of list_agents."
+            description="1 Active, 3 Credit hold, 4 Archived; any other value is refused. Archived hides the client from default lists."
         ),
     ] = None,
     billing_name: Annotated[str | None, Field(description="New name printed on invoices.")] = None,
@@ -1087,8 +1204,7 @@ async def update_client(
     custom_properties: Annotated[
         list[CustomPropertySet] | None,
         Field(
-            description="Custom fields to save: [{id, value}], value as non-blank text. To remove a value use "
-            "clear_custom_property_ids."
+            description="Fields to save: [{id, value}], non-blank text, each id once. Gorelo checks Number, Checkbox, Dropdown values. To remove a value use clear_custom_property_ids."
         ),
     ] = None,
     clear_custom_property_ids: Annotated[
@@ -1100,10 +1216,10 @@ async def update_client(
     ] = None,
 ) -> dict:
     """Update a client's name, status, billing name, alternate name or custom fields; returns the updated client record.
-    Only the fields you pass change (at least one); only custom fields can be cleared through the API. Custom fields: ids from get_client's CustomProperties, values are text whatever the Type. Compare each returned CustomProperties Value with what you sent; tell the user if one differs (Gorelo may reformat). It reads the client first: ids must be listed there, and other custom fields must come back unchanged. Side effects: overwrites current values (visible in the app, on tickets and invoices; old values are not kept); an inactive status_id also hides the client like a delete does.
+    Only the fields you pass change (at least one); only custom fields can be cleared. Custom fields: ids from get_client's CustomProperties, values are text whatever the Type. Compare each returned CustomProperties Value with what you sent; tell the user if one differs. A hidden field (IsHidden) shows no Value: only IsSet is checked (see warning). It reads the client first: ids must be listed there, and other custom fields must come back unchanged. Side effects: overwrites current values (old values are not kept); status_id 4 (Archived) hides the client from default lists.
     """
     cid = positive_id("client_id", client_id)
-    sid = None if status_id is None else positive_id("status_id", status_id)
+    sid = None if status_id is None else _status("status_id", status_id)
     texts = {"name": name, "billing_name": billing_name, "alternate_name": alternate_name}
     for param in UPDATE_TEXT_PARAMS:
         value = texts[param]
@@ -1139,7 +1255,7 @@ async def update_client(
         if answer_problem is None:
             relabelled = _relabel_custom_property_errors(err, saved_ids, cleared)
             if entries and relabelled.write_unconfirmed:
-                # a timeout, a connection error or a 5xx: the update may have been applied and the failure says nothing
+                # a timeout, a connection error, a 5xx or a 3xx: the update may have been applied and the failure says nothing
                 # about the custom fields, so the error lists what they held before (a 4xx or a failure envelope is
                 # Gorelo saying that nothing was applied, and stays as it is)
                 raise _unconfirmed_patch_error(before, relabelled, [*saved_ids, *cleared], cid) from err
@@ -1158,7 +1274,9 @@ async def update_client(
         after_record, after = await _read_custom_fields_after(ctx, cid)
     except _AfterReadFailed as failed:
         raise _unchecked_error(before, failed.why, [*saved_ids, *cleared], answer_problem, cid) from failed.__cause__
-    _confirm_custom_properties(after, before, saved, cleared, cid, answer_problem)
+    unread = _confirm_custom_properties(after, before, saved, cleared, cid, answer_problem)
+    if unread:
+        after_record["warning"] = _unread_warning(unread)
     return after_record
 
 

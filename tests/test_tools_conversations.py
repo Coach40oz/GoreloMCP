@@ -13,6 +13,7 @@ stays inside its size budget.
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import httpx
 import pytest
@@ -33,6 +34,10 @@ from gorelo_client import FORBIDDEN_OPS
 from tools._common import REGISTRY
 
 pytestmark = pytest.mark.anyio
+
+# The approval status words are pinned to the summary of the full OpenAPI snapshot (spec/spec_index.json carries no text).
+LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
+needs_spec_text = pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
 
 TICKET = uid(1)
 COMMENT = uid(2)
@@ -260,7 +265,7 @@ async def test_integer_ids_are_typed_strictly_without_changing_what_the_schema_s
                                     "active contact of the ticket's client AND carry a contact tag marked as an approver",
                                     "tags are set in the Gorelo UI (the API cannot set them)",
                                     "Gorelo rejects any other contact with a 400"]),
-        ("get_ticket_approval", ["approval status lives", "Pending", "Approved", "Disapproved"]),
+        ("get_ticket_approval", ["approval status lives", "Pending", "Approved", "Denied", "Denied as soon as anyone denies"]),
         # a delete emails nobody (say it), next to the private-only, soft-delete and ask-first rules
         ("delete_ticket_comment", ["PRIVATE", "HTTP 409", "Soft delete", "Emails nobody", "Repeating is safe",
                                    "may still be returned by reads", "do not verify a delete", "Ask the user first",
@@ -1306,13 +1311,30 @@ async def test_create_approval_a_timeout_is_unconfirmed_and_is_not_retried(serve
 
 
 async def test_get_approval_returns_the_record_where_status_lives(server, mock_gorelo):
-    record = approval_record(status=(3, "Disapproved"))
+    record = approval_record(status=(3, "Denied"))
     mock_gorelo.on("GET", APPROVAL_PATH, envelope(record))
     result = await call_tool(server, "get_ticket_approval", {"ticket_id": TICKET, "approval_id": APPROVAL})
     request = mock_gorelo.last
     assert (request.method, request.path, request.query, request.json) == ("GET", APPROVAL_PATH, {}, None)
     assert result == record
     assert len(mock_gorelo.requests) == 1
+
+
+def operation(method, path):
+    return json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["paths"][path][method]
+
+
+def test_the_approval_docstring_no_longer_says_disapproved():
+    doc = " ".join(conversations.get_ticket_approval.__doc__.split())
+    assert "Disapproved" not in doc
+    assert "Denied as soon as anyone denies, Approved once all approve" in doc
+    assert [s.name for s in REGISTRY.specs if s.fn.__module__ == "tools.conversations" and "Disapproved" in (s.fn.__doc__ or "")] == []
+
+
+@needs_spec_text
+def test_the_approval_status_words_are_the_ones_in_the_spec_summary():
+    summary = " ".join(operation("get", "/v1/tickets/{ticketId}/approvals/{approvalId}")["summary"].split())
+    assert "Denied as soon as anyone denies, Approved once everyone approves, Pending otherwise" in summary
 
 
 @pytest.mark.parametrize(

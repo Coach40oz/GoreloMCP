@@ -48,9 +48,10 @@ function in `tools/<domain>.py`:
     ) -> dict:
         """One sentence: what it does, which ids to resolve first, side effects, paging rule."""
 
-- `toolset` is one of core, tickets, time, billing, uptime, projects, forms.
-- `kind` is `read`, `write` or `destructive`. Destructive tools are registered only with
-  `GORELO_ENABLE_DESTRUCTIVE` and need a `confirm` parameter. A tool that pushes data outside
+- `toolset` is one of core, tickets, time, billing, uptime, projects, forms, documents.
+- `kind` is `read`, `write` or `destructive`. Destructive tools are registered only when the operator enables
+  them with `GORELO_ENABLE_DESTRUCTIVE` (`1` for every gated tool, or a list that names the tool) and need a
+  `confirm` parameter. A tool that pushes data outside
   Gorelo (for example to accounting) should be its own gated tool.
 - `ops` lists every operation the tool may call, including the GET it uses to read a record
   back. Each must exist in `spec/spec_index.json`. Forbidden operations (see

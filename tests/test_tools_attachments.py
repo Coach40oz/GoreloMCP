@@ -10,13 +10,16 @@ create_ticket_comment, a task or project upload at create_project_comment), the 
 item id is checked with the shared guid helper, and a success whose Data is not the expected object raises a
 shape error instead of returning anything.
 
-Also: a task or project upload is refused locally unless the projects toolset is enabled, and an
+Also: a task or project upload is refused locally unless the projects toolset is enabled, a document upload unless
+the documents toolset is (the file could never be attached otherwise), and an
 upload whose outcome is unknown gets its own advice, like post_alert: the file may already be stored, the API
 cannot list or delete it, so it must not be uploaded again without the user.
 """
 
 import base64
+import json
 import logging
+from pathlib import Path
 
 import httpx
 import pytest
@@ -33,6 +36,7 @@ from conftest import (
 from fastmcp.exceptions import ToolError
 
 import tools.attachments as attachments
+import tools.documents  # noqa: F401  (registers update_document, which one test feeds an upload into)
 from gorelo_client import FORBIDDEN_OPS
 from tools._common import REGISTRY
 
@@ -60,6 +64,12 @@ PROJECT_NOTE = (
     "The url carries a time-limited access token. Pass name and url together, unchanged, as one entry of the "
     "attachments of create_project_comment with project_id; do not store the url. "
     "Until a comment carries it the file stays orphaned on the record."
+)
+DOCUMENT_NOTE = (
+    "The url carries a time-limited access token. Pass name and url together, unchanged, as one entry of the "
+    "attachments of update_document (that list is the complete new list: keep the current attachments in it); do not "
+    "store the url. Until update_document carries it the file stays orphaned on the record. For an image in the body, "
+    "use the url in an img tag in the body of update_document instead."
 )
 
 
@@ -110,7 +120,7 @@ async def test_the_schema_has_no_way_to_name_a_url_to_fetch(server_factory):
     }
     assert schema["required"] == ["item_type", "item_id", "filename"]
     assert schema["additionalProperties"] is False
-    assert schema["properties"]["item_type"]["enum"] == ["ticket", "task", "project"]
+    assert schema["properties"]["item_type"]["enum"] == ["ticket", "task", "project", "document"]
     for definition in schema["properties"].values():
         assert definition.get("description")
     hints = tools["upload_attachment"].annotations
@@ -148,10 +158,10 @@ async def test_the_tool_text_stays_generic_because_the_note_names_the_comment_to
 async def test_the_parameters_say_where_the_item_id_comes_from_and_the_size_limits(server_factory):
     tools = {t.name: t for t in await list_tools(server_factory())}
     schema = tools["upload_attachment"].inputSchema["properties"]
-    for fragment in ("get_ticket", "list_tickets", "list_project_tasks", "list_projects", "projects toolset"):
+    for fragment in ("get_ticket", "list_tickets", "list_project_tasks", "list_projects", "projects toolset", "list_documents", "documents toolset"):
         assert fragment in schema["item_id"]["description"], fragment
-    # the model learns from the schema that task and project uploads depend on a toolset
-    assert "projects toolset" in schema["item_type"]["description"]
+    # the model learns from the schema that task, project and document uploads depend on a toolset
+    assert "projects toolset" in schema["item_type"]["description"] and "documents toolset" in schema["item_type"]["description"]
     assert "255" in schema["filename"]["description"]
     assert "content_text" in schema["content_base64"]["description"]
     assert "content_base64" in schema["content_text"]["description"]
@@ -190,7 +200,7 @@ async def test_every_byte_of_a_base64_upload_arrives_exactly(server, mock_gorelo
     assert result["name"] == "chart.png" and result["url"] == "https://files.example.test/c?sig=1"
 
 
-@pytest.mark.parametrize("kind, sent", [("ticket", "Ticket"), ("task", "Task"), ("project", "Project")])
+@pytest.mark.parametrize("kind, sent", [("ticket", "Ticket"), ("task", "Task"), ("project", "Project"), ("document", "Document")])
 async def test_the_item_type_is_sent_in_gorelos_capitalisation(server, mock_gorelo, kind, sent):
     mock_gorelo.on("POST", UPLOAD, envelope(stored()))
     await call_tool(server, "upload_attachment", text_upload(item_type=kind))
@@ -293,11 +303,12 @@ async def test_the_result_carries_gorelos_name_and_url_unchanged_with_the_note(s
         ("ticket", TICKET_NOTE, ("create_project_comment", "project_id", "task_id")),
         ("task", TASK_NOTE, ("create_ticket_comment",)),
         ("project", PROJECT_NOTE, ("create_ticket_comment", "task_id")),
+        ("document", DOCUMENT_NOTE, ("create_ticket_comment", "create_project_comment", "project_id", "task_id")),
     ],
 )
 async def test_the_next_step_note_is_built_from_the_item_type(server, mock_gorelo, kind, note, absent):
     # ticket -> create_ticket_comment; task -> create_project_comment with project_id and task_id;
-    # project -> create_project_comment with project_id
+    # project -> create_project_comment with project_id; document -> update_document
     mock_gorelo.on("POST", UPLOAD, envelope(stored()))
     result = await call_tool(server, "upload_attachment", text_upload(item_type=kind))
     assert result["note"] == note
@@ -426,9 +437,10 @@ async def test_the_item_id_must_be_a_uuid(server, mock_gorelo, item_id):
     await refused(server, mock_gorelo, text_upload(item_id=item_id), "item_id: expected a GUID such as")
 
 
-async def test_the_item_type_must_be_ticket_task_or_project(server, mock_gorelo):
-    await refused(server, mock_gorelo, text_upload(item_type="invoice"), "item_type", "'ticket'", "'task'", "'project'")
+async def test_the_item_type_must_be_ticket_task_project_or_document(server, mock_gorelo):
+    await refused(server, mock_gorelo, text_upload(item_type="invoice"), "item_type", "'ticket'", "'task'", "'project'", "'document'")
     await refused(server, mock_gorelo, text_upload(item_type="Ticket"), "item_type")
+    await refused(server, mock_gorelo, text_upload(item_type="Document"), "item_type")
 
 
 @pytest.mark.parametrize(
@@ -444,7 +456,9 @@ def test_helpers_refuse_what_the_mcp_layer_would_already_have_coerced():
     for bad in (None, 5, ["ticket"], "Ticket", "invoice", ""):
         with pytest.raises(ValueError, match="item_type"):
             attachments._item_type(bad)
-    assert [attachments._item_type(kind) for kind in ("ticket", "task", "project")] == ["Ticket", "Task", "Project"]
+    assert [attachments._item_type(kind) for kind in ("ticket", "task", "project", "document")] == [
+        "Ticket", "Task", "Project", "Document",
+    ]
     for bad in (None, 5, b"a.txt", ["a.txt"]):
         with pytest.raises(ValueError, match="filename"):
             attachments._filename(bad)
@@ -553,6 +567,94 @@ async def test_a_ticket_upload_is_never_refused_for_a_missing_toolset_list(clien
 
 
 # --------------------------------------------------------------------------
+# a document upload needs the documents toolset
+# --------------------------------------------------------------------------
+
+NO_DOCUMENTS = frozenset({"core", "tickets", "projects"})  # upload_attachment is a tickets tool; the documents toolset is off
+DOCUMENT_REFUSAL = (
+    "item_type: a document upload needs the documents toolset, which is not enabled on this server (add it to "
+    "GORELO_TOOLSETS). Without it the file could not be attached to the document (update_document is a documents tool) "
+    "and an uploaded file cannot be deleted through the API, so nothing was uploaded. Tell the user."
+)
+
+
+async def test_a_document_upload_is_refused_locally_when_the_documents_toolset_is_off(server_factory, mock_gorelo):
+    server = server_factory(toolsets=NO_DOCUMENTS)
+    text = await refused(server, mock_gorelo, text_upload(item_type="document"), "item_type", "GORELO_TOOLSETS")
+    assert text == DOCUMENT_REFUSAL
+
+
+async def test_the_toolset_refusal_for_a_document_comes_before_the_file_is_looked_at(server_factory, mock_gorelo):
+    server = server_factory(toolsets=NO_DOCUMENTS)
+    arguments = {"item_type": "document", "item_id": ITEM, "filename": "a.bin", "content_base64": "not base64!"}
+    text = await refused(server, mock_gorelo, arguments, "GORELO_TOOLSETS")
+    assert "content_base64" not in text
+
+
+@pytest.mark.parametrize("toolsets", [frozenset({"tickets", "documents"}), frozenset({"documents"} | NO_DOCUMENTS)])
+async def test_a_document_upload_goes_through_when_the_documents_toolset_is_on(server_factory, mock_gorelo, toolsets):
+    mock_gorelo.on("POST", UPLOAD, envelope(stored()))
+    result = await call_tool(server_factory(toolsets=toolsets), "upload_attachment", text_upload(item_type="document"))
+    request = mock_gorelo.last
+    assert request.form == {"itemType": "Document", "itemId": ITEM} and request.files == {"file": ("notes.txt", b"hello", "text/plain")}
+    assert result == {"name": "notes.txt", "url": URL, "note": DOCUMENT_NOTE}
+    assert len(mock_gorelo.requests) == 1
+
+
+@pytest.mark.parametrize("kind", ["ticket", "task", "project"])
+async def test_the_other_item_types_do_not_need_the_documents_toolset(server_factory, mock_gorelo, kind):
+    mock_gorelo.on("POST", UPLOAD, envelope(stored()))
+    server = server_factory(toolsets=frozenset({"tickets", "projects"}))
+    await call_tool(server, "upload_attachment", text_upload(item_type=kind))
+    assert mock_gorelo.last.form["itemType"] == kind.capitalize()
+
+
+async def test_the_documents_toolset_does_not_open_task_or_project_uploads(server_factory, mock_gorelo):
+    server = server_factory(toolsets=frozenset({"tickets", "documents"}))
+    for kind in ("task", "project"):
+        await refused(server, mock_gorelo, text_upload(item_type=kind), "item_type", "projects toolset")
+
+
+@pytest.mark.parametrize("lifespan", [{}, {"toolsets": None}, {"toolsets": []}, {"toolsets": ["tickets", "projects"]}])
+async def test_a_ctx_that_does_not_list_documents_is_treated_as_not_enabled(client_factory, mock_gorelo, lifespan):
+    async with client_factory() as client:
+        with pytest.raises(ToolError, match="documents toolset"):
+            await attachments.upload_attachment(make_ctx(client, **lifespan), **text_upload(item_type="document"))
+    assert mock_gorelo.requests == []
+
+
+async def test_the_toolset_check_for_a_document_ignores_case(client_factory, mock_gorelo):
+    mock_gorelo.on("POST", UPLOAD, envelope(stored()))
+    async with client_factory() as client:
+        for toolsets in (["documents"], ["tickets", "Documents"], ("core", "DOCUMENTS")):
+            result = await attachments.upload_attachment(make_ctx(client, toolsets=toolsets), **text_upload(item_type="document"))
+            assert result["note"] == DOCUMENT_NOTE
+    assert len(mock_gorelo.requests) == 3
+
+
+async def test_an_unknown_document_is_a_gorelo_404_that_names_item_id(server, mock_gorelo):
+    mock_gorelo.on("POST", UPLOAD, error_envelope(404, [("070401", "Document not found.", "itemId")]))
+    text = await call_tool_error(server, "upload_attachment", text_upload(item_type="document"))
+    assert text == f"Gorelo rejected upload_attachment (HTTP 404, code 070401): item_id: Document not found. [trace {TEST_TRACE_ID}]"
+
+
+async def test_the_result_feeds_straight_into_update_document(server_factory, mock_gorelo):
+    server = server_factory(toolsets=frozenset({"tickets", "documents"}))
+    doc_path = f"/v1/documents/{ITEM}"
+    current = {"Id": ITEM, "Title": "T", "Body": "<p>b</p>", "Attachments": []}
+    mock_gorelo.on("POST", UPLOAD, envelope(stored()))
+    mock_gorelo.on("GET", doc_path, envelope(current))
+    mock_gorelo.on("PATCH", doc_path, envelope({**current, "Attachments": [stored()]}))
+    uploaded = await call_tool(server, "upload_attachment", text_upload(item_type="document"))
+    document = await call_tool(
+        server, "update_document", {"document_id": ITEM, "attachments": [{"name": uploaded["name"], "url": uploaded["url"]}]}
+    )
+    assert [r.method for r in mock_gorelo.requests] == ["POST", "GET", "PATCH"]
+    assert mock_gorelo.requests[2].json == {"Attachments": [{"Name": "notes.txt", "Url": URL}]}
+    assert document["Attachments"] == [stored()]
+
+
+# --------------------------------------------------------------------------
 # The size cap
 # --------------------------------------------------------------------------
 
@@ -587,6 +689,23 @@ async def test_text_over_ten_megabytes_is_refused_locally(server, mock_gorelo):
         server, mock_gorelo, text_upload(content_text="\u20ac" * (4 * MIB)),
         "content_text: the decoded file (12582912 bytes) is larger than the 10 MB (10485760 bytes) this tool accepts",
     )
+
+
+async def test_a_document_upload_has_the_same_ten_megabyte_cap(server, mock_gorelo):
+    # Gorelo accepts 25 MB for a document and 44 MB otherwise; the local cap is below both, so it is the only check
+    raw = b"\x00" * (10 * MIB + 1)
+    await refused(
+        server, mock_gorelo,
+        {"item_type": "document", "item_id": ITEM, "filename": "big.bin", "content_base64": base64.b64encode(raw).decode("ascii")},
+        "content_base64: the decoded file (10485761 bytes) is larger than the 10 MB (10485760 bytes) this tool accepts",
+    )
+
+
+def test_the_local_cap_is_below_both_limits_gorelo_publishes():
+    spec = json.loads((Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json").read_text(encoding="utf-8"))
+    text = " ".join(spec["paths"]["/v1/attachments"]["post"]["description"].split())
+    assert "The largest accepted upload is 44 MB, and 25 MB for a document." in text
+    assert attachments.MAX_UPLOAD_BYTES <= 25 * MIB < 44 * MIB
 
 
 def test_exactly_ten_megabytes_is_accepted_and_one_more_byte_is_not():

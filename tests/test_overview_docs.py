@@ -63,7 +63,9 @@ from settings import (
     DEFAULT_TOOLSETS,
     ENV_API_KEY,
     ENV_AUTH_PASSWORD,
+    ENV_BASE_URL,
     ENV_DESTRUCTIVE,
+    ENV_EXTRA_REDIRECT_DOMAINS,
     ENV_PUBLIC_BASE_URL,
     ENV_TOOLSETS,
     TOOLSETS,
@@ -96,8 +98,8 @@ SECTIONS = (
 RUNTIME_ONLY = (".env", ".oauth-state", ".state", ".live-runs", ".venv")
 
 # The only hostnames the document may spell out: the Gorelo API host, the AI client's own and the reserved test domain.
-ALLOWED_HOSTS = frozenset({"api.usw.gorelo.io", "claude.ai", "claude.com", "example.invalid",
-                           "site.local"})  # the start of the file name site.local.toml, not a host
+ALLOWED_HOSTS = frozenset({"api.usw.gorelo.io", "api.aue.gorelo.io", "gorelo.io", "claude.ai", "claude.com", "example.invalid",
+                           "site.local"})  # the start of the file name site.local.toml, not a host; gorelo.io is the domain GORELO_BASE_URL must be under
 HOST_TLDS = "com|io|tech|net|org|dev|ai|app|invalid|local|cloud|co|me|xyz"
 
 HOST_PATH_PREFIXES = ("/opt/", "/etc/", "/root/", "/home/", "/var/", "/usr/", "/tmp/")
@@ -159,6 +161,24 @@ def section(title: str) -> str:
     start = text.index(marker) + 1
     end = text.find("\n## ", start + 1)
     return text[start : end if end != -1 else len(text)]
+
+
+def document_text(name: str) -> str:
+    """The text of a public document, named from the repository root (README.md, docs/INSTALL.md)."""
+    assert (REPO_ROOT / name).is_file(), f"{name} does not exist"
+    return (REPO_ROOT / name).read_text(encoding="utf-8")
+
+
+def doc_section(name: str, heading: str) -> str:
+    """The text under the markdown heading line `heading` (hashes included, such as "### 8.2 The destructive switch") of the
+    document `name`, up to the next heading of the same or a higher level."""
+    text = document_text(name)
+    marker = f"\n{heading}\n"
+    assert marker in text, f"{name} has no heading {heading!r}"
+    start = text.index(marker) + 1
+    level = len(heading) - len(heading.lstrip("#"))
+    following = re.compile(rf"^#{{1,{level}}} ", re.MULTILINE).search(text, start + len(heading))
+    return text[start : following.start() if following else len(text)]
 
 
 def unquote(cell: str) -> str:
@@ -788,7 +808,7 @@ def test_the_spec_index_header_agrees_with_its_operations():
 
 def test_the_environment_variables_it_describes_are_all_the_ones_settings_reads():
     spans = set(code_spans(section("6. Operations")))
-    for name in (ENV_API_KEY, ENV_PUBLIC_BASE_URL, ENV_AUTH_PASSWORD, ENV_TOOLSETS, ENV_DESTRUCTIVE):
+    for name in (ENV_API_KEY, ENV_PUBLIC_BASE_URL, ENV_AUTH_PASSWORD, ENV_TOOLSETS, ENV_DESTRUCTIVE, ENV_BASE_URL, ENV_EXTRA_REDIRECT_DOMAINS):
         assert name in spans, f"{name} is not described in section 6 of docs/OVERVIEW.md"
 
 
@@ -812,6 +832,133 @@ def test_the_approved_invoice_run_allowlist_it_names_is_the_codes():
     for name in sorted(APPROVED_INVOICE_TOOLS):
         assert f"`{name}`" in text, f"{name} is in APPROVED_INVOICE_TOOLS but not named in docs/OVERVIEW.md"
     assert "`APPROVED_INVOICE_TOOLS`" in text
+
+
+def test_the_terms_table_lists_every_toolset_in_the_order_of_the_code():
+    row = next((cells for cells in table_rows(section("1. What it is and the request path")) if cells[0] == "Toolset"), None)
+    assert row is not None, "the Terms table has no Toolset row"
+    listed = re.findall(r"`([a-z]+)`", row[1].split("(`settings.TOOLSETS`)")[0])
+    assert listed == list(TOOLSETS)
+
+
+def test_the_region_and_redirect_settings_it_describes_are_what_settings_parses():
+    """GORELO_BASE_URL and MCP_EXTRA_REDIRECT_DOMAINS (release 1.3.0): the document says what each accepts and what the default is."""
+    from settings import Settings, SettingsError
+
+    text = squash(section("6. Operations"))
+    base = {ENV_API_KEY: "k", ENV_PUBLIC_BASE_URL: "https://mcp.example.invalid", ENV_AUTH_PASSWORD: "p"}
+    assert Settings.from_env(base).api_host == "api.usw.gorelo.io"  # unset: the US host that the document names as the default
+    assert f"`{DEFAULT_BASE_URL}`" in text or DEFAULT_BASE_URL in text
+    australia = Settings.from_env({**base, ENV_BASE_URL: "https://api.aue.gorelo.io"})
+    assert australia.api_host == "api.aue.gorelo.io" and australia.base_url == "https://api.aue.gorelo.io/v1"
+    assert "https://api.aue.gorelo.io" in text and "`/v1` and a trailing slash are optional" in text
+    for bad in ("http://api.aue.gorelo.io", "https://api.example.invalid", "https://user@api.aue.gorelo.io", "https://api.aue.gorelo.io:8443"):
+        with pytest.raises(SettingsError):  # "must be https, on gorelo.io or a subdomain of it, with no user name, port, query or fragment"
+            Settings.from_env({**base, ENV_BASE_URL: bad})
+    assert "must be https, on `gorelo.io` or a subdomain of it, with no user name, port, query or fragment" in text
+    extra = Settings.from_env({**base, ENV_EXTRA_REDIRECT_DOMAINS: "chatgpt.com, Global.Consent.Azure-APIM.net"})
+    assert list(extra.redirect_domains[:3]) == ["claude.ai", "claude.com", "localhost"]  # added AFTER the built-in ones
+    assert list(extra.redirect_domains[3:]) == ["chatgpt.com", "global.consent.azure-apim.net"]
+    assert "added after `claude.ai`, `claude.com` and `localhost`" in text and "also admits its subdomains" in text
+    for bad in ("https://chatgpt.com", "chatgpt.com/path", "chatgpt.com:443", "*.chatgpt.com", "localhost", "203.0.113.7", "chatgpt"):
+        with pytest.raises(SettingsError):
+            Settings.from_env({**base, ENV_EXTRA_REDIRECT_DOMAINS: bad})
+    assert "bare DNS name with a dot (no scheme, path, port, wildcard, IP address or `localhost`)" in text
+
+
+def test_the_start_lines_it_names_are_logged_by_main_and_the_gated_check_is_the_servers():
+    source = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+    assert "gorelo-mcp settings: api_host=%s extra_redirect_domains=%s" in source
+    assert "gorelo-mcp gated tools: %s" in source
+    assert "resolve_gated_tools" in source and hasattr(server_module, "resolve_gated_tools")
+    text = squash(overview())
+    assert "`gorelo-mcp settings: api_host=<host> extra_redirect_domains=<list or none>`" in text
+    assert "`gorelo-mcp gated tools: <sorted names or none>`" in text
+    assert "`resolve_gated_tools`" in text and "`gated_tools`" in text
+
+
+def test_sharing_a_document_is_exposure_and_the_code_keeps_it_apart_from_the_tools_that_write_documents():
+    """The safety row 'Sharing is exposure' and the documents module row say: share_document is the only tool that can turn sharing on
+    and is gated, unshare_document only turns it off, and update_document has no sharing parameter. Checked against the registry."""
+    specs = {spec.name: spec for spec in REGISTRY.specs}
+    patch = "PATCH /v1/documents/{documentId}"
+    assert specs["share_document"].kind == "destructive" and specs["unshare_document"].kind == "write"
+    assert specs["remove_document_related_item"].kind == "destructive"
+    assert {name for name, spec in specs.items() if spec.kind == "destructive" and patch in spec.ops} == {"share_document"}
+    assert all(spec.toolset == "documents" for name, spec in specs.items() if "document" in name and name != "upload_attachment")
+    for name in ("update_document", "create_document", "duplicate_document", "move_document", "archive_document", "restore_document"):
+        parameters = inspect.signature(specs[name].fn).parameters
+        assert not [p for p in parameters if "public" in p or "portal" in p or "share" in p], (name, sorted(parameters))
+    assert "documents" not in DEFAULT_TOOLSETS and TOOLSETS[-1] == "documents"
+    text = squash(overview())
+    assert "| Sharing is exposure |" in text
+    for sentence in (
+        "`share_document` is the only tool that can send a true sharing flag, `unshare_document` sends only false",
+        "`update_document` has no sharing parameter",
+        "`update_document` reads the document first and never drops a current attachment unless the caller names it in "
+        "`remove_attachment_names` or empties the list through `clear_fields`",
+    ):
+        assert sentence in text, sentence
+    document_pdf = specs["export_document_pdf"]
+    assert document_pdf.kind == "read" and "GET /v1/documents/{documentId}/pdf" in document_pdf.ops
+    assert "the document PDF export through a 10 MB cap" in text
+
+
+def test_the_public_toolset_tables_list_every_toolset_with_the_right_default():
+    """The README and the install guide each have a table of toolsets (name, in the default set, what it covers): the rows are the
+    toolsets of the code and the defaults are the code's, so a toolset added to settings.TOOLSETS cannot be left out."""
+    for name in ("README.md", "docs/INSTALL.md"):
+        text = (REPO_ROOT / name).read_text(encoding="utf-8")
+        rows = {m.group(1): m.group(2) for m in re.finditer(r"^\| `([a-z]+)` \| (yes|no) \|", text, re.M)}
+        assert rows == {toolset: "yes" if toolset in DEFAULT_TOOLSETS else "no" for toolset in TOOLSETS}, name
+
+
+def test_the_public_documents_name_every_optional_setting_and_the_example_file_has_a_line_for_each():
+    example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    for name in (ENV_TOOLSETS, ENV_DESTRUCTIVE, ENV_BASE_URL, ENV_EXTRA_REDIRECT_DOMAINS):
+        assert f"{name}=" in example, name
+        for document in ("README.md", "docs/INSTALL.md"):
+            assert f"`{name}`" in (REPO_ROOT / document).read_text(encoding="utf-8"), (document, name)
+
+
+# --------------------------------------------------------------------------
+# README and install guide: disclaimer, sign-in, the switch, rollback
+# --------------------------------------------------------------------------
+
+
+def test_the_readme_has_the_use_at_your_own_risk_section_and_the_as_is_disclaimer():
+    assert "## Use at your own risk" in document_text("README.md").splitlines()
+    assert '"as is"' in squash(doc_section("README.md", "## Use at your own risk"))
+
+
+def test_the_connect_guides_name_the_sign_in_hosts_of_chatgpt_and_copilot_studio():
+    assert "chatgpt.com" in doc_section("docs/INSTALL.md", "### 6.1 Connect from ChatGPT (optional)")
+    assert "global.consent.azure-apim.net" in doc_section(
+        "docs/INSTALL.md", "### 6.2 Connect from Microsoft Copilot Studio (optional)"
+    )
+
+
+def test_the_destructive_switch_section_says_how_to_switch_the_gated_tools_off_and_what_health_check_lists():
+    text = squash(doc_section("docs/INSTALL.md", "### 8.2 The destructive switch"))
+    assert "blank (or `0`)" in text
+    assert "gated_tools" in text
+
+
+def test_the_rollback_section_says_to_blank_the_destructive_switch_before_the_first_command_and_never_offers_one():
+    section_text = doc_section("docs/INSTALL.md", "### 9.2 Roll back")
+    warning = squash(section_text.split("```", 1)[0])  # the text before the first command block
+    assert "Before you roll back to a version older than 1.3.0" in warning
+    assert "make `GORELO_ENABLE_DESTRUCTIVE` blank" in warning
+    assert "Do not use `1` instead" in warning
+    text = squash(section_text)
+    assert text.count("`1`") == 1 and "=1" not in text  # 1 is named once, to refuse it
+
+
+def test_removing_a_domain_stops_new_sign_ins_in_the_readme_and_the_install_guide():
+    assert "Removing a domain later stops new sign-ins from that client only" in squash(document_text("README.md"))
+    assert "stops new sign-ins from that kind of client only" in squash(
+        doc_section("docs/INSTALL.md", "### 6.3 One password and one key for every client")
+    )
 
 
 # --------------------------------------------------------------------------

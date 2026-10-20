@@ -1,5 +1,9 @@
 """tools/contracts.py: list_contracts and get_contract (read only). Offline: MockGorelo plus an in-process client."""
 
+import json
+import re
+from pathlib import Path
+
 import pytest
 from conftest import (
     TEST_TRACE_ID,
@@ -8,9 +12,11 @@ from conftest import (
     envelope,
     error_envelope,
     list_tools,
+    make_ctx,
     paged_envelope,
     paged_responder,
 )
+from fastmcp.exceptions import ToolError
 
 import tools  # noqa: F401  (importing the package registers every tool)
 from gorelo_client import FORBIDDEN_OPS
@@ -21,6 +27,8 @@ pytestmark = pytest.mark.anyio
 
 EM_DASH, EN_DASH = chr(0x2014), chr(0x2013)
 DESCRIPTION_MAX, PARAM_DESCRIPTION_MAX = 900, 220  # CONTRIBUTING.md: never more than these
+LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
+needs_spec_text = pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
 
 EXPECTED_TOOLS = {
     "list_contracts": ["GET /v1/contracts"],
@@ -121,6 +129,24 @@ def module_specs():
     return {spec.name: spec for spec in REGISTRY.specs if spec.fn.__module__ == "tools.contracts"}
 
 
+def operation(method, path):
+    return json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["paths"][path][method]
+
+
+def param_text(method, path, name):
+    return " ".join(next(p["description"] for p in operation(method, path)["parameters"] if p["name"] == name).split())
+
+
+def scale_of(text):  # {id: label} from "1 Active, 2 Expired, 3 Archived"
+    return {int(n): label for n, label in re.findall(r"(\d+) ([A-Z][a-z]+)", text)}
+
+
+async def call_directly(client_factory, tool, **kwargs):
+    """Call the decorated function itself (no pydantic in front of it): for the checks the schema normally pre-empts."""
+    async with client_factory() as client:
+        return await tool(make_ctx(client), **kwargs)
+
+
 # --------------------------------------------------------------------------
 # Declarations
 # --------------------------------------------------------------------------
@@ -183,10 +209,14 @@ async def test_schemas_annotations_and_descriptions(server_factory):
     listing = " ".join(listed["list_contracts"].description.split())
     assert "A service line's Id is the service_line_id of create_time_entry and update_time_entry" in listing
     assert "Paging: pass next_cursor back as cursor with the SAME filters until has_more is false." in listing
-    assert "Expired and archived contracts are listed too: keep Status Active for live ones" in listing
+    assert "Without status_ids, Active and Expired contracts are listed and Archived ones are left out" in listing
+    assert "status_ids=[1] for live contracts only" in listing
     assert "get_contract has the line items and labor detail" in listing
     properties = listed["list_contracts"].inputSchema["properties"]
     assert "list_clients" in properties["client_ids"]["description"]  # the tool that resolves the ids
+    assert properties["status_ids"]["description"] == contracts.CONTRACT_STATUSES
+    assert "1 Active, 2 Expired, 3 Archived" in properties["status_ids"]["description"]
+    assert properties["status_ids"]["type"] == "array"
     assert properties["page_size"]["default"] == 50
     one = " ".join(listed["get_contract"].description.split())
     for fragment in (
@@ -208,10 +238,12 @@ async def test_schemas_annotations_and_descriptions(server_factory):
 
 async def test_list_contracts_sends_the_client_filter_and_the_paging_names(server, mock_gorelo, spec_index):
     mock_gorelo.on("GET", "/v1/contracts", paged_envelope([contract(9), contract(10, 9102)], next_cursor="c2", total_count=11))
-    result = await call_tool(server, "list_contracts", {"client_ids": [9101, 9102], "page_size": 2, "cursor": "abc"})
+    result = await call_tool(
+        server, "list_contracts", {"client_ids": [9101, 9102], "status_ids": [1, 2], "page_size": 2, "cursor": "abc"}
+    )
     request = mock_gorelo.last
     assert (request.method, request.path, request.json) == ("GET", "/v1/contracts", None)
-    assert request.query == {"ClientIds": "9101,9102", "PageSize": "2", "Cursor": "abc"}
+    assert request.query == {"ClientIds": "9101,9102", "StatusIds": "1,2", "PageSize": "2", "Cursor": "abc"}
     assert set(request.query) == set(spec_index.op("GET /v1/contracts").query_params)
     assert result == {
         "items": [contract(9), contract(10, 9102)],
@@ -220,7 +252,7 @@ async def test_list_contracts_sends_the_client_filter_and_the_paging_names(serve
         "has_more": True,
         "next_cursor": "c2",
         "page_size": 2,
-        "filters": {"client_ids": [9101, 9102]},
+        "filters": {"client_ids": [9101, 9102], "status_ids": [1, 2]},
     }
     assert len(mock_gorelo.requests) == 1
 
@@ -264,7 +296,8 @@ async def test_a_client_without_contracts_is_an_explicit_empty_page(server, mock
 
 
 @pytest.mark.parametrize(
-    "property_name, param", [("ClientIds", "client_ids"), ("PageSize", "page_size"), ("Cursor", "cursor")]
+    "property_name, param",
+    [("ClientIds", "client_ids"), ("StatusIds", "status_ids"), ("PageSize", "page_size"), ("Cursor", "cursor")],
 )
 async def test_list_contracts_maps_a_gorelo_400_to_the_snake_case_parameter(server, mock_gorelo, property_name, param):
     mock_gorelo.on("GET", "/v1/contracts", error_envelope(400, [("070101", "Not valid.", property_name)]))
@@ -280,6 +313,11 @@ async def test_list_contracts_maps_a_gorelo_400_to_the_snake_case_parameter(serv
         ({"client_ids": [5, -1]}, "client_ids[1]: expected a positive whole number"),
         ({"client_ids": [MAX_ID + 1]}, "client_ids[0]: expected a positive whole number such as 123, got a number above"),
         ({"client_ids": ["abc"]}, "client_ids"),
+        ({"status_ids": []}, "status_ids: expected at least one id, got an empty list"),
+        ({"status_ids": [0]}, "status_ids[0]: expected 1 Active, 2 Expired, 3 Archived, got 0"),
+        ({"status_ids": [1, 4]}, "status_ids[1]: expected 1 Active, 2 Expired, 3 Archived, got 4"),
+        ({"status_ids": [-2]}, "status_ids[0]: expected 1 Active, 2 Expired, 3 Archived, got -2"),
+        ({"status_ids": [MAX_ID + 1]}, "status_ids[0]: expected a positive whole number such as 123, got a number above"),
         ({"cursor": ""}, "cursor: must not be empty or whitespace only"),
         ({"cursor": "  "}, "cursor: must not be empty or whitespace only"),
         ({"page_size": "lots"}, "page_size"),
@@ -304,6 +342,107 @@ async def test_list_contracts_reports_a_server_error(server, mock_gorelo):
     mock_gorelo.on("GET", "/v1/contracts", error_envelope(500, [("070001", "Internal error.")]))
     text = await call_tool_error(server, "list_contracts")
     assert text == rejected("list_contracts", 500, "070001", "Internal error.")
+
+
+@pytest.mark.parametrize("ids", [[1], [3], [1, 3], [1, 2, 3], [2, 2]])
+async def test_list_contracts_sends_status_ids_as_a_comma_list_and_echoes_them(server, mock_gorelo, ids):
+    mock_gorelo.on("GET", "/v1/contracts", paged_envelope([contract(9)]))
+    result = await call_tool(server, "list_contracts", {"status_ids": ids})
+    request = mock_gorelo.last
+    assert (request.method, request.path, request.json) == ("GET", "/v1/contracts", None)
+    assert request.query == {"StatusIds": ",".join(map(str, ids)), "PageSize": "50"}
+    assert result["filters"] == {"status_ids": ids}
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_list_contracts_pages_with_the_same_status_filter(server, mock_gorelo):
+    mock_gorelo.on("GET", "/v1/contracts", paged_responder([[contract(1)], [contract(2)]], total_count=2))
+    first = await call_tool(server, "list_contracts", {"status_ids": [1], "page_size": 1})
+    assert first["has_more"] is True and first["next_cursor"] == "c1" and first["filters"] == {"status_ids": [1]}
+    second = await call_tool(server, "list_contracts", {"status_ids": [1], "page_size": 1, "cursor": "c1"})
+    assert second["has_more"] is False and second["items"] == [contract(2)] and second["filters"] == {"status_ids": [1]}
+    assert mock_gorelo.requests[1].query == {"StatusIds": "1", "PageSize": "1", "Cursor": "c1"}
+
+
+@pytest.mark.parametrize("bad", [True, False, "5", 5.0, "abc"])
+async def test_status_ids_refuse_json_true_text_and_floats(server, mock_gorelo, bad):
+    text = await call_tool_error(server, "list_contracts", {"status_ids": [bad]})
+    assert "status_ids" in text and "valid integer" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_status_ids_that_are_not_a_list_are_refused(server, mock_gorelo):
+    text = await call_tool_error(server, "list_contracts", {"status_ids": 1})
+    assert "status_ids" in text and "valid list" in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("ids", [[1], [2], [3], [1, 2, 3]])
+async def test_every_status_of_the_contract_scale_is_accepted_directly_and_through_the_schema(
+    server, client_factory, mock_gorelo, ids
+):
+    mock_gorelo.on("GET", "/v1/contracts", paged_envelope([]))
+    await call_tool(server, "list_contracts", {"status_ids": ids})
+    await call_directly(client_factory, contracts.list_contracts, status_ids=ids)
+    assert [request.query["StatusIds"] for request in mock_gorelo.requests] == [",".join(map(str, ids))] * 2
+
+
+@pytest.mark.parametrize(
+    "bad, kind",
+    [(True, "a boolean"), (5.0, "a decimal number"), ("5", "a string"), (None, "null"), ([5], "a list of 1 item")],
+)
+async def test_calling_list_contracts_directly_keeps_the_id_messages_for_what_is_not_a_whole_number(
+    client_factory, mock_gorelo, bad, kind
+):
+    with pytest.raises(ToolError) as info:
+        await call_directly(client_factory, contracts.list_contracts, status_ids=[bad])
+    assert str(info.value) == f"status_ids[0]: expected a positive whole number such as 123, got {kind}"
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("bad", [0, -1, 4, MAX_ID, -MAX_ID])
+async def test_calling_list_contracts_directly_answers_a_number_outside_the_scale_with_the_scale(
+    client_factory, mock_gorelo, bad
+):
+    with pytest.raises(ToolError) as info:
+        await call_directly(client_factory, contracts.list_contracts, status_ids=[1, bad])
+    assert str(info.value) == f"status_ids[1]: expected 1 Active, 2 Expired, 3 Archived, got {bad}"
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    "bad, what",
+    [
+        (MAX_ID + 1, "got a number above 9223372036854775807, the largest Gorelo id"),
+        (-MAX_ID - 1, "got zero or a negative number"),
+    ],
+)
+async def test_calling_list_contracts_directly_keeps_the_id_message_beyond_int64_and_below_one(
+    client_factory, mock_gorelo, bad, what
+):
+    with pytest.raises(ToolError) as info:
+        await call_directly(client_factory, contracts.list_contracts, status_ids=[1, bad])
+    assert str(info.value) == f"status_ids[1]: expected a positive whole number such as 123, {what}"
+    assert mock_gorelo.requests == []
+
+
+@needs_spec_text
+def test_the_contract_status_scale_is_the_one_the_spec_text_documents():
+    text = param_text("get", "/v1/contracts", "StatusIds")
+    assert scale_of(text) == contracts.CONTRACT_STATUS_LABELS == {1: "Active", 2: "Expired", 3: "Archived"}
+    assert "Omitted returns Active and Expired (archived excluded)" in text
+    assert "Any other id is a 400" in text
+    op = " ".join(operation("get", "/v1/contracts")["description"].split())
+    assert "Archived contracts are left out unless `statusIds` names Archived" in op
+    assert "a caller that wants only live contracts passes `statusIds=1`" in op
+    assert "Omitted: Active and Expired (archived left out)" in contracts.CONTRACT_STATUSES
+
+
+def test_the_module_text_is_plain_ascii_without_dashes():
+    for path in (Path(__file__).resolve().parent.parent / "tools" / "contracts.py", Path(__file__)):
+        source = path.read_text(encoding="utf-8")
+        assert source.isascii(), path.name
+        assert EM_DASH not in source and EN_DASH not in source, path.name
 
 
 # --------------------------------------------------------------------------

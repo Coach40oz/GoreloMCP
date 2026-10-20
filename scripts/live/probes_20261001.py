@@ -1,11 +1,16 @@
 """Contract probes (2026-10-01).
 
+Historical record: this script does not run any more. Its entry point prints why and exits 2 before any request or file read,
+so the rest of the file is kept as the record of what the probes did.
+
 Settles what the OpenAPI spec does not say. Writes ONLY to the test client (site.local.toml) and only to
 records this script creates (plus a reversible AlternateName edit on the test client itself). Every
-created record is named MCPTEST-<run> and cleaned up in `finally`. Prints structure and Gorelo
-messages only, never customer data. Before the first write it reads the test client and the second client and
+created record is named MCPTEST-<run> and cleaned up in `finally`. It printed its results as JSON: the ids and names
+of users, groups, statuses and types it read, and Gorelo's messages. It also printed the run id, the ids and names of
+sources and priorities, the fields Gorelo answered for the test records it wrote, and the status codes, flags and counts
+of each call. Before the first write it reads the test client and the second client and
 stops with exit 2 unless each is named exactly as the site config says. A missing or incomplete site config also
-exits 2, with the reason on stderr. Usage:
+exits 2, with the reason on stderr. Usage as run on 2026-10-01 (it no longer runs):
 
     UV_PYTHON=/usr/bin/python3.13 /root/.local/bin/uv run --frozen -q python scripts/live/probes_20261001.py
 """
@@ -213,4 +218,10 @@ def start() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(start())
+    # the entry point refuses; importing this module sends no request and reads no file, and start() is kept as the record
+    print(
+        "probes_20261001.py is a historical record of the 2026-10-01 probes and does not run any more; "
+        "use scripts/live/smoke.py or scripts/live/write_matrix.py",
+        file=sys.stderr,
+    )
+    sys.exit(2)

@@ -17,7 +17,8 @@ came back empty is skipped, and the row says which list. export_invoice_pdf (a w
 event) and every other non-read tool are never called: the plan is checked against the registry first, and
 a read tool the plan does not know is reported as FAILED so a new tool cannot go untested unnoticed.
 
-What it checks (shapes only, never values):
+What it checks (shapes and counts, and a single record's Id against the one asked for; its notes hold counts, ids and status
+names, never the text of a record):
 
     paged list     items is a list, count == len(items), total_count is an int, has_more is a bool, a next
                    cursor when there are more pages, and on a single page count == total_count
@@ -25,22 +26,38 @@ What it checks (shapes only, never values):
     auto-paged     list_org_users and search_tickets: items, count, truncated and complete_scan flags
     single record  a dict with an Id (the one that was asked for)
     custom fields  (contract 1b1c0cec0e9a) get_client of the first listed client AND of the test client, and get_agent, must
-                   carry CustomProperties: a list whose entries have Id, Name, Type {Id, Name}, Value (text or null) and
-                   IsSet (a boolean); a wrong shape is API drift and FAILS the row. The note holds counts only (how many fields,
-                   how many set, and for the test client how many unset text fields: the custom_properties write area runs only
-                   while none is set and needs one unset text field). A list_clients or list_agents ROW that carries CustomProperties is only a note (the spec leaves
-                   them out of the list rows), never a failure
+                   carry CustomProperties: a list whose entries have Id, Name, Type {Id, Name}, Value (text or null), IsSet (a
+                   boolean) and, when present, IsHidden (a boolean; contract a7954b24844b: the Value of a hidden field is always
+                   null); a wrong shape is API drift and FAILS the row. The note holds counts only (how many fields, how many
+                   set, how many hidden when any is, and for the test client how many unset VISIBLE text fields: the
+                   custom_properties write area runs only while none is set and needs one unset text field it can read back; a
+                   hidden field shows no Value, so it is not counted). A list_clients or list_agents ROW that carries
+                   CustomProperties is only a note (the spec leaves them out of the list rows), never a failure
+    documents      (contract a7954b24844b, scope Documents; a 403 with code 080203 is "scope missing") list_documents (page of 20),
+                   then for the first listed document get_document (the shape of the record: Status, Attachments, Children and
+                   RelatedItems lists; the note holds the status id and counts), export_document_pdf (a file: the embedded PDF must start with
+                   %PDF; the note holds its size), list_document_versions and get_document_version of the first (newest)
+                   version (its key is VersionId, not Id) and list_document_related_items. A document list that came back empty
+                   skips the single-record rows, like the other lists. Nothing is ever written
+    others         get_custom_asset (the first listed custom asset) and list_deletions (types 1 Client and 2 Contact only: a key
+                   without the scope of a type gets a 403 for the whole call)
+    test client    its status has a row of its own: the check of the site clients that runs first reads each configured client
+                   (GET /clients/{id}), and the smoke prints a row "test client status": OK when the test client is Active
+                   (status 1), otherwise NOT READY, which does not fail the run (the smoke only reads) but says that the write
+                   matrix will refuse to start until the operator makes the test client Active again in the Gorelo app
 
-Outcomes per row: ok, scope missing (a 403 with Notification code 080203 from a Projects or Forms tool: the API key
-simply does not have that scope yet), skipped, FAILED. Each row is printed as soon as its call is done. The notes hold
-counts (for a FAILED row Gorelo's own error message), never record contents and never the API key. The exit status is
-0 when nothing FAILED and the guard refused nothing, 1 otherwise, 2 for a setup error, 130 when interrupted.
+Outcomes per row: ok, scope missing (a 403 with Notification code 080203 from a Projects, Forms or Documents tool: the API key
+simply does not have that scope yet), skipped, FAILED; the "test client status" row is ok or NOT READY. Each row is printed as
+soon as its call is done. The notes hold counts, ids and status names (for a FAILED row Gorelo's own error message), never the
+text of a record and never the API key. The exit status is 0 when nothing FAILED and the guard refused nothing, 1 otherwise, 2
+for a setup error, 130 when interrupted.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import dataclasses
 import logging
@@ -64,9 +81,11 @@ from tools._common import REGISTRY
 PACE_SECONDS = 1.0
 LOG_NAMES = ("fastmcp", "mcp", "httpx", "httpcore", "gorelo_client")
 # A scope 403 from these toolsets is "scope missing" (the API key lacks the scope), not a failure.
-SCOPE_TOOLSETS = ("projects", "forms")
+SCOPE_TOOLSETS = ("projects", "forms", "documents")
 
 OK, SCOPE_MISSING, SKIPPED, FAILED = "ok", "scope missing", "skipped", "FAILED"
+NOT_READY = "NOT READY"  # the row "test client status" when the test client is not Active: the matrix will refuse, the smoke still reads
+TEST_CLIENT_ROW = "test client status"
 
 _STATUS = re.compile(r"\(HTTP (\d{3})")
 _SCOPE = re.compile(r"the API key does not have the '([^']+)' scope")
@@ -206,7 +225,7 @@ async def open_session(
     settings: Settings, *, transport: Any = None, pace: float = PACE_SECONDS
 ) -> AsyncIterator[ToolSession]:
     """An in-process server behind a READ-mode guard and a pacer, and a session that may call read tools only."""
-    guard = LiveGuard("read", None)
+    guard = LiveGuard("read", None, base_url=settings.base_url)  # the host of GORELO_BASE_URL only
     pacer = Pacer(pace)
     safe = dataclasses.replace(settings, destructive=False)  # no delete tool is even registered
     with quiet_logs():
@@ -216,7 +235,7 @@ async def open_session(
 
 
 # --------------------------------------------------------------------------
-# Shape checks (each raises ShapeError naming what is wrong, never a value)
+# Shape checks (each raises ShapeError naming what is wrong: counts, types, names or a health_check text; never a record's value)
 # --------------------------------------------------------------------------
 
 
@@ -297,12 +316,62 @@ def check_search(result: Mapping[str, Any]) -> str:
     return f"{note} matched={matched} scanned={scanned}"
 
 
-def check_record(result: Mapping[str, Any], expected: Any = None) -> str:
-    if "Id" not in result or result["Id"] in (None, ""):
-        raise ShapeError("the record has no Id")
-    if expected is not None and str(result["Id"]).lower() != str(expected).lower():
-        raise ShapeError("the record's Id is not the one that was asked for")
-    return "Id matches" if expected is not None else "Id present"
+def check_record(result: Mapping[str, Any], expected: Any = None, key: str = "Id") -> str:
+    """A single record carries `key` (Id; VersionId for a document version) and, when `expected` is given, it is the one asked for."""
+    if key not in result or result[key] in (None, ""):
+        raise ShapeError(f"the record has no {key}")
+    if expected is not None and str(result[key]).lower() != str(expected).lower():
+        raise ShapeError(f"the record's {key} is not the one that was asked for")
+    return f"{key} matches" if expected is not None else f"{key} present"
+
+
+def _count(record: Mapping[str, Any], key: str) -> int:
+    value = record.get(key)
+    if not isinstance(value, list):
+        raise ShapeError(f"{key} is not a list")
+    return len(value)
+
+
+def document_note(result: Mapping[str, Any]) -> str:
+    """The extra check of get_document (DocumentDetailModel, contract a7954b24844b): Status {Id, Name} with a whole-number Id,
+    Attachments, Children and RelatedItems lists, and the sharing flags booleans. Counts and the status Id, never a title or a body."""
+    status = result.get("Status")
+    if not isinstance(status, dict) or not _is_int(status.get("Id")):
+        raise ShapeError("Status is not an object with a whole-number Id")
+    for flag in ("IsStarred", "PublicLinkEnabled", "PublishToPortalEnabled"):
+        if not isinstance(result.get(flag), bool):
+            raise ShapeError(f"{flag} is not a boolean")
+    return (
+        f"status {status['Id']}, {_count(result, 'Attachments')} attachments, {_count(result, 'Children')} children, "
+        f"{_count(result, 'RelatedItems')} related items"
+    )
+
+
+def _first_version_id(result: Mapping[str, Any]) -> Any:
+    """The VersionId of the first (newest) row of list_document_versions, or None."""
+    items = result.get("items")
+    first = items[0] if isinstance(items, list) and items else None
+    return first.get("VersionId") if isinstance(first, dict) else None
+
+
+def check_file(result: Any) -> str:
+    """The answer of export_document_pdf (a text and an embedded file, not a structured object): the file is application/pdf and its
+    content starts with %PDF. The note holds the size and the MIME type."""
+    for block in getattr(result, "content", None) or []:
+        resource = getattr(block, "resource", None)
+        if getattr(block, "type", None) != "resource" or resource is None:
+            continue
+        mime = getattr(resource, "mimeType", None)
+        if mime != "application/pdf":
+            raise ShapeError(f"the embedded file is of type {mime!r}, expected application/pdf")
+        try:
+            data = base64.b64decode(getattr(resource, "blob", None) or "", validate=True)
+        except (ValueError, TypeError):
+            raise ShapeError("the embedded file is not valid base64") from None
+        if not data.startswith(b"%PDF"):
+            raise ShapeError("the embedded file does not start with %PDF")
+        return f"{len(data)} bytes of application/pdf"
+    raise ShapeError("the answer has no embedded file")
 
 
 def check_health(result: Mapping[str, Any]) -> str:
@@ -329,7 +398,9 @@ def custom_properties_of(record: Mapping[str, Any]) -> list[dict[str, Any]]:
     field the service provider has defined" and is empty only when none is defined, so a record without the key, with a
     value that is not a list, or with an entry of another shape is API drift: ShapeError names the first thing that is wrong
     and the entry (counted from 1), never a value. Variable is not a promise of the tools' texts, so it is checked only when
-    it is there (it must be text). Ids must be distinct."""
+    it is there (it must be text). Ids must be distinct. IsHidden (contract a7954b24844b: true when the service provider hid the
+    field's value from the API, whose Value is then always null) is checked only when it is there (it must be a boolean); a hidden
+    field that shows a Value anyway is not a failure here (hidden_with_value counts it for a note)."""
     if "CustomProperties" not in record:
         raise ShapeError("CustomProperties is missing (the single record carries every custom field; empty only when none is defined)")
     fields = record["CustomProperties"]
@@ -357,7 +428,19 @@ def custom_properties_of(record: Mapping[str, Any]) -> list[dict[str, Any]]:
             raise ShapeError(f"{where}: IsSet is not a boolean")
         if "Variable" in entry and not _is_text(entry["Variable"]):
             raise ShapeError(f"{where}: Variable is not text")
+        if "IsHidden" in entry and not isinstance(entry["IsHidden"], bool):
+            raise ShapeError(f"{where}: IsHidden is not a boolean")
     return fields
+
+
+def is_hidden(field: Mapping[str, Any]) -> bool:
+    """True only for IsHidden exactly true (absent, false and anything else: the field shows its Value)."""
+    return field.get("IsHidden") is True
+
+
+def hidden_with_value(fields: Sequence[Mapping[str, Any]]) -> int:
+    """How many hidden fields show a Value although the spec says it is always null for them (a note, never a failure)."""
+    return sum(1 for field in fields if is_hidden(field) and field.get("Value") is not None)
 
 
 def is_text_field(field: Mapping[str, Any]) -> bool:
@@ -367,20 +450,35 @@ def is_text_field(field: Mapping[str, Any]) -> bool:
     return isinstance(name, str) and TEXT_TYPE_WORD in name.casefold()
 
 
+def _hidden_words(fields: Sequence[Mapping[str, Any]]) -> str:
+    """", N hidden" for a list with hidden fields, else nothing (so the note of a tenant with none reads as it always did)."""
+    hidden = sum(1 for field in fields if is_hidden(field))
+    return f", {hidden} hidden" if hidden else ""
+
+
+def _hidden_note(fields: Sequence[Mapping[str, Any]]) -> str:
+    leaking = hidden_with_value(fields)
+    return f"; note: {leaking} hidden field(s) show a Value, which the spec says is always null" if leaking else ""
+
+
 def custom_properties_note(result: Mapping[str, Any]) -> str:
     """The extra check of get_client and get_agent: the shape of CustomProperties. Counts only."""
     fields = custom_properties_of(result)
-    return f"{len(fields)} custom properties ({sum(1 for field in fields if field['IsSet'])} set)"
+    return (
+        f"{len(fields)} custom properties ({sum(1 for field in fields if field['IsSet'])} set{_hidden_words(fields)})"
+        + _hidden_note(fields)
+    )
 
 
 def custom_properties_of_test_client_note(result: Mapping[str, Any]) -> str:
     """The same for the test client's record, with how many unset text fields the custom_properties write area could use (it
     runs only while no custom field is set)."""
     fields = custom_properties_of(result)
-    unset_text = sum(1 for field in fields if not field["IsSet"] and is_text_field(field))
+    unset_text = sum(1 for field in fields if not field["IsSet"] and is_text_field(field) and not is_hidden(field))
     return (
-        f"{len(fields)} custom properties ({sum(1 for field in fields if field['IsSet'])} set, {unset_text} unset text; "
-        "the custom_properties write area needs none set and one unset text)"
+        f"{len(fields)} custom properties ({sum(1 for field in fields if field['IsSet'])} set{_hidden_words(fields)}, "
+        f"{unset_text} unset text; the custom_properties write area needs none set and one unset text)"
+        + _hidden_note(fields)
     )
 
 
@@ -487,7 +585,9 @@ class Case:
     label     the row name when it is not the tool name (get_ticket is called three times)
     provides  the Found keys this case teaches; pick(result) returns the value (None: the list was empty)
     same_id   for a record: the Found key whose value the record's Id must equal ("ticket" compares ticket["Id"])
+    id_key    for a record: the key that holds its id ("Id", or "VersionId" for a document version)
     extra     a further check of the answer: it returns text for the end of the row's note ("" for none) or raises ShapeError
+    shape     also "file": the answer is a file (export_document_pdf), checked by check_file
     """
 
     tool: str
@@ -497,6 +597,7 @@ class Case:
     provides: str | None = None
     pick: Callable[[Mapping[str, Any]], Any] = _first_id
     same_id: str | None = None
+    id_key: str = "Id"
     nonempty: bool = False
     complete: bool = False
     extra: Callable[[Mapping[str, Any]], str] | None = None
@@ -540,9 +641,18 @@ CASES: tuple[Case, ...] = (
         extra=rows_without_custom_properties_note,
     ),
     Case("get_agent", "record", args=_by("agent", "an agent", "agent_id"), same_id="agent", extra=custom_properties_note),
-    Case("list_custom_assets", "paged", args=lambda found: {"page_size": 10}),
+    Case("list_custom_assets", "paged", args=lambda found: {"page_size": 10}, provides="custom_asset"),
+    Case(
+        "get_custom_asset",
+        "record",
+        args=_by("custom_asset", "a custom asset", "custom_asset_id"),
+        same_id="custom_asset",
+    ),
     Case("list_custom_asset_hardware_types", "list"),
     Case("list_alerts", "paged", args=lambda found: {"page_size": 20}),
+    # types 1 Client and 2 Contact only: a key without the scope of a type gets a 403 for the whole call, and nothing says that
+    # a tenant has deletions, so the answer may be empty
+    Case("list_deletions", "paged", args=lambda found: {"type_ids": [1, 2], "page_size": 20}),
     # tickets
     Case("list_ticket_statuses", "list", nonempty=True),
     Case("list_ticket_types", "list", nonempty=True),
@@ -632,6 +742,34 @@ CASES: tuple[Case, ...] = (
         "paged",
         args=lambda found: {"form_id": found.need("form", "a form"), "page_size": 10},
     ),
+    # documents (scope Documents, toolset documents)
+    Case("list_documents", "paged", args=lambda found: {"page_size": 20}, provides="document"),
+    Case(
+        "get_document",
+        "record",
+        args=_by("document", "a document", "document_id"),
+        same_id="document",
+        extra=document_note,
+    ),
+    Case("export_document_pdf", "file", args=_by("document", "a document", "document_id")),
+    Case(
+        "list_document_versions",
+        "paged",
+        args=lambda found: {"document_id": found.need("document", "a document"), "page_size": 20},
+        provides="document_version",
+        pick=_first_version_id,
+    ),
+    Case(
+        "get_document_version",
+        "record",
+        args=lambda found: {
+            "document_id": found.need("document", "a document"),
+            "version_id": found.need("document_version", "a document version"),
+        },
+        same_id="document_version",
+        id_key="VersionId",
+    ),
+    Case("list_document_related_items", "list", args=_by("document", "a document", "document_id")),
 )
 
 
@@ -659,7 +797,9 @@ def _validate_shape(case: Case, found: Found, result: Mapping[str, Any]) -> str:
         if case.same_id is not None:
             held = found.values.get(case.same_id)
             expected = held["Id"] if isinstance(held, dict) else held
-        return check_record(result, expected)
+        return check_record(result, expected, case.id_key)
+    if shape == "file":
+        return check_file(result)
     raise ShapeError(f"the plan gives {case.tool} the unknown shape {shape!r}")
 
 
@@ -679,13 +819,35 @@ def format_row(label: str, outcome: str, note: str, width: int) -> str:
     return f"{label:<{width}}{outcome:<15}{note}".rstrip()
 
 
+def test_client_row(facts: Mapping[int, Any] | None, test_client: int) -> Row:
+    """The row "test client status": OK when the test client is Active (status 1), otherwise NOT READY.
+
+    `facts` is what live_guard.verify_site_clients returned (ClientFacts by client id). NOT READY does not fail the smoke, which only
+    reads: it says that the write matrix would refuse to start (guard.require_active_test_client) until the operator makes the test client
+    Active again in the Gorelo app. A status that was not read is NOT READY too: fail closed."""
+    found = facts.get(test_client) if isinstance(facts, Mapping) else None
+    if found is not None and found.active:
+        return Row(TEST_CLIENT_ROW, OK, f"{found.shown()}: the write matrix may start")
+    shown = found.shown() if found is not None else "whose status was not read"
+    return Row(
+        TEST_CLIENT_ROW,
+        NOT_READY,
+        f"the test client is {shown}: the write matrix will refuse to start; the operator has to make it Active again in the Gorelo "
+        "app (this harness never changes the status of a client)",
+    )
+
+
 @dataclass
 class SmokeReport:
-    """The rows of a smoke run and what was sent. `ok` is True when no row FAILED."""
+    """The rows of a smoke run and what was sent. `ok` is True when no row FAILED.
+
+    `test_client` is the row "test client status" (not one of `rows`, so the counts and the summary line keep their shape): OK or NOT READY.
+    NOT READY never makes `ok` False, but the summary says that the write matrix is blocked."""
 
     rows: list[Row] = field(default_factory=list)
     requests: int = 0
     refused: int = 0
+    test_client: Row | None = None
 
     @property
     def failed(self) -> list[Row]:
@@ -701,17 +863,22 @@ class SmokeReport:
 
     def summary_lines(self) -> list[str]:
         counts = self.counts()
-        return [
+        lines = [
             f"{len(self.rows)} checks: {counts[OK]} ok, {counts[SCOPE_MISSING]} scope missing, "
             f"{counts[SKIPPED]} skipped, {counts[FAILED]} FAILED; "
             f"{self.requests} requests sent, {self.refused} refused by the guard",
-            "result: " + ("PASSED" if self.ok else "FAILED"),
         ]
+        if self.test_client is not None and self.test_client.outcome == NOT_READY:
+            lines.append("write matrix: BLOCKED until the operator makes the test client Active again in the Gorelo app")
+        return lines + ["result: " + ("PASSED" if self.ok else "FAILED")]
 
     def render(self) -> list[str]:
-        """The whole table: header, one line per row, then the summary (run_smoke prints the rows as they come)."""
-        width = max([len("tool"), *(len(row.label) for row in self.rows)]) + 2
+        """The whole table: header, the test client row, one line per row, then the summary (run_smoke prints the rows as they come)."""
+        labels = [row.label for row in self.rows] + ([self.test_client.label] if self.test_client is not None else [])
+        width = max([len("tool"), *map(len, labels)]) + 2
         lines = [format_row("tool", "outcome", "note", width)]
+        if self.test_client is not None:
+            lines.append(format_row(self.test_client.label, self.test_client.outcome, self.test_client.note, width))
         lines.extend(format_row(row.label, row.outcome, row.note, width) for row in self.rows)
         return lines + self.summary_lines()
 
@@ -772,7 +939,10 @@ class _Smoke:
             self._teach(case, SKIPPED, None, reason=str(skip))
             return True
         try:
-            result = await self.session.call(case.tool, arguments)
+            if case.shape == "file":  # a text and an embedded file, not a structured object
+                result: Any = await self.session.call_result(case.tool, arguments)
+            else:
+                result = await self.session.call(case.tool, arguments)
         except GuardTripped as exc:
             self.add(Row(case.row, FAILED, f"the guard refused the request: {exc}"[:_NOTE_LIMIT]))
             self._teach(case, FAILED, None)
@@ -810,8 +980,8 @@ async def run_smoke(
     echo: Callable[[str], None] = emit,
     cases: Sequence[Case] | None = None,
 ) -> SmokeReport:
-    """Call every read tool once (see the module docstring) and print the table through `echo`: the header, each
-    row as soon as its call is done (a run takes a minute or more), then the summary.
+    """Call every read tool once (see the module docstring) and print the table through `echo`: the API host, the header,
+    each row as soon as its call is done (a run takes a minute or more), then the summary.
 
     settings   default live_settings() (reads the API key from the app .env); tests pass their own.
     transport  an httpx transport for the Gorelo client (tests pass httpx.MockTransport); default is the network.
@@ -826,8 +996,10 @@ async def run_smoke(
         raise PlanError("the smoke plan names tools that are not registered read tools: " + ", ".join(foreign))
     cfg = site()  # no site config, no run: refuse before the API key is read or anything is sent
     chosen = settings if settings is not None else live_settings()
-    await live_guard.verify_site_clients(chosen.api_key, transport=transport)  # read-only, but the ids must be the named clients
-    width = max([len("tool"), *(len(case.row) for case in plan)]) + 2
+    # read-only, but the ids must be the named clients; the same reads tell the status of the test client (the row below)
+    facts = await live_guard.verify_site_clients(chosen.api_key, transport=transport, base_url=chosen.base_url)
+    status_row = test_client_row(facts, cfg.test_client)
+    width = max([len("tool"), len(TEST_CLIENT_ROW), *(len(case.row) for case in plan)]) + 2
 
     def say(text: str) -> None:
         echo(scrub(text, chosen.api_key))
@@ -835,13 +1007,17 @@ async def run_smoke(
     def show(row: Row) -> None:
         say(format_row(row.label, row.outcome, row.note, width))
 
+    say(f"api host: {chosen.api_host}")
     say(format_row("tool", "outcome", "note", width))
+    show(status_row)
     async with open_session(chosen, transport=transport, pace=pace) as session:
         smoke = _Smoke(session, plan, reads, on_row=show, known={"test_client": cfg.test_client})
         await smoke.run()
         for tool in uncovered:
             smoke.add(Row(tool, FAILED, "a read tool with no smoke case: add one to scripts/live/smoke.py"))
-        report = SmokeReport(rows=smoke.rows, requests=session.pacer.requests, refused=len(session.guard.violations))
+        report = SmokeReport(
+            rows=smoke.rows, requests=session.pacer.requests, refused=len(session.guard.violations), test_client=status_row
+        )
     for line in report.summary_lines():
         say(line)
     return report

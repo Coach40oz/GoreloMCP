@@ -57,7 +57,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_URL = "https://mcp.example.test"
 REDIRECT = "https://claude.ai/api/mcp/auth_callback"
 PASSWORD = "a-test-password-not-real"  # 24 characters: no short-password warning
-OWNER_IP = "203.0.113.7"
+OPERATOR_IP = "203.0.113.7"
 OTHER_IP = "198.51.100.9"
 VERIFIER = "v" * 64
 CHALLENGE = base64.urlsafe_b64encode(hashlib.sha256(VERIFIER.encode()).digest()).decode().rstrip("=")
@@ -128,7 +128,7 @@ class Gate:
         self.app = app
         self._clients: dict[str, httpx.AsyncClient] = {}
 
-    def at(self, ip: str = OWNER_IP) -> httpx.AsyncClient:
+    def at(self, ip: str = OPERATOR_IP) -> httpx.AsyncClient:
         if ip not in self._clients:
             transport = httpx.ASGITransport(app=self.app, client=(ip, 40000))
             self._clients[ip] = httpx.AsyncClient(transport=transport, base_url="http://mcp.test")
@@ -830,7 +830,7 @@ async def test_a_registration_with_an_unacceptable_redirect_address_is_refused_a
     assert provider.clients == {}
     assert not (state_dir / STATE_FILE).exists()  # nothing was saved either
     (line,) = [m for m in lines(caplog) if m.startswith("register outcome=")]
-    assert line.startswith("register outcome=refused reason=redirect_") and f"ip={OWNER_IP}" in line
+    assert line.startswith("register outcome=refused reason=redirect_") and f"ip={OPERATOR_IP}" in line
 
 
 async def test_an_empty_list_of_redirect_addresses_is_refused_by_the_framework_before_the_provider_sees_it(state_dir, make_provider, serve):
@@ -916,7 +916,7 @@ async def test_a_valid_request_gets_the_consent_page_with_the_headers_and_one_lo
     assert hidden_inputs(page) == params(client)  # the five fields that were sent come back, nothing else
     assert "<script" not in page.lower() and "javascript:" not in page.lower() and "Incorrect password" not in page
     assert [m for m in lines(caplog) if m.startswith("authorize")] == [
-        f'authorize outcome=consent_shown client={client.client_id[:8]} name="Claude" ip={OWNER_IP}'
+        f'authorize outcome=consent_shown client={client.client_id[:8]} name="Claude" ip={OPERATOR_IP}'
     ]
 
 
@@ -1113,7 +1113,7 @@ async def test_a_valid_request_with_a_wrong_password_does_reach_the_compare_and_
     for name, value in CONSENT_HEADERS.items():
         assert reply.headers[name] == value
     assert [m for m in lines(caplog) if m.startswith("authorize")] == [
-        f'authorize outcome=wrong_password client={client.client_id[:8]} name="Test client 1" ip={OWNER_IP}'
+        f'authorize outcome=wrong_password client={client.client_id[:8]} name="Test client 1" ip={OPERATOR_IP}'
     ]
 
 
@@ -1169,7 +1169,7 @@ async def test_if_authorize_refuses_after_the_password_matched_the_answer_is_the
     assert "something the caller must not see" not in reply.text + caplog.text
     assert counters(provider) == (1, 1)  # a refused sign-in is not a proof of anything: the wrong guess is still on record
     assert [m for m in lines(caplog) if "authorize_server_error" in m] == [
-        f"authorize outcome=invalid_request reason=authorize_server_error client={client.client_id[:8]} ip={OWNER_IP}"
+        f"authorize outcome=invalid_request reason=authorize_server_error client={client.client_id[:8]} ip={OPERATOR_IP}"
     ]
 
 
@@ -1247,7 +1247,7 @@ async def test_a_legacy_client_with_an_evil_address_gets_the_400_page_on_get_den
     blocked = [m for m in lines(caplog) if m.startswith("authorize outcome=blocked_redirect")]
     assert len(blocked) == 12
     assert blocked[0] == (
-        f"authorize outcome=blocked_redirect reason=not_allowed client={LEGACY_EVIL[:8]} redirect=evil.example ip={OWNER_IP}"
+        f"authorize outcome=blocked_redirect reason=not_allowed client={LEGACY_EVIL[:8]} redirect=evil.example ip={OPERATOR_IP}"
     )
     assert all("redirect=evil.example" in m for m in blocked)
     assert all(record.levelno == logging.WARNING for record in caplog.records if "blocked_redirect" in record.getMessage())
@@ -1310,8 +1310,8 @@ async def test_the_sixth_attempt_from_an_address_is_refused_even_with_the_right_
     assert len(compare_spy) == 6  # five guesses and the right password of the other address: nothing else was compared
     limited = [m for m in lines(caplog) if m.startswith("authorize outcome=rate_limited")]
     assert limited == [  # scope=ip: this address had its five wrong passwords; retry_in: its first one is 900 seconds from leaving
-        f'authorize outcome=rate_limited scope=ip retry_in=900s client={clients[5].client_id[:8]} name="Test client 6" ip={OWNER_IP}',
-        f'authorize outcome=rate_limited scope=ip retry_in=900s client={clients[6].client_id[:8]} name="Test client 7" ip={OWNER_IP}',
+        f'authorize outcome=rate_limited scope=ip retry_in=900s client={clients[5].client_id[:8]} name="Test client 6" ip={OPERATOR_IP}',
+        f'authorize outcome=rate_limited scope=ip retry_in=900s client={clients[6].client_id[:8]} name="Test client 7" ip={OPERATOR_IP}',
     ]
 
 
@@ -1379,17 +1379,17 @@ async def test_the_journal_says_whether_the_address_or_the_overall_limit_refused
         for host in range(2, 7):  # five more addresses, five wrong passwords each: thirty in all
             for _ in range(5):
                 assert (await post_consent(gate.at(f"198.51.100.{host}"), client, password="guess")).status_code == 200
-        owner = await post_consent(gate.at(OWNER_IP), client)  # the operator, the right password, an address with no failures
+        operator = await post_consent(gate.at(OPERATOR_IP), client)  # the operator, the right password, an address with no failures
         guesser_again = await post_consent(guesser, client)  # over its own limit too: the overall one is what it waits for
         clock.advance(3595)  # an hour since the first wrong password
-        let_in = await post_consent(gate.at(OWNER_IP), client)
+        let_in = await post_consent(gate.at(OPERATOR_IP), client)
     limited = [m for m in lines(caplog) if "outcome=rate_limited" in m]
     assert limited == [
         f'authorize outcome=rate_limited scope=ip retry_in=895s {name} ip=198.51.100.1',
-        f'authorize outcome=rate_limited scope=global retry_in=3595s {name} ip={OWNER_IP}',
+        f'authorize outcome=rate_limited scope=global retry_in=3595s {name} ip={OPERATOR_IP}',
         f'authorize outcome=rate_limited scope=global retry_in=3595s {name} ip=198.51.100.1',
     ]
-    assert signature(refused_alone) == signature(owner) == signature(guesser_again)  # the same page, scope or no scope
+    assert signature(refused_alone) == signature(operator) == signature(guesser_again)  # the same page, scope or no scope
     assert refused_alone.status_code == 429 and refused_alone.content == oauth_guard.TOO_MANY_ATTEMPTS_PAGE.encode()
     assert let_in.status_code == 302  # the oldest wrong password is an hour old: the cap lets the operator in again
     assert not [m for m in lines(caplog) if "scope=" in m and "outcome=rate_limited" not in m]
@@ -1425,7 +1425,7 @@ async def test_addresses_in_one_ipv6_slash_64_share_the_attempts_and_another_sla
             await post_consent(gate.at(f"2001:db8:1:2::{n:x}"), client, password="guess")
         same_network = await post_consent(gate.at("2001:db8:1:2:aaaa:bbbb:cccc:dddd"), client)
         other_network = await post_consent(gate.at("2001:db8:1:3::1"), client)
-        ipv4 = await post_consent(gate.at(OWNER_IP), client)
+        ipv4 = await post_consent(gate.at(OPERATOR_IP), client)
     assert same_network.status_code == 429 and other_network.status_code == 302 and ipv4.status_code == 302
     assert [m for m in lines(caplog) if "rate_limited" in m][0].endswith("ip=2001:db8:1:2:aaaa:bbbb:cccc:dddd")
 
@@ -1572,7 +1572,7 @@ async def test_deny_goes_back_to_the_registered_address_with_access_denied_and_n
         assert denied.headers[name] == value
     assert compare_spy == [] and counters(provider) == (0, 0) and provider.auth_codes == {}
     assert [m for m in lines(caplog) if m.startswith("authorize")] == [
-        f'authorize outcome=denied_by_user client={client.client_id[:8]} name="Claude" ip={OWNER_IP}'
+        f'authorize outcome=denied_by_user client={client.client_id[:8]} name="Claude" ip={OPERATOR_IP}'
     ] * 2
 
 
@@ -1596,7 +1596,7 @@ async def test_approve_with_the_right_password_issues_a_code_to_the_registered_a
     assert code.code == query["code"][0] and code.client_id == client.client_id and code.code_challenge == CHALLENGE
     assert str(code.redirect_uri) == REDIRECT and code.redirect_uri_provided_explicitly is True and code.scopes == []
     assert [m for m in lines(caplog) if m.startswith("authorize")] == [
-        f'authorize outcome=approved client={client.client_id[:8]} name="Claude" ip={OWNER_IP}'
+        f'authorize outcome=approved client={client.client_id[:8]} name="Claude" ip={OPERATOR_IP}'
     ]
     assert PASSWORD not in caplog.text and query["code"][0] not in caplog.text
 
@@ -1870,7 +1870,7 @@ def test_the_policy_names_what_the_page_needs_and_leaves_form_action_out():
 CAP = oauth_guard.MAX_BODY_BYTES
 
 
-async def run_asgi(app, *, method="POST", headers=(), chunks=(b"",), client=(OWNER_IP, 40000), disconnect_after=None, scope_type="http"):
+async def run_asgi(app, *, method="POST", headers=(), chunks=(b"",), client=(OPERATOR_IP, 40000), disconnect_after=None, scope_type="http"):
     """Call an ASGI app directly. Returns (status or None, response body, how many times the app called receive, messages sent)."""
     queue = [{"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1} for index, chunk in enumerate(chunks)]
     if disconnect_after is not None:
@@ -1928,7 +1928,7 @@ async def test_a_declared_length_over_the_cap_is_refused_without_reading_a_byte(
     status, body, reads, _ = await run_asgi(capped(inner), headers=[("content-length", str(CAP + 1))], chunks=(b"x" * (CAP + 1),))
     assert status == 413 and inner.calls == 0 and reads == 0
     assert json.loads(body) == {"error": "invalid_request", "error_description": "The request body is too large."}
-    assert lines(caplog, "oauth-guard") == [f"body outcome=too_large path=/x ip={OWNER_IP}"]
+    assert lines(caplog, "oauth-guard") == [f"body outcome=too_large path=/x ip={OPERATOR_IP}"]
 
 
 async def test_a_body_that_just_fits_is_passed_on_whole_and_what_the_app_reads_after_it_is_the_servers_next_message(caplog):
@@ -1988,7 +1988,7 @@ async def test_a_message_that_is_neither_body_nor_disconnect_is_skipped_while_th
     async def send(message):
         sent.append(message)
 
-    scope = {"type": "http", "method": "POST", "headers": [], "client": (OWNER_IP, 1)}
+    scope = {"type": "http", "method": "POST", "headers": [], "client": (OPERATOR_IP, 1)}
     await capped(inner)(scope, receive, send)
     assert inner.bodies == [b"abc"]
 
@@ -2055,7 +2055,7 @@ async def test_an_options_request_that_carries_a_body_is_refused_with_400_before
     status, body, reads, _ = await run_asgi(capped(inner), method=method, headers=[*case["headers"], *extra], chunks=case.get("chunks", (b"",)))
     assert status == 400 and reads == 0 and inner.calls == 0
     assert json.loads(body) == {"error": "invalid_request", "error_description": "The request is not valid."}
-    assert lines(caplog, "oauth-guard") == [f"body outcome=options_body path=/x ip={OWNER_IP}"]
+    assert lines(caplog, "oauth-guard") == [f"body outcome=options_body path=/x ip={OPERATOR_IP}"]
 
 
 async def test_an_options_request_with_a_body_that_its_headers_do_not_announce_is_refused_when_the_body_shows_up():
@@ -2081,7 +2081,7 @@ async def test_an_options_request_with_a_bad_content_length_is_a_bad_length_like
         assert status == 400 and reads == 0 and inner.calls == 0
     status, _, _, _ = await run_asgi(capped(inner), method="OPTIONS", headers=[("content-length", "1"), ("content-length", "2")])
     assert status == 400 and inner.calls == 0
-    assert lines(caplog, "oauth-guard") == [f"body outcome=bad_length path=/x ip={OWNER_IP}"] * 4
+    assert lines(caplog, "oauth-guard") == [f"body outcome=bad_length path=/x ip={OPERATOR_IP}"] * 4
 
 
 async def test_the_refusal_is_whatever_the_wrapper_was_given_and_the_log_line_carries_no_body(caplog):
@@ -2095,7 +2095,7 @@ async def test_the_refusal_is_whatever_the_wrapper_was_given_and_the_log_line_ca
     status, body, _, _ = await run_asgi(page, headers=[("content-length", "x")])
     assert status == 400 and body == oauth_guard.INVALID_REQUEST_PAGE.encode()
     assert lines(caplog, "oauth-guard") == [
-        "body outcome=too_large path=/authorize ip=2001:db8::7", f"body outcome=bad_length path=/authorize ip={OWNER_IP}",
+        "body outcome=too_large path=/authorize ip=2001:db8::7", f"body outcome=bad_length path=/authorize ip={OPERATOR_IP}",
     ]
     assert "hunter2" not in caplog.text
 
@@ -2323,7 +2323,7 @@ async def test_a_registration_cannot_be_made_with_an_options_request_and_the_sam
         assert ran == [] and provider.clients == {} and taken["taken"] == 0
         assert (await http.post("/register", content=body, headers=headers)).status_code == 201  # the very same bytes, as a POST
     assert ran == ["register_client"] and len(provider.clients) == 1
-    assert [m for m in lines(caplog, "oauth-guard")] == [f"body outcome=options_body path=/register ip={OWNER_IP}"] * 4
+    assert [m for m in lines(caplog, "oauth-guard")] == [f"body outcome=options_body path=/register ip={OPERATOR_IP}"] * 4
 
 
 async def test_an_options_request_that_is_not_a_cors_preflight_counts_as_a_registration_attempt_and_is_limited_like_one(
@@ -2343,7 +2343,7 @@ async def test_an_options_request_that_is_not_a_cors_preflight_counts_as_a_regis
         caplog.clear()
         refused = await mine.request("OPTIONS", "/register", headers=shapes[0])
         assert refused.status_code == 429 and refused.json() == RATE_LIMITED and len(provider.clients) == 0
-        assert lines(caplog) == [f"register outcome=refused reason=rate_limited ip={OWNER_IP}"]
+        assert lines(caplog) == [f"register outcome=refused reason=rate_limited ip={OPERATOR_IP}"]
         assert (await register_over_http(mine)).status_code == 429  # a POST from that address: the same budget
         assert (await register_over_http(other)).status_code == 201  # another address has its own
         assert (await other.request("OPTIONS", "/register", headers=shapes[1])).status_code == 400  # and its OPTIONS count in it
@@ -2521,7 +2521,7 @@ async def test_ten_registrations_an_hour_from_one_address_then_429_while_another
         refused = await register_over_http(mine)
         assert refused.status_code == 429 and refused.json() == RATE_LIMITED
         assert refused.headers["cache-control"] == "no-store" and len(provider.clients) == 10  # the handler did not run
-        assert lines(caplog) == [f"register outcome=refused reason=rate_limited ip={OWNER_IP}"]
+        assert lines(caplog) == [f"register outcome=refused reason=rate_limited ip={OPERATOR_IP}"]
         assert (await register_over_http(other)).status_code == 201
         clock.now = start + 3599
         assert (await register_over_http(mine)).status_code == 429
@@ -2595,7 +2595,7 @@ async def test_a_registration_body_that_is_not_json_is_a_400_and_not_the_framewo
         reply = await gate.at().post("/register", content=body, headers={"content-type": "application/json"})
     assert reply.status_code == 400 and reply.headers["cache-control"] == "no-store"
     assert reply.json() == {"error": "invalid_client_metadata", "error_description": "The request body is not valid JSON."}
-    assert provider.clients == {} and lines(caplog)[-1] == f"register outcome=refused reason=not_json ip={OWNER_IP}"
+    assert provider.clients == {} and lines(caplog)[-1] == f"register outcome=refused reason=not_json ip={OPERATOR_IP}"
 
 
 @pytest.mark.parametrize(
@@ -2632,10 +2632,10 @@ async def test_the_registration_gate_answers_a_parse_error_of_the_handler_that_c
         )
 
     status, body, _, _ = await run_asgi(gate(before_any_response), chunks=(b"{}",))  # a body that parses, so the handler runs
-    assert status == 400 and json.loads(body)["error"] == "invalid_client_metadata" and refused == [(OWNER_IP, "not_json")]
+    assert status == 400 and json.loads(body)["error"] == "invalid_client_metadata" and refused == [(OPERATOR_IP, "not_json")]
     with pytest.raises(type(error)):
         await run_asgi(gate(after_the_response_started), chunks=(b"{}",))
-    assert refused == [(OWNER_IP, "not_json")]  # no second answer was invented
+    assert refused == [(OPERATOR_IP, "not_json")]  # no second answer was invented
 
 
 @pytest.mark.parametrize("error", [ValueError("a bug of ours, not a bad body"), KeyError("x"), OSError(5, "disk"), RuntimeError("x"), TypeError("x")])
@@ -2740,7 +2740,7 @@ async def test_a_registration_that_cannot_be_parsed_or_kept_is_a_clean_400_and_n
         assert len(provider._registration_limiter._overall) == 1  # it counted as a registration
         # and the same address can register as soon as it sends something that can be kept
         assert (await register_over_http(gate.at())).status_code == 201
-    assert [m for m in lines(caplog) if m.startswith("register")][0] == f"register outcome=refused reason={reason} ip={OWNER_IP}"
+    assert [m for m in lines(caplog) if m.startswith("register")][0] == f"register outcome=refused reason={reason} ip={OPERATOR_IP}"
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR or r.exc_info]  # no traceback, no error line
     assert len(provider.clients) == 1
 
@@ -2828,7 +2828,7 @@ async def test_the_second_line_alone_gives_the_frameworks_handler_a_clean_400_an
     # The framework's own registration route, with no gate in front of it: the provider's check is what answers.
     provider = make_provider(state_dir)
     app = Starlette(routes=[route for route in real_routes(provider) if route.path == "/register"])
-    transport = httpx.ASGITransport(app=app, client=(OWNER_IP, 40000))
+    transport = httpx.ASGITransport(app=app, client=(OPERATOR_IP, 40000))
     deep = '{"a":' * 16 + "1" + "}" * 16
     bodies = [
         registration_json(client_name='"a\\ud800b"'), registration_json(scope='"\\udfff"'),
@@ -2901,7 +2901,7 @@ async def test_a_body_that_does_not_parse_never_reaches_the_handler(body):
     inner = Recorder()
     gate, refused = a_gate(inner)
     status, answer, _, _ = await run_asgi(gate, chunks=(body,))
-    assert status == 400 and inner.calls == 0 and refused == [(OWNER_IP, "not_json")]
+    assert status == 400 and inner.calls == 0 and refused == [(OPERATOR_IP, "not_json")]
     assert json.loads(answer) == {"error": "invalid_client_metadata", "error_description": NOT_JSON_SAYS}
 
 
@@ -2911,7 +2911,7 @@ async def test_metadata_that_cannot_be_kept_never_reaches_the_handler(name):
     inner = Recorder()
     gate, refused = a_gate(inner)
     status, answer, _, _ = await run_asgi(gate, chunks=(body,))
-    assert status == 400 and inner.calls == 0 and refused == [(OWNER_IP, reason)]
+    assert status == 400 and inner.calls == 0 and refused == [(OPERATOR_IP, reason)]
     assert json.loads(answer) == {"error": "invalid_client_metadata", "error_description": oauth_guard.METADATA_REFUSED_DESCRIPTION}
 
 
@@ -2922,11 +2922,11 @@ async def test_a_request_that_is_not_a_post_and_still_carries_a_body_is_refused_
     for method in ("OPTIONS", "PUT", "GET"):  # BodyLimit stands in front of the gate and refuses an OPTIONS body; the gate does not rely on it
         status, answer, _, _ = await run_asgi(gate, method=method, chunks=(body,))
         assert status == 400 and json.loads(answer) == {"error": "invalid_request", "error_description": "The request is not valid."}
-    assert inner.calls == 0 and refused == [(OWNER_IP, "not_post_body")] * 3
+    assert inner.calls == 0 and refused == [(OPERATOR_IP, "not_post_body")] * 3
     status, _, _, _ = await run_asgi(gate, method="POST", chunks=(body,))
     assert status == 200 and inner.bodies == [body]
     status, answer, _, _ = await run_asgi(gate, method="OPTIONS")  # no body: an attempt that is counted and answered like an empty POST
-    assert status == 400 and json.loads(answer)["error_description"] == NOT_JSON_SAYS and refused[-1] == (OWNER_IP, "not_json")
+    assert status == 400 and json.loads(answer)["error_description"] == NOT_JSON_SAYS and refused[-1] == (OPERATOR_IP, "not_json")
 
 
 async def test_a_cors_preflight_goes_straight_through_the_gate_and_is_not_counted():
@@ -2936,14 +2936,14 @@ async def test_a_cors_preflight_goes_straight_through_the_gate_and_is_not_counte
     status, _, _, _ = await run_asgi(gate, method="OPTIONS", headers=PREFLIGHT_HEADERS)
     assert status == 200 and inner.calls == 1 and len(limiter) == 0 and refused == []
     status, _, _, _ = await run_asgi(gate, method="OPTIONS", headers=[("origin", "https://x.example")])  # not a preflight
-    assert status == 400 and inner.calls == 1 and len(limiter) == 1 and refused == [(OWNER_IP, "not_json")]
+    assert status == 400 and inner.calls == 1 and len(limiter) == 1 and refused == [(OPERATOR_IP, "not_json")]
 
 
 async def test_a_body_over_the_limit_that_reaches_the_gate_without_the_cap_in_front_is_a_413_and_no_handler_runs():
     inner = Recorder()
     gate, refused = a_gate(inner, max_bytes=100)
     status, answer, _, _ = await run_asgi(gate, chunks=(b"x" * 60, b"y" * 41))
-    assert status == 413 and inner.calls == 0 and refused == [(OWNER_IP, "too_large")]
+    assert status == 413 and inner.calls == 0 and refused == [(OPERATOR_IP, "too_large")]
     assert json.loads(answer) == {"error": "invalid_request", "error_description": "The request body is too large."}
     status, _, _, _ = await run_asgi(gate, chunks=(b'{"a": "' + b"x" * 91 + b'"}',))  # 100 bytes: fits, and is then a body like any other
     assert status == 200 and inner.calls == 1
@@ -2960,10 +2960,10 @@ async def test_a_limited_address_is_refused_before_its_body_is_read():
     inner = Recorder()
     limiter = oauth_guard.RegistrationLimiter()
     for _ in range(10):
-        limiter.record(OWNER_IP, time.time())
+        limiter.record(OPERATOR_IP, time.time())
     gate, refused = a_gate(inner, limiter=limiter)
     status, answer, reads, _ = await run_asgi(gate, chunks=(b'{"a": 1}',))
-    assert status == 429 and reads == 0 and inner.calls == 0 and refused == [(OWNER_IP, "rate_limited")]
+    assert status == 429 and reads == 0 and inner.calls == 0 and refused == [(OPERATOR_IP, "rate_limited")]
     assert json.loads(answer)["error"] == "temporarily_unavailable"
 
 
@@ -3026,7 +3026,7 @@ async def test_a_multipart_body_that_does_not_parse_is_a_clean_400_and_no_handle
         reply = await gate.at().post(path, content=MULTIPART_THAT_DOES_NOT_PARSE[name], headers={"content-type": MULTIPART})
     assert reply.status_code == 400 and reply.headers["cache-control"] == "no-store"
     assert reply.json() == {"error": "invalid_request", "error_description": "The request is not valid."}
-    assert ran == [] and lines(caplog, "oauth-guard") == [f"body outcome=bad_form path={path} ip={OWNER_IP}"]
+    assert ran == [] and lines(caplog, "oauth-guard") == [f"body outcome=bad_form path={path} ip={OPERATOR_IP}"]
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR or r.exc_info]  # no traceback
 
 
@@ -3088,7 +3088,7 @@ async def test_the_form_guard_refuses_what_does_not_parse_holds_its_own_limit_an
     status, _, _, sent = await run_asgi(guard, headers=[("content-type", MULTIPART)], chunks=(b"--x", b"--"), disconnect_after=1)
     assert status is None and sent == [] and inner.calls == 0  # the client left in the middle
     assert lines(caplog, "oauth-guard") == [
-        f"body outcome=bad_form path=/token ip={OWNER_IP}", f"body outcome=too_large path=/token ip={OWNER_IP}",
+        f"body outcome=bad_form path=/token ip={OPERATOR_IP}", f"body outcome=too_large path=/token ip={OPERATOR_IP}",
     ]
 
     async def broken(scope, receive, send):
@@ -3655,7 +3655,7 @@ async def test_a_code_that_cannot_be_saved_is_taken_back_and_the_next_try_works(
         monkeypatch.undo()
         assert (await post_consent(gate.at(), client)).status_code == 302
     assert [m for m in lines(caplog) if m.startswith("authorize outcome=error")] == [
-        f"authorize outcome=error ip={OWNER_IP} error=StateFileError"
+        f"authorize outcome=error ip={OPERATOR_IP} error=StateFileError"
     ]
 
 
@@ -3684,7 +3684,7 @@ async def test_an_unexpected_error_in_the_consent_endpoint_is_a_plain_500_page_a
         for name, value in CONSENT_HEADERS.items():
             assert reply.headers[name] == value
     assert [m for m in lines(caplog) if m.startswith("authorize")] == [
-        f"authorize outcome=error ip={OWNER_IP} error=RuntimeError",
+        f"authorize outcome=error ip={OPERATOR_IP} error=RuntimeError",
         f"authorize outcome=error ip={oauth_guard.safe(hostile)} error=RuntimeError",  # escaped, like every other line
     ]
     assert "detail that must stay out" not in caplog.text and PASSWORD not in caplog.text

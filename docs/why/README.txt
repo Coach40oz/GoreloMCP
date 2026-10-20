@@ -27,7 +27,7 @@ Index
 09-tool-design-for-ai.txt
     How the tools are shaped so an AI model uses them correctly: paging, priority, dates, errors.
 10-toolsets.txt
-    Why projects and forms are off by default.
+    Why projects, forms and documents are off by default.
 
 Related documents
 

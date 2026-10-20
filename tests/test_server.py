@@ -29,6 +29,7 @@ import main as main_module
 import server as server_module
 from gorelo_client import FORBIDDEN_OPS, GoreloClient
 from server import (
+    DOCUMENTS_INSTRUCTIONS,
     FORMS_INSTRUCTIONS,
     INSTRUCTIONS,
     LOG_VALUE_FILTER,
@@ -117,7 +118,7 @@ def test_the_instructions_are_plain_ascii_without_dashes():
     assert 300 < len(INSTRUCTIONS) < 3000
 
 
-VARIANTS = [(), ("projects",), ("forms",), ("projects", "forms"), tuple(TOOLSETS)]
+VARIANTS = [(), ("projects",), ("forms",), ("documents",), ("projects", "forms"), tuple(TOOLSETS)]
 
 
 @pytest.mark.parametrize("toolsets", VARIANTS)
@@ -128,7 +129,7 @@ def test_every_variant_of_the_instructions_is_plain_ascii_without_dashes_and_sho
     assert text.endswith("\n") and "\n\n\n" not in text
 
 
-@pytest.mark.parametrize("rule", [PROJECTS_INSTRUCTIONS, FORMS_INSTRUCTIONS])
+@pytest.mark.parametrize("rule", [PROJECTS_INSTRUCTIONS, FORMS_INSTRUCTIONS, DOCUMENTS_INSTRUCTIONS])
 def test_each_extra_rule_is_one_short_ascii_line(rule):
     assert rule.isascii() and EM_DASH not in rule and EN_DASH not in rule
     assert "\n" not in rule and 80 < len(rule) < 400
@@ -177,8 +178,10 @@ def test_both_extra_rules_are_numbered_in_a_fixed_order_whatever_the_input_order
     assert build_instructions(["forms", "projects"]) == expected
     assert build_instructions(["projects", "forms", "projects", "forms"]) == expected  # each rule once
     assert build_instructions(iter(["forms", "core", "projects"])) == expected
-    assert build_instructions(TOOLSETS) == expected
     assert build_instructions(["Projects", "FORMS"]) == expected  # the toolset names are not case sensitive
+    # documents is the third extra rule, numbered 11 when the other two are on, and 9 on its own
+    assert build_instructions(TOOLSETS) == expected + f"11. {DOCUMENTS_INSTRUCTIONS}\n"
+    assert build_instructions({"documents"}) == INSTRUCTIONS + f"9. {DOCUMENTS_INSTRUCTIONS}\n"
 
 
 def test_build_instructions_does_not_change_the_base_text_or_its_input():
@@ -246,8 +249,15 @@ def test_rule_six_covers_every_kind_of_tool_the_destructive_flag_registers():
     # everything the flag registers is a delete or void tool, or create_approved_invoice: a new gated tool that is
     # neither has to be named in the rule before this test lets it through
     gated = {spec.name for spec in REGISTRY.specs if spec.kind == "destructive"}
-    assert {name for name in gated if not name.startswith("delete_")} == {"create_approved_invoice"}
+    assert {name for name in gated if not name.startswith("delete_")} == {
+        "create_approved_invoice", "remove_document_related_item", "share_document",
+    }
     assert "approved-invoice" in rule and "Delete" in rule and "void" in rule
+    # remove_document_related_item is a delete (rule 6 covers it); share_document is named by the documents rule, which
+    # exists whenever the tool does, and says it needs confirm=true
+    assert "share_document (when enabled; needs confirm=true)" in DOCUMENTS_INSTRUCTIONS
+    # the rule names share_document only as a tool the operator may have enabled, so "when enabled" comes first
+    assert DOCUMENTS_INSTRUCTIONS.index("when enabled") < DOCUMENTS_INSTRUCTIONS.index("needs confirm=true")
     # the wording from before create_approved_invoice existed would hide it from the model
     assert "6. Delete and void tools exist" not in INSTRUCTIONS
 
@@ -265,7 +275,7 @@ def test_the_data_rule_is_in_every_variant_exactly_once_and_before_the_extra_rul
     assert text.count(DATA_RULE) == 1
     rule_numbers = [int(line.split(".", 1)[0]) for line in text.splitlines() if line[:1].isdigit()]
     assert rule_numbers == list(range(1, len(rule_numbers) + 1))  # the extra rules continue the numbering at 9
-    for rule in (PROJECTS_INSTRUCTIONS, FORMS_INSTRUCTIONS):
+    for rule in (PROJECTS_INSTRUCTIONS, FORMS_INSTRUCTIONS, DOCUMENTS_INSTRUCTIONS):
         if rule in text:
             assert text.index(DATA_RULE) < text.index(rule)
 
@@ -582,7 +592,7 @@ async def test_the_client_is_closed_when_the_session_ends(server_factory, mock_g
 async def test_the_lifespan_exposes_toolsets_destructive_and_the_spec(make_settings, server_factory, spec_index):
     server = server_factory(registry=demo_registry(), settings=make_settings(toolsets={"core", "tickets"}, destructive=False))
     info = (await call_tool(server, "demo_identity"))["info"]
-    assert info == {"toolsets": ["core", "tickets"], "destructive": False, "spec_sha256": spec_index.sha256}
+    assert info == {"toolsets": ["core", "tickets"], "destructive": False, "gated_tools": [], "spec_sha256": spec_index.sha256}
     assert spec_index.sha256 and len(spec_index.sha256) == 64
 
 
@@ -749,11 +759,11 @@ print("clean")
 # --------------------------------------------------------------------------
 
 
-def test_the_oauth_state_directory_is_the_one_the_live_service_uses(monkeypatch):
+def test_the_default_state_directory_resolves_to_the_app_directory_from_its_working_directory(monkeypatch):
     import personal_auth
 
     assert main_module.APP_DIR == REPO_ROOT
-    # The service runs with WorkingDirectory=<app dir> and PersonalAuthProvider's default state_dir was
+    # The service unit sets WorkingDirectory to the app directory, and PersonalAuthProvider's default state_dir was
     # the relative ".oauth-state" (Path(state_dir or DEFAULT_STATE_DIR)); main.py now passes the same
     # directory explicitly. Resolve the old default from that working directory and compare.
     assert personal_auth.DEFAULT_STATE_DIR == ".oauth-state"
@@ -817,6 +827,7 @@ def test_main_wires_settings_auth_and_the_http_server(monkeypatch):
     assert calls["auth"] == {
         "base_url": "https://mcp.example.test",
         "password": "pw-abc",
+        "allowed_redirect_domains": ["claude.ai", "claude.com", "localhost"],
         "state_dir": str(REPO_ROOT / ".oauth-state"),
     }
     assert calls["settings"] == Settings(

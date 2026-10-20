@@ -32,12 +32,14 @@ DEFAULT_OUT = REPO_ROOT / "docs" / "tool-catalog.md"
 # `python scripts/gen_tool_catalog.py` puts scripts/ on sys.path, not the repo root: tools and settings live there.
 sys.path.insert(0, str(REPO_ROOT))
 
-DESTRUCTIVE_MARK = "only when GORELO_ENABLE_DESTRUCTIVE=1"
+DESTRUCTIVE_MARK = "only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name"
 # What the default settings leave out, in the intro sentence. The flag registers more than the delete and void tools
-# (it also registers create_approved_invoice, which approves an invoice), so the sentence names the flag and the tools
-# it gates and never calls it a switch for deletes only.
+# (it also registers create_approved_invoice, which approves an invoice, share_document, which exposes a document outside
+# Gorelo, and remove_document_related_item, which removes a link), so the sentence names the flag and the tools it gates
+# and never calls it a switch for deletes only.
 GATED_OFF = (
-    "GORELO_ENABLE_DESTRUCTIVE off, so no gated tool: no delete or void tool and no `create_approved_invoice`"
+    "GORELO_ENABLE_DESTRUCTIVE off, so no gated tool: no delete or void tool, no `remove_document_related_item`, "
+    "no `create_approved_invoice` and no `share_document`"
 )
 MAX_SENTENCE = 320  # characters; a longer first sentence is cut at a word boundary and ends with "..."
 GENERATE_COMMAND = "uv run --frozen python scripts/gen_tool_catalog.py"
@@ -46,6 +48,7 @@ GENERATE_COMMAND = "uv run --frozen python scripts/gen_tool_catalog.py"
 TOOLSET_NOTES = {
     "projects": "Needs the `Project` scope on the Gorelo API key (a 403 with code 080203 means it is missing).",
     "forms": "Needs the `Forms` scope on the Gorelo API key (a 403 with code 080203 means it is missing).",
+    "documents": "Needs the `Documents` scope on the Gorelo API key (a 403 with code 080203 means it is missing).",
 }
 
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
@@ -196,9 +199,12 @@ def render(rows: list[Row], toolsets: tuple[str, ...], default_toolsets: tuple[s
         f"{', '.join(default_toolsets)}.",
         "- Kind `read` changes nothing in Gorelo. `write` creates or changes data. `write (overwrites data)` also replaces "
         "or clears data that already exists (the MCP destructiveHint is set). `destructive` tools are the delete and void "
-        "tools and `create_approved_invoice` (it creates an invoice that is Approved at once, so Gorelo pushes it to the "
-        f"connected accounting system and may email its recipients): they are registered {DESTRUCTIVE_MARK}, and every "
-        "call also needs `confirm=true`.",
+        "tools, `remove_document_related_item` (it removes the link between a document and another record), "
+        "`create_approved_invoice` (it creates an invoice that is Approved at once, so Gorelo pushes it to the "
+        "connected accounting system and may email its recipients) and `share_document` (it turns on a document's public "
+        "link or publishes it to the client portal, so anyone who has the link can read it outside Gorelo): "
+        f"each is registered {DESTRUCTIVE_MARK} (1 registers all of them, a comma list of tool names registers just those), "
+        "and every call also needs `confirm=true`.",
         "- Ops are the Gorelo operations (`METHOD /v1/path`) the tool may call. Any other operation is refused before "
         "any HTTP request.",
         "- Required params are the parameters a call must supply. Every other parameter is optional.",

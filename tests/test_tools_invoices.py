@@ -29,7 +29,7 @@ from fastmcp.tools import Tool
 
 from gorelo_client import EXPORT_NOTE, is_side_effect_get
 from tools import invoices
-from tools._common import REGISTRY
+from tools._common import MAX_ID, REGISTRY
 
 pytestmark = pytest.mark.anyio
 
@@ -276,7 +276,7 @@ def test_the_docstrings_state_the_facts_the_model_must_know():
     assert "previous_status is read from it too (6 was a Draft, 4 was Approved)" in delete
     # Void is refused by this tool's own gate; Gorelo would call deleting a void invoice a success
     assert "Void is refused here (Gorelo itself treats deleting a void invoice as success)" in delete
-    assert "Paid and others are refused by Gorelo with 409" in delete
+    assert "Paid, Submitted and others are refused by Gorelo with 409" in delete
     # a void happens in Gorelo ONLY, the copy in Xero stays open, so the model
     # is told before it asks the user; and a Void invoice kept its AmountDue
     assert (
@@ -287,6 +287,7 @@ def test_the_docstrings_state_the_facts_the_model_must_know():
     assert "Ask the user first; needs confirm=true." in delete  # the consistency rule of every destructive tool
     listing = " ".join(inspect.getdoc(invoices.list_invoices).split())
     assert "filter by number, client, status or dates" in listing
+    assert "Without status_ids every status is listed; deleted invoices never are" in listing
     assert "the GUID get_invoice and export_invoice_pdf need" in listing and "only get_invoice returns the lines" in listing
     assert "no get-by-id" not in listing and "only way to find" not in listing  # get_invoice exists since 2026-10-02
     # a Void invoice can keep its AmountDue, so every tool that shows an invoice says to read Status
@@ -300,7 +301,10 @@ async def test_the_parameter_descriptions_carry_the_id_sources_and_the_confirm_r
         return tool_def(tool, tools).inputSchema["properties"][param]["description"]
 
     assert "list_clients" in text("list_invoices", "client_ids") and "list_contracts" in text("list_invoices", "contract_ids")
-    assert "1 Draft, 3 Paid, 4 Void, 5 Approved" in text("list_invoices", "status_ids")
+    assert "1 Draft, 2 Submitted, 3 Paid, 4 Void, 5 Approved" in text("list_invoices", "status_ids")
+    assert text("list_invoices", "status_ids") == (
+        "1 Draft, 2 Submitted, 3 Paid, 4 Void, 5 Approved. Omitted: every status; deleted invoices are never listed."
+    )
     assert "YYYY-MM-DD, inclusive" in text("list_invoices", "invoice_date_since")
     assert "YYYY-MM-DD, exclusive" in text("list_invoices", "due_date_before")
     assert "same filters" in text("list_invoices", "cursor")
@@ -446,6 +450,31 @@ async def test_is_email_sent_true_is_sent_as_true(server, mock_gorelo):
     assert mock_gorelo.last.query == {"IsEmailSent": "true", "PageSize": "50"}
 
 
+@pytest.mark.parametrize(
+    "ids, wire",
+    [([1], "1"), ([2], "2"), ([3], "3"), ([4], "4"), ([5], "5"), ([1, 2, 3, 4, 5], "1,2,3,4,5")],
+)
+async def test_list_invoices_accepts_every_status_of_the_published_scale(server, mock_gorelo, ids, wire):
+    mock_gorelo.on("GET", INVOICES, paged_envelope([]))
+    result = await call_tool(server, "list_invoices", {"status_ids": ids})
+    assert mock_gorelo.last.query == {"StatusIds": wire, "PageSize": "50"}
+    assert result["filters"] == {"status_ids": ids}
+
+
+async def test_list_invoices_direct_call_answers_a_number_outside_the_scale_with_the_scale_and_keeps_the_id_message_for_the_rest(
+    client_factory, mock_gorelo
+):
+    for bad in (0, -1, 6, MAX_ID):  # a number outside the scale is answered with the scale, quoted back
+        with pytest.raises(ToolError) as info:
+            await call_directly(client_factory, invoices.list_invoices, status_ids=[bad])
+        assert str(info.value) == f"status_ids[0]: expected 1 Draft, 2 Submitted, 3 Paid, 4 Void, 5 Approved, got {bad}"
+    for bad, kind in ((True, "a boolean"), (5.0, "a decimal number"), ("2", "a string")):
+        with pytest.raises(ToolError) as info:  # what is not a whole number keeps the positive_id message
+            await call_directly(client_factory, invoices.list_invoices, status_ids=[bad])
+        assert str(info.value) == f"status_ids[0]: expected a positive whole number such as 123, got {kind}"
+    assert mock_gorelo.requests == []
+
+
 @pytest.mark.parametrize("given, used", [(0, 1), (-5, 1), (1, 1), (50, 50), (200, 200), (201, 200), (5000, 200)])
 async def test_page_size_is_clamped_to_1_200_and_the_size_used_is_reported(server, mock_gorelo, given, used):
     mock_gorelo.on("GET", INVOICES, paged_envelope([]))
@@ -487,7 +516,7 @@ async def test_list_invoices_refuses_an_answer_that_is_not_a_list(server, mock_g
     assert text.startswith("Gorelo returned an unexpected response for list_invoices") and "expected Data to be a list" in text
 
 
-async def test_a_gorelo_400_names_the_snake_case_param(server, mock_gorelo):
+async def test_list_invoices_a_gorelo_400_names_the_snake_case_param(server, mock_gorelo):
     body = error_envelope(400, [("070101", "A value that does not parse as a whole number.", "Number")])
     mock_gorelo.on("GET", INVOICES, body)
     text = await call_tool_error(server, "list_invoices", {"number": 1042})
@@ -508,7 +537,7 @@ async def test_other_gorelo_property_names_map_to_their_params_too(server, mock_
     assert f"HTTP 400, code 070101): {param}: rejected" in text
 
 
-async def test_a_missing_scope_reads_as_a_missing_scope(server, mock_gorelo):
+async def test_list_invoices_a_missing_scope_reads_as_a_missing_scope(server, mock_gorelo):
     mock_gorelo.on("GET", INVOICES, error_envelope(403, [("080203", "API key does not have 'Billing' scope")]))
     text = await call_tool_error(server, "list_invoices")
     assert "the API key does not have the 'Billing' scope" in text
@@ -525,9 +554,24 @@ LOCAL_LIST_ERRORS = [
     pytest.param({"contract_ids": []}, "contract_ids: expected at least one id, got an empty list", id="empty-contract-ids"),
     pytest.param({"status_ids": []}, "status_ids: expected at least one id, got an empty list", id="empty-status-ids"),
     pytest.param(
-        {"status_ids": [1, 2]},
-        "status_ids: unknown status id(s) [2]; valid ids: 1 Draft, 3 Paid, 4 Void, 5 Approved",
-        id="status-id-2-does-not-exist",
+        {"status_ids": [1, 6]},
+        "status_ids[1]: expected 1 Draft, 2 Submitted, 3 Paid, 4 Void, 5 Approved, got 6",
+        id="status-id-6-is-not-listable",
+    ),
+    pytest.param(
+        {"status_ids": [0]},
+        "status_ids[0]: expected 1 Draft, 2 Submitted, 3 Paid, 4 Void, 5 Approved, got 0",
+        id="status-id-zero",
+    ),
+    pytest.param(
+        {"status_ids": [-3, 1]},
+        "status_ids[0]: expected 1 Draft, 2 Submitted, 3 Paid, 4 Void, 5 Approved, got -3",
+        id="status-id-negative",
+    ),
+    pytest.param(
+        {"status_ids": [2**63]},
+        "status_ids[0]: expected a positive whole number such as 123, got a number above 9223372036854775807",
+        id="status-id-beyond-int64",
     ),
     pytest.param({"client_ids": [5, 0]}, "client_ids[1]: expected a positive whole number such as 123, got zero or a negative number", id="client-id-zero"),
     pytest.param({"contract_ids": [-1]}, "contract_ids[0]: expected a positive whole number such as 123, got zero or a negative number", id="contract-id-negative"),
@@ -554,7 +598,7 @@ LOCAL_LIST_ERRORS = [
 
 
 @pytest.mark.parametrize("args, fragment", LOCAL_LIST_ERRORS)
-async def test_local_validation_errors_name_the_param_and_send_nothing(server, mock_gorelo, args, fragment):
+async def test_list_invoices_local_validation_errors_name_the_param_and_send_nothing(server, mock_gorelo, args, fragment):
     text = await call_tool_error(server, "list_invoices", args)
     assert fragment in text
     assert mock_gorelo.requests == []
@@ -936,6 +980,7 @@ def test_the_two_delete_answers_are_the_ones_the_spec_text_gives(spec_index):
     assert invoices.EXPECTED_DELETE_ANSWER == {"Draft": 6, "Approved": 4}
     # 6 is no status a list can show (it exists only in this answer), 4 is one a list shows
     assert 6 not in invoices.INVOICE_STATUSES and 4 in invoices.INVOICE_STATUSES
+    assert invoices.INVOICE_STATUSES == {1: "Draft", 2: "Submitted", 3: "Paid", 4: "Void", 5: "Approved"}
     assert spec_index.schema("DeleteInvoiceResult")["fields"]["StatusId"]["nullable"] is False
     # the outcome says what the answer says (Deleted, no longer listed) and promises nothing more
     assert [text for _name, text in invoices.DELETE_ANSWERS.values()] == [
@@ -1050,6 +1095,8 @@ async def test_a_text_status_id_is_described_never_quoted(server, mock_gorelo):
     [
         pytest.param((3, "Paid"), "Draft", "has status Paid (id 3), not Draft", id="paid-is-not-draft"),
         pytest.param((3, "Paid"), "Approved", "has status Paid (id 3), not Approved", id="paid-is-not-approved"),
+        pytest.param((2, "Submitted"), "Draft", "has status Submitted (id 2), not Draft", id="submitted-is-not-draft"),
+        pytest.param((2, "Submitted"), "Approved", "has status Submitted (id 2), not Approved", id="submitted-is-not-approved"),
         pytest.param((4, "Void"), "Approved", "has status Void (id 4), not Approved", id="void-is-not-approved"),
         pytest.param((4, "Void"), "Draft", "has status Void (id 4), not Draft", id="void-is-not-draft"),
         pytest.param((5, "Approved"), "Draft", "has status Approved (id 5), not Draft", id="approved-is-not-draft"),
@@ -1540,6 +1587,36 @@ def test_the_delete_answer_is_read_the_way_the_spec_text_gives_it():
     # 2026-10-01 text said hard-deleted). If a later spec says more, re-read it before the tool's wording changes.
     assert "the invoice is gone from `GET /v1/invoices` entirely" in operation
     assert not re.search(r"permanen|hard-delet|irrevers", operation + " " + status, re.IGNORECASE)
+
+
+needs_spec_text = pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
+
+
+def operation(method, path):
+    return json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["paths"][path][method]
+
+
+def param_text(method, path, name):
+    return flat(next(p["description"] for p in operation(method, path)["parameters"] if p["name"] == name))
+
+
+def scale_of(text):  # {id: label} from "1 Draft, 2 Submitted, 3 Paid"
+    return {int(n): label for n, label in re.findall(r"(\d+) ([A-Z][a-z]+)", text)}
+
+
+@needs_spec_text
+def test_the_invoice_status_scale_is_the_one_the_spec_text_documents():
+    """The StatusIds scale of list_invoices is the one the full OpenAPI snapshot documents. Deleted (6) is only a
+    DELETE answer, so the list's statuses stay 1 to 5."""
+    text = param_text("get", "/v1/invoices", "StatusIds")
+    assert scale_of(text) == invoices.INVOICE_STATUSES == {1: "Draft", 2: "Submitted", 3: "Paid", 4: "Void", 5: "Approved"}
+    assert "Any other id is a 400" in text
+    assert "Omitted returns every status; deleted invoices are never listed" in text
+    document = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))
+    answer = flat(document["components"]["schemas"]["DeleteInvoiceResult"]["properties"]["StatusId"]["description"])
+    assert "so the list's status set stays 1-5" in answer and set(invoices.INVOICE_STATUSES) == {1, 2, 3, 4, 5}
+    delete = flat(operation("delete", "/v1/invoices/{invoiceId}")["description"])
+    assert "Refused with 409 - only a Draft or Approved invoice can be removed this way" in delete
 
 
 # --------------------------------------------------------------------------

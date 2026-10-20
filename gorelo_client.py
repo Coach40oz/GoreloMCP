@@ -17,26 +17,28 @@ Contract (the observed API behavior behind every rule is in docs/API-OBSERVED-BE
   tool declared in ops=[...] can be sent: anything else is refused with kind "spec" and no HTTP call.
   Calls outside any tool (tests, scripts) are not restricted.
 * Every Gorelo response is an envelope {StatusCode, IsSuccess, Data, DataContext, Notifications}
-  (the invoice PDF is the only raw body). `IsSuccess` is checked, not just the HTTP status. A body
-  that is not a Gorelo envelope raises kind "shape" whatever the HTTP status (the status stays in
-  err.status): this client never returns [] or {} to paper over a response it does not understand.
+  (the invoice PDF and the document PDF are the raw bodies; only the invoice PDF is a side-effect
+  GET). `IsSuccess` is checked, not just the HTTP status. A body that is not a Gorelo envelope raises
+  kind "shape" whatever the HTTP status (the status stays in err.status): this client never returns
+  [] or {} to paper over a response it does not understand.
   A binary operation counts as a download only when the 2xx response carries one of the expected
   content types (default application/pdf); anything else is parsed as an envelope or refused. Every
   body of a binary request is read through the max_bytes cap, a download or not: a huge page of an
   unexpected content type is refused (kind "shape") without being buffered whole first.
 * 429 (Gorelo did not process the request) is retried within a small budget for every method.
-  Timeouts, connection errors, 5xx and unreadable 2xx responses are NEVER retried: for a write they
-  are reported as `write_unconfirmed` so nobody repeats a write that may have applied.
+  Timeouts, connection errors, 5xx, 3xx (a redirect is never followed) and unreadable 2xx responses
+  are NEVER retried: for a write they are reported as `write_unconfirmed` so nobody repeats a write
+  that may have applied.
 * SIDE_EFFECT_GETS are GETs that still change state (the invoice PDF download is recorded as an
   export event). They are treated like writes for every failure above: write_unconfirmed is True and
   the message says the export may already be recorded and a retry records another export event. Like
   FORBIDDEN_OPS they are compared by SHAPE (is_side_effect_get: every {placeholder} counts the same, whatever
   Gorelo calls it), so a placeholder rename cannot turn the PDF export back into a harmless read.
 * At most `max_concurrency` requests are in flight at once.
-* Logging (logger "gorelo_client"): one INFO line per request with the tool, operation, status,
-  latency, attempts, query parameter NAMES and body field NAMES (only names of fields the spec
-  defines, as returned by spec.validate_body). Never values, never secrets. The httpx logger is
-  raised to WARNING because it logs full URLs, and URLs carry query values.
+* Logging (logger "gorelo_client"): one INFO line per request with the tool, operation, the path with its
+  record ids, status, latency, attempts, query parameter NAMES and body field NAMES (only names of fields the
+  spec defines, as returned by spec.validate_body). Never field or query values, never secrets. The httpx
+  logger is raised to WARNING because it logs full URLs, and URLs carry query values.
 
 Helpers (get_one, get_list, get_page, get_all, post, patch, delete, post_multipart, get_binary)
 all take the calling tool's name as `tool=`; it only labels logs.
@@ -126,9 +128,10 @@ def is_forbidden_op(op_key: str) -> bool:
 # GETs that are not pure reads: Gorelo records the call as an event on the record (the invoice PDF
 # download is logged on the invoice as an export event). A failed call may already have been
 # recorded and a retry records another one, so they are handled like writes: write_unconfirmed is
-# set for transport errors, timeouts, 5xx and unreadable 2xx, and a tool that uses one must not be
-# declared kind="read". Keys are written the way the spec index spells them today, but they are
-# COMPARED by shape (is_side_effect_get), exactly like FORBIDDEN_OPS: see normalize_op_key.
+# set for transport errors, timeouts, 5xx, 3xx (a redirect is never followed) and unreadable 2xx, and
+# a tool that uses one must not be declared kind="read". Keys are written the way the spec index
+# spells them today, but they are COMPARED by shape (is_side_effect_get), exactly like FORBIDDEN_OPS:
+# see normalize_op_key.
 SIDE_EFFECT_GETS = frozenset({"GET /v1/invoices/{invoiceId}/pdf"})
 
 
@@ -192,9 +195,10 @@ class GoreloAPIError(Exception):
         notifications: Gorelo's Notifications as [{"code", "message", "property"}].
         trace_id: DataContext.TraceId, quote it when reporting a problem to Gorelo.
         write_unconfirmed: True when a write may or may not have been applied (timeout, connection
-            error, 5xx, or an unreadable 2xx on a non-GET). Verify with a read before retrying. It is
-            also True for the same failures of a SIDE_EFFECT_GETS call (the PDF download): the export
-            may already be recorded and a retry records another export event.
+            error, 5xx, a redirect answer that is never followed, or an unreadable 2xx on a non-GET).
+            Verify with a read before retrying. It is also True for the same failures of a
+            SIDE_EFFECT_GETS call (the PDF download): the export may already be recorded and a retry
+            records another export event.
     """
 
     def __init__(
@@ -276,7 +280,7 @@ class AllResult:
 
 @dataclass(frozen=True)
 class BinaryResult:
-    """A file download (the invoice PDF)."""
+    """A file download (the invoice PDF or the document PDF)."""
 
     content: bytes
     filename: str | None
@@ -511,12 +515,14 @@ class GoreloClient:
     async def __aenter__(self) -> GoreloClient:
         if self._http is not None:
             raise RuntimeError("GoreloClient is already started")
+        # A redirect must never carry X-API-Key to another host, so redirects are never followed.
         self._http = httpx.AsyncClient(
             base_url=self.base_url,
             headers={"X-API-Key": self._api_key, "Accept": "application/json"},
             timeout=self._timeout,
             transport=self._transport,
             event_hooks=self._event_hooks,
+            follow_redirects=False,
         )
         return self
 
@@ -741,7 +747,7 @@ class GoreloClient:
         expected_content_types: Sequence[str] = DEFAULT_EXPECTED_CONTENT_TYPES,
         tool: str,
     ) -> BinaryResult:
-        """GET a file download (the invoice PDF), read in a streaming fashion and capped at max_bytes.
+        """GET a file download (the invoice PDF or the document PDF), read in a streaming fashion and capped at max_bytes.
 
         A 2xx response is a download only when its Content-Type is one of expected_content_types
         (media type compared case-insensitively, parameters such as charset ignored). Any other 2xx
@@ -749,7 +755,7 @@ class GoreloClient:
         refusing to guess"): an HTML or plain text page is never handed back as a file. Such a body is
         read through the same max_bytes cap as a download, so a huge one is refused without being
         buffered whole. For the PDF export (SIDE_EFFECT_GETS) every such failure that Gorelo may have
-        recorded (a 2xx or 5xx answer) is write_unconfirmed: the export may already be recorded and a
+        recorded (a 2xx, 3xx or 5xx answer) is write_unconfirmed: the export may already be recorded and a
         retry records another export event.
         """
         self._op_for(op_key, tool, methods=("GET",), paged=False, binary=True)
@@ -1247,7 +1253,7 @@ class GoreloClient:
                 content_type=raw.headers.get("content-type"),
             )
         parsed = _parse_json(raw.content)
-        # A write may have been applied when Gorelo answered 2xx or 5xx without a usable answer. A
+        # A write may have been applied when Gorelo answered 2xx, 3xx or 5xx without a usable answer. A
         # SIDE_EFFECT_GETS call (the PDF export) is recorded by Gorelo in the same situations.
         write_may_have_applied = _may_have_applied(op, status)
         if not (isinstance(parsed, dict) and isinstance(parsed.get("IsSuccess"), bool)):
@@ -1326,7 +1332,7 @@ def _describe_body(parsed: Any, raw: _Raw) -> str:
 
 
 def _problem_hint(parsed: Any) -> str:
-    """Names (never values) from an ASP.NET problem-details style error body."""
+    """The title and the field names (never the field values) from an ASP.NET problem-details style error body."""
     if not isinstance(parsed, dict):
         return ""
     title = parsed.get("title")
@@ -1367,9 +1373,9 @@ def _export_suffix(op: OpSpec) -> str:
 
 def _may_have_applied(op: OpSpec, status: int) -> bool:
     """True when Gorelo may have applied the call although its answer was unusable: a non-GET, or a
-    SIDE_EFFECT_GETS call (the PDF export is recorded as an event), answered with 2xx or 5xx. A 4xx
-    is a refusal: nothing was applied."""
-    return (op.method != "GET" or is_side_effect_get(op.key)) and (200 <= status < 300 or status >= 500)
+    SIDE_EFFECT_GETS call (the PDF export is recorded as an event), answered with 2xx, 3xx (a redirect is
+    never followed) or 5xx. A 4xx is a refusal: nothing was applied."""
+    return (op.method != "GET" or is_side_effect_get(op.key)) and (200 <= status < 400 or status >= 500)
 
 
 def _wanted_hint(status: int, expected: frozenset[str] | None) -> str:

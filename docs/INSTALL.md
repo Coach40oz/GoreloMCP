@@ -14,7 +14,7 @@ Conventions:
 
 | You need | Notes |
 |---|---|
-| A Gorelo API key | Create it in Gorelo (Settings, API keys). Give it read and write scopes for the areas you want Claude to use: clients (the write scope on clients is expected to cover setting and clearing a client's custom fields too, because they are part of the same update; this has not been tested against a live account yet), contacts, tickets, assets (the `Assets` scope also covers custom assets, including creating and updating them), time, billing (invoices, items, taxes, contracts), alerts and uptime. Only add the `Project` and `Forms` scopes if you will switch those toolsets on (step 8). Start with fewer scopes: you can add more later. The key is shown once, so copy it somewhere safe. |
+| A Gorelo API key | Create it in Gorelo (Settings, API keys). Give it read and write scopes for the areas you want Claude to use: clients (the write scope on clients is expected to cover setting and clearing a client's custom fields too, because they are part of the same update; this has not been tested against a live account yet), contacts, tickets, assets (the `Assets` scope also covers custom assets, including creating and updating them), time, billing (invoices, items, taxes, contracts), alerts and uptime. Only add the `Project`, `Forms` and `Documents` scopes if you will switch those toolsets on (step 8). Your Gorelo account is hosted in one region, US or Australia; step 3 says which address to use for each. Start with fewer scopes: you can add more later. The key is shown once, so copy it somewhere safe. |
 | A Debian 13 server | A VM, an LXC container or a cloud VPS. 1 CPU, 1 GB of RAM and 5 GB of disk are plenty. Root access and outbound internet. |
 | A domain on Cloudflare | The domain's DNS must be managed by Cloudflare (a free account is fine). You will create a tunnel and a hostname such as `mcp.example.com`. |
 | A claude.ai plan with custom connectors | Check Settings, Connectors in claude.ai. On team and enterprise plans an owner may need to allow custom connectors. |
@@ -210,10 +210,12 @@ Fill in each value after the `=` sign. No quotes, no spaces.
 | Variable | Required | What to put |
 |---|---|---|
 | `GORELO_API_KEY` | yes | The raw Gorelo API key. No `Bearer ` in front. |
+| `GORELO_BASE_URL` | no | Leave blank if your Gorelo account is hosted in the US region: the server then calls `https://api.usw.gorelo.io/v1`. If it is hosted in Australia, put `https://api.aue.gorelo.io` (the `/v1` and a trailing slash are optional). It must start with `https://` and name a host under `gorelo.io`, or the service refuses to start. See 3.3. |
 | `PUBLIC_BASE_URL` | yes | The public address of this server, for example `https://mcp.example.com`. No `/mcp` and no trailing slash. It is the address Claude signs in at. If you change it later, Claude must sign in again. |
 | `MCP_AUTH_PASSWORD` | yes | The password from 3.1. Use 16 characters or more (the service warns if it is shorter). |
 | `GORELO_TOOLSETS` | no | Leave blank for the default: `core,tickets,time,billing,uptime`. See step 8. |
 | `GORELO_ENABLE_DESTRUCTIVE` | no | Leave blank (off). See step 8. |
+| `MCP_EXTRA_REDIRECT_DOMAINS` | no | Leave blank unless an AI client other than claude.ai must sign in. Step 6.1 (ChatGPT) and 6.2 (Microsoft Copilot Studio) say what to put here. |
 
 Save with Ctrl+O, Enter, then exit with Ctrl+X.
 
@@ -226,6 +228,10 @@ stat -c '%U:%G %a %n' /opt/gorelo-mcp/app/.env
 You should see `root:gorelo-mcp 640 /opt/gorelo-mcp/app/.env`. If not, repeat the `install` command above only if the file is still the empty template, or fix it with `chown root:gorelo-mcp /opt/gorelo-mcp/app/.env && chmod 0640 /opt/gorelo-mcp/app/.env`.
 
 Never paste the file contents into a chat, ticket or screenshot.
+
+### 3.3 Check the region of your Gorelo account
+
+Gorelo hosts accounts in two regions: the US (`api.usw.gorelo.io`, the default) and Australia (`api.aue.gorelo.io`). `GORELO_BASE_URL` must be the host of the region your Gorelo account is hosted in; Gorelo's help center page "API overview" lists both addresses. You check the result in step 4.3: the start line in the journal names the host it calls (`api_host`), and it must be the host of your region.
 
 ## 4. Install the service and start it
 
@@ -259,7 +265,7 @@ You should see `Active: active (running)`.
 journalctl -u gorelo-mcp.service --since "5 minutes ago" --no-pager
 ```
 
-You should see a line like `gorelo-mcp ready: toolsets=billing,core,tickets,time,uptime destructive=False tools=61` and a line containing `oauth state loaded`. If you see `refusing to start`, the line names every setting that is wrong: fix `.env` and run `systemctl restart gorelo-mcp.service`.
+You should see a line like `gorelo-mcp ready: toolsets=billing,core,tickets,time,uptime destructive=False tools=63` and a line containing `oauth state loaded`. Two more lines come before the ready line: `gorelo-mcp settings: api_host=api.usw.gorelo.io extra_redirect_domains=none` (the Gorelo host this server calls, and the extra sign-in domains you added, if any) and `gorelo-mcp gated tools: none` (the gated tools that are switched on: delete, void, approved-invoice and sharing tools; none by default). If the start line's `api_host` is not the host of your region, fix `GORELO_BASE_URL` (step 3.3). If you see `refusing to start`, the line names every setting that is wrong: fix `.env` and run `systemctl restart gorelo-mcp.service`.
 
 ### 4.4 Check the local endpoint
 
@@ -378,9 +384,45 @@ You should see a line such as `authorize outcome=invalid_request reason=... clie
 5. Enter the `MCP_AUTH_PASSWORD` you made in step 3 and approve.
 6. Start a new conversation, enable the connector for it, and ask: "Run health_check".
 
-You should see a result with `ok: true`, `api: reachable`, a client count, and the toolsets that are on. If you see `ok: false`, the message names the problem (usually the API key).
+You should see a result with `ok: true`, `api: reachable`, `total_clients` and the toolsets that are on.
+
+If you see `ok: false`, the message names the problem (usually the API key; for a 401 it also names the host it called and `GORELO_BASE_URL`, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#api-key-rejected-http-401)).
 
 Five wrong passwords from one address in 15 minutes lock that address out for a while. Copy the password from your password manager instead of typing it.
+
+### 6.1 Connect from ChatGPT (optional)
+
+ChatGPT can use a custom connector (Developer Mode, which needs a plan that offers it; the menus change from time to time). It signs in with OAuth and registers itself, so you create no client id or secret.
+
+1. Allow its sign-in domain. Add `MCP_EXTRA_REDIRECT_DOMAINS=chatgpt.com` to `/opt/gorelo-mcp/app/.env` (a comma list if you add more domains), then restart and read the start line:
+
+   ```bash
+   systemctl restart gorelo-mcp.service
+   sleep 5
+   journalctl -u gorelo-mcp.service --since "1 minute ago" --no-pager | grep "gorelo-mcp settings"
+   ```
+
+   You should see `extra_redirect_domains=chatgpt.com`.
+2. In ChatGPT open Settings, then Apps and Connectors, then Advanced settings, and turn Developer mode on.
+3. Create a connector. Name: `Gorelo`. Server URL: `https://your-host/mcp`. Authentication: OAuth.
+4. A page of your server opens, titled "Authorize MCP Access", with ChatGPT's name and a redirect address on `chatgpt.com`. Enter the `MCP_AUTH_PASSWORD` and approve. You return to ChatGPT.
+5. Start a chat, enable the connector and ask: "Run health_check".
+
+If ChatGPT only says it cannot connect, read "Copilot Studio cannot connect" in [TROUBLESHOOTING.md](TROUBLESHOOTING.md#copilot-studio-cannot-connect): the same journal line names the host to add. This has been checked by offline tests that replay ChatGPT's documented sign-in; it has not been tried against the real service yet.
+
+### 6.2 Connect from Microsoft Copilot Studio (optional)
+
+Copilot Studio reaches an MCP server through a Power Platform connector, and the connector signs in at `https://global.consent.azure-apim.net/redirect/<connector>` (Microsoft documents a redirect address per connector; the host can differ by Microsoft cloud).
+
+1. Allow its sign-in domain as in 6.1, with `MCP_EXTRA_REDIRECT_DOMAINS=global.consent.azure-apim.net` (or `chatgpt.com,global.consent.azure-apim.net` for both clients). If your connector is refused later, the journal names the host it was sent to: use exactly that host (see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#copilot-studio-cannot-connect)).
+2. In Copilot Studio add the server to your agent as an MCP server (or custom connector) with the URL `https://your-host/mcp`, and choose OAuth 2.0 with dynamic client registration where it offers a choice. Follow Microsoft's current guide for the exact screens; they change.
+3. When the password page of your server opens, enter the `MCP_AUTH_PASSWORD` and approve.
+
+This server has no pre-made client id and client secret; it supports dynamic client registration only. A Copilot Studio form that insists on a manual client id and secret cannot be served. This has been checked by offline tests that replay Microsoft's documented redirect; it has not been tried against the real service yet.
+
+### 6.3 One password and one key for every client
+
+Every client signs in with the same `MCP_AUTH_PASSWORD` and then acts with the same Gorelo API key, the same toolsets and the same gated tools. Each domain you add to `MCP_EXTRA_REDIRECT_DOMAINS` is a trust grant (see [SECURITY.md](../SECURITY.md)). Removing a domain and restarting stops new sign-ins from that kind of client only (its registrations stay stored): a client that is already connected keeps working until you sign out every session (see "Sign out all Claude sessions" in [OPERATIONS.md](OPERATIONS.md)).
 
 ## 7. Optional: the daily API watcher
 
@@ -388,7 +430,7 @@ Gorelo announces API changes in its public changelog. The watcher runs once a da
 
 ### 7.1 Create the watcher key file
 
-The watcher gets its own small file, with only the API key. It may be the same key as the server's, or a separate one that can create alerts.
+The watcher gets its own small file, with only the API key (and, for an account hosted in Australia, the address of that region). It may be the same key as the server's, or a separate one that can create alerts.
 
 ```bash
 install -d -m 0755 /etc/gorelo-mcp
@@ -397,6 +439,8 @@ nano /etc/gorelo-mcp/watcher.env
 ```
 
 Replace `replace-with-the-gorelo-api-key` with the key. Save and exit.
+
+If your Gorelo account is hosted in Australia, also remove the `#` in front of the line `GORELO_BASE_URL=https://api.aue.gorelo.io` in that file. It is the same setting as in `.env`; without it the watcher calls the US host, its default.
 
 ### 7.2 Create `site.local.toml`
 
@@ -454,29 +498,35 @@ Note: if you installed this tree from a release that is older or newer than the 
 
 | Toolset | In the default set | Covers |
 |---|---|---|
-| `core` | yes | clients, locations, contacts, assets (agent assets read only; custom assets list, create and update), groups, users, alerts, `health_check` |
+| `core` | yes | clients, locations, contacts, assets (agent assets read only; custom assets get, list, create, update and move), the feed of deleted records, groups, users, alerts, `health_check` |
 | `tickets` | yes | tickets, comments, side conversations, approvals, attachments |
 | `time` | yes | time entries, billing roles, work types |
 | `billing` | yes | invoices (Draft), items, categories, taxes, contracts |
 | `uptime` | yes | uptime checks and maintenance windows |
 | `projects` | no | projects, sections, tasks (needs the `Project` scope on the key) |
 | `forms` | no | forms, responses, submission links (needs the `Forms` scope on the key) |
+| `documents` | no | documents, their versions and related items, and a PDF export (needs the `Documents` scope on the key; files and images for a document are uploaded with `upload_attachment`, which is in `tickets`, so keep `tickets` on) |
 
-Examples: `GORELO_TOOLSETS=all` turns every toolset on. `GORELO_TOOLSETS=core,tickets` gives a smaller set. Fewer tools means a smaller risk and a shorter list for Claude to read.
+Examples: `GORELO_TOOLSETS=all` turns every toolset on, `documents` included (its tools answer 403 until the key has the `Documents` scope). `GORELO_TOOLSETS=core,tickets` gives a smaller set. Fewer tools means a smaller risk and a shorter list for Claude to read.
 
 ### 8.2 The destructive switch
 
-By default the delete and void tools, and the tool that creates an Approved invoice, do not exist. `GORELO_ENABLE_DESTRUCTIVE=1` adds them. Every call still needs `confirm=true`, and Claude is told to ask you first. An Approved invoice is sent to your connected accounting system at once and may email its recipients, and voiding it in Gorelo does not void the accounting system's copy. Switch this on only if you need it. Some operations (deleting clients, contacts, tickets, assets and contracts) can never be called, whatever you set.
+By default the delete and void tools, the tool that creates an Approved invoice and the tool that shares a document outside Gorelo do not exist. `GORELO_ENABLE_DESTRUCTIVE=1` adds all of them. To add only some, list their names separated by commas: `GORELO_ENABLE_DESTRUCTIVE=delete_time_entry,delete_ticket_comment` adds those two and no other gated tool. The names are in [tool-catalog.md](tool-catalog.md) (kind `destructive`). A name that is not a gated tool, or a gated tool of a toolset that `GORELO_TOOLSETS` does not enable (`share_document` and `remove_document_related_item` need `documents`), stops the service with an error that names the bad names and lists the valid ones. Every call still needs `confirm=true`, and Claude is told to ask you first. An Approved invoice is sent to your connected accounting system at once and may email its recipients, and voiding it in Gorelo does not void the accounting system's copy. A shared document can be read by anyone who has its link. Switch on only what you need. Some operations (deleting clients, contacts, tickets, assets and contracts) can never be called, whatever you set.
+
+To turn the gated tools off again, make `GORELO_ENABLE_DESTRUCTIVE` blank (or `0`); to turn off only some of them, take their names out of the list. Apply the change as in 8.3: the server reads `.env` only when it starts. The start line `gorelo-mcp gated tools:` then names the gated tools that are on (`none` when all of them are off), and `health_check` lists them as `gated_tools`.
+
+**Use at your own risk.** This server cannot undo a delete or a void, an Approved invoice reaches your accounting system at once, and a shared link works for anyone who has it until you unshare the document. Try a gated tool on a test client before you use it on real data.
 
 ### 8.3 Apply the change
 
 ```bash
 nano /opt/gorelo-mcp/app/.env
 systemctl restart gorelo-mcp.service
-journalctl -u gorelo-mcp.service --since "1 minute ago" --no-pager | grep ready
+sleep 5
+journalctl -u gorelo-mcp.service --since "1 minute ago" --no-pager | grep -E "gorelo-mcp (settings|gated tools|ready)|refusing"
 ```
 
-You should see the `ready:` line with your toolsets and the `destructive=` flag. Start a new conversation in Claude to see the new tool list. A wrong value stops the service with an error naming it.
+The `gorelo-mcp settings:` line shows the Gorelo host this server calls and the extra sign-in domains, the `gorelo-mcp ready:` line shows your toolsets and the `destructive=` flag, the `gorelo-mcp gated tools:` line names the gated tools that are on (or `none`), and a line with `refusing to start` names a wrong value. Start a new conversation in Claude to see the new tool list.
 
 The full list of tools is in [tool-catalog.md](tool-catalog.md).
 
@@ -527,6 +577,8 @@ Read the release notes (the commit messages or the GitHub release page) for any 
 Then start a new conversation in Claude, since tool lists are read when a conversation starts.
 
 ### 9.2 Roll back
+
+Before you roll back to a version older than 1.3.0, take `documents` out of `GORELO_TOOLSETS` and make `GORELO_ENABLE_DESTRUCTIVE` blank: the older versions refuse to start on the toolset name `documents` and on a comma list of tool names, and `.env` is not changed by a checkout. Do not use `1` instead: on an older version it switches on every gated tool, including any you had left out of your list.
 
 Use the tag you wrote down before the update (`PREVIOUS_TAG` below, for example `v1.0.0`). `git tag --sort=-v:refname` lists the tags that exist.
 

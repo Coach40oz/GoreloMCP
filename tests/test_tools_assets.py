@@ -1,8 +1,10 @@
 """tools/assets.py: list_agents, get_agent, list_custom_assets (read only), and the custom asset hardware types, create and update."""
 
 import json
+import re
 from pathlib import Path
 
+import httpx
 import pytest
 from conftest import (
     TEST_TRACE_ID,
@@ -10,6 +12,7 @@ from conftest import (
     call_tool_error,
     envelope,
     error_envelope,
+    in_order,
     list_tools,
     paged_envelope,
     paged_responder,
@@ -32,12 +35,16 @@ TOOLS = {
     "list_agents": (["GET /v1/assets/agents"], ["status_ids", "client_ids", *FILTERS], []),
     "get_agent": (["GET /v1/assets/agents/{deviceId}"], ["agent_id"], ["agent_id"]),
     "list_custom_assets": (["GET /v1/assets/custom"], ["client_ids", *FILTERS], []),
+    "get_custom_asset": (["GET /v1/assets/custom/{customAssetId}"], ["custom_asset_id"], ["custom_asset_id"]),
 }
 
 WRITE_TOOLS = {
-    "create_custom_asset": ["POST /v1/assets/custom", "GET /v1/assets/custom"],
-    "update_custom_asset": ["PATCH /v1/assets/custom/{customAssetId}", "GET /v1/assets/custom"],
+    "create_custom_asset": ["POST /v1/assets/custom", "GET /v1/assets/custom/{customAssetId}"],
+    "update_custom_asset": ["PATCH /v1/assets/custom/{customAssetId}", "GET /v1/assets/custom/{customAssetId}"],
 }
+
+# The device status scale of list_agents: the StatusIds text of the spec (pinned by test_the_device_status_scale_is_the_one_in_the_spec_text).
+AGENT_SCALE = "1 Unreachable, 2 Active, 3 Inactive, 4 Pending Delete, 6 Pending client inactive"
 
 ALL_DATES = {
     "created_since": "2026-01-01T00:00:00Z",
@@ -69,7 +76,7 @@ def agent_record(n=1, **extra):
         "Id": uid(n),
         "Name": f"HOST-{n:02d}",
         "DisplayName": f"Host {n}",
-        "Status": {"Id": 1, "Name": "Online"},
+        "Status": {"Id": 2, "Name": "Active"},
         "ClientId": 9101,
         "LocationId": 9001,
         "CreatedOn": "2026-01-01T00:00:00Z",
@@ -152,9 +159,16 @@ def test_the_field_map_of_get_agent_names_the_path_placeholder(spec_index):
     assert set(spec.field_map.values()) == set(spec_index.op("GET /v1/assets/agents/{deviceId}").path_placeholders)
 
 
+def test_the_field_map_of_get_custom_asset_names_the_path_placeholder(spec_index):
+    spec = next(s for s in REGISTRY.specs if s.name == "get_custom_asset")
+    assert spec.field_map == {"custom_asset_id": "customAssetId"}
+    assert set(spec.field_map.values()) == set(spec_index.op("GET /v1/assets/custom/{customAssetId}").path_placeholders)
+
+
 def test_the_single_agent_is_the_list_row_fields_plus_custom_properties_in_the_spec(spec_index):
     """The module text says the single record (DeviceResponse) is a list row (DeviceListItemResponse) plus CustomProperties,
-    which the list deliberately leaves out. The two had exactly the same fields until contract 1b1c0cec0e9a (2026-10-14)."""
+    which the list deliberately leaves out. The two had exactly the same fields until contract 1b1c0cec0e9a (2026-10-14).
+    IsHidden joined CustomPropertyValue on 2026-10-17."""
     assert spec_index.op("GET /v1/assets/agents").response["data"] == "[DeviceListItemResponse]"
     assert spec_index.op("GET /v1/assets/agents/{deviceId}").response["data"] == "DeviceResponse"
     row, record = spec_index.schema("DeviceListItemResponse")["fields"], spec_index.schema("DeviceResponse")["fields"]
@@ -163,13 +177,16 @@ def test_the_single_agent_is_the_list_row_fields_plus_custom_properties_in_the_s
     assert {"LocationId", "WarrantyStartDate", "WarrantyEndDate"} <= set(row) and "ClientLocationId" not in row
     custom = record["CustomProperties"]
     assert (custom["type"], custom["items"]["ref"], custom["nullable"]) == ("array", "CustomPropertyValue", False)
-    assert set(spec_index.schema("CustomPropertyValue")["fields"]) == {"Id", "Variable", "Name", "Type", "Value", "IsSet"}
+    assert set(spec_index.schema("CustomPropertyValue")["fields"]) == {"Id", "Variable", "Name", "Type", "Value", "IsSet", "IsHidden"}
+    hidden = spec_index.schema("CustomPropertyValue")["fields"]["IsHidden"]
+    assert (hidden["type"], hidden["nullable"]) == ("boolean", False)
     # no operation updates a device, so nothing in this module could write a custom property of one
     assert {op.method for op in spec_index.ops.values() if op.path == "/v1/assets/agents/{deviceId}"} == {"GET", "DELETE"}
     doc = flat(assets_module.__doc__)
     assert "DeviceListItemResponse" in doc and "DeviceResponse" in doc and "the same fields" not in doc
     assert "the list row's fields plus CustomProperties" in doc and "which the list deliberately leaves out" in doc
     assert "Gorelo has no operation that updates a device" in doc
+    assert "IsHidden" in doc and "Value is then always null" in doc
 
 
 LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
@@ -201,7 +218,7 @@ def test_no_tool_can_delete_an_asset_and_agents_stay_read_only():
 def test_docstrings_follow_the_template(name):
     doc = next(s for s in REGISTRY.specs if s.name == name).fn.__doc__
     assert "Side effects:" not in doc  # read only: nothing to state
-    assert ("Paging:" in doc) == (name != "get_agent")
+    assert ("Paging:" in doc) == (name not in ("get_agent", "get_custom_asset"))
 
 
 @pytest.mark.parametrize(
@@ -210,6 +227,7 @@ def test_docstrings_follow_the_template(name):
         ("list_agents", "client_ids", "list_clients"),
         ("list_custom_assets", "client_ids", "list_clients"),
         ("get_agent", "agent_id", "list_agents"),
+        ("get_custom_asset", "custom_asset_id", "list_custom_assets"),
     ],
 )
 async def test_each_id_description_names_the_tool_that_resolves_it(server, name, param, resolver):
@@ -227,7 +245,7 @@ def test_the_agent_docstrings_send_the_model_from_the_list_to_the_single_record_
     # the list rows leave CustomProperties out and get_agent has it (contract 1b1c0cec0e9a); each pointer is a few words, because
     # the default tools/list is at its byte budget (tests/test_integration.py)
     assert "Rows omit custom fields: get_agent has them." in flat(assets_module.list_agents.__doc__)
-    assert flat(assets_module.get_agent.__doc__).endswith("returns Gorelo's full device record, including CustomProperties.")
+    assert flat(assets_module.get_agent.__doc__).endswith("returns Gorelo's full device record, including CustomProperties (a field with IsHidden true has a null Value; IsSet still says whether one is saved).")
 
 
 def test_the_asset_docstrings_say_this_server_cannot_delete():
@@ -313,7 +331,7 @@ async def test_list_agents_reports_an_empty_page_as_an_empty_page(server, mock_g
     "arguments, fragment",
     [
         ({"status_ids": []}, "status_ids: expected at least one id, got an empty list"),
-        ({"status_ids": [2, 0]}, "status_ids[1]: expected a positive whole number such as 123, got zero or a negative number"),
+        ({"status_ids": [2, 0]}, f"status_ids[1]: expected {AGENT_SCALE}, got 0"),
         ({"client_ids": []}, "client_ids: expected at least one id, got an empty list"),
         ({"client_ids": [9101, 0]}, "client_ids[1]: expected a positive whole number such as 123, got zero or a negative number"),
         ({"client_ids": [-5]}, "client_ids[0]: expected a positive whole number such as 123, got zero or a negative number"),
@@ -328,6 +346,61 @@ async def test_list_agents_reports_an_empty_page_as_an_empty_page(server, mock_g
 async def test_list_agents_local_errors_name_the_parameter_and_send_nothing(server, mock_gorelo, arguments, fragment):
     assert fragment in await call_tool_error(server, "list_agents", arguments)
     assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("status", [1, 2, 3, 4, 6])
+async def test_every_device_status_of_the_scale_is_sent(server, mock_gorelo, status):
+    mock_gorelo.on("GET", AGENTS, paged_envelope([agent_record()]))
+    result = await call_tool(server, "list_agents", {"status_ids": [status]})
+    assert mock_gorelo.last.query == {"StatusIds": str(status), "PageSize": "100"}
+    assert result["filters"] == {"status_ids": [status]}
+
+
+async def test_the_whole_device_scale_goes_in_one_filter_in_the_order_given(server, mock_gorelo):
+    mock_gorelo.on("GET", AGENTS, paged_envelope([]))
+    result = await call_tool(server, "list_agents", {"status_ids": [6, 1, 2, 3, 4]})
+    assert mock_gorelo.last.query == {"StatusIds": "6,1,2,3,4", "PageSize": "100"}
+    assert result["filters"] == {"status_ids": [6, 1, 2, 3, 4]}
+
+
+@pytest.mark.parametrize("bad", [0, -1, -7, 5, 7, 99, 100000])
+async def test_a_device_status_outside_the_scale_is_refused_with_the_scale_and_sends_nothing(server, mock_gorelo, bad):
+    text = await call_tool_error(server, "list_agents", {"status_ids": [2, bad]})
+    assert text == f"status_ids[1]: expected {AGENT_SCALE}, got {bad}"
+    assert mock_gorelo.requests == []
+
+
+async def test_a_device_status_above_int64_keeps_the_id_message(server, mock_gorelo):
+    text = await call_tool_error(server, "list_agents", {"status_ids": [2**63]})
+    assert text.startswith("status_ids[0]: expected a positive whole number such as 123, got a number above ")
+    assert mock_gorelo.requests == []
+
+
+async def test_up_to_100_device_status_ids_are_sent_and_101_are_refused(server, mock_gorelo):
+    mock_gorelo.on("GET", AGENTS, paged_envelope([]))
+    await call_tool(server, "list_agents", {"status_ids": [2] * 100})
+    assert mock_gorelo.last.query["StatusIds"] == ",".join(["2"] * 100)
+    mock_gorelo.reset()
+    text = await call_tool_error(server, "list_agents", {"status_ids": [2] * 101})
+    assert text == "status_ids: at most 100 ids, got 101"
+    assert mock_gorelo.requests == []
+
+
+async def test_the_status_ids_text_the_model_reads_is_built_from_the_table_the_check_uses(server):
+    assert assets_module.AGENT_STATUS_SCALE == AGENT_SCALE and assets_module.AGENT_STATUS_IDS_MAX == 100
+    tool = next(t for t in await list_tools(server) if t.name == "list_agents")
+    text = tool.inputSchema["properties"]["status_ids"]["description"]
+    assert AGENT_SCALE in text and "Up to 100 ids" in text and "any other id is refused" in text
+
+
+@pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
+def test_the_device_status_scale_is_the_one_in_the_spec_text():
+    parameters = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["paths"]["/v1/assets/agents"]["get"]["parameters"]
+    text = flat(next(p for p in parameters if p["name"] == "StatusIds")["description"])
+    found = re.search(r"to include: (.*?)\. Up to (\d+) ids; any other value is a 400", text)
+    assert found, text
+    scale = {int(n): label for n, label in re.findall(r"(\d+) ([A-Za-z ]+?)(?:, |$)", found.group(1))}
+    assert scale == assets_module.AGENT_STATUS_LABELS and int(found.group(2)) == assets_module.AGENT_STATUS_IDS_MAX
 
 
 @pytest.mark.parametrize(
@@ -370,12 +443,14 @@ async def test_get_agent_reads_one_agent_and_returns_the_record_unchanged(server
 
 
 # The shape is CustomPropertyValue (contract 1b1c0cec0e9a); the values are invented, because the field types Gorelo uses
-# (Type is {Id, Name}) and the formats of their values were not probed. Value is the effective value (the saved one, else the
+# (Type is {Id, Name}) and the formats of their values are not pinned here. Value is the effective value (the saved one, else the
 # field's default, else null) and is always text; IsSet says whether a value is saved on the device.
+# IsHidden (contract a7954b24844b): Value is always null when it is true; IsSet is still reported.
 CUSTOM_PROPERTIES = [
-    {"Id": 41, "Variable": "warranty_vendor", "Name": "Warranty vendor", "Type": {"Id": 1, "Name": "Text"}, "Value": "Dell", "IsSet": True},
-    {"Id": 42, "Variable": "asset_tag", "Name": "Asset tag", "Type": {"Id": 1, "Name": "Text"}, "Value": None, "IsSet": False},
-    {"Id": 43, "Variable": "seats", "Name": "Seats", "Type": {"Id": 2, "Name": "Number"}, "Value": "5", "IsSet": False},
+    {"Id": 41, "Variable": "warranty_vendor", "Name": "Warranty vendor", "Type": {"Id": 1, "Name": "Text"}, "Value": "Dell", "IsSet": True, "IsHidden": False},
+    {"Id": 42, "Variable": "asset_tag", "Name": "Asset tag", "Type": {"Id": 1, "Name": "Text"}, "Value": None, "IsSet": False, "IsHidden": False},
+    {"Id": 43, "Variable": "seats", "Name": "Seats", "Type": {"Id": 2, "Name": "Number"}, "Value": "5", "IsSet": False, "IsHidden": False},
+    {"Id": 44, "Variable": "licence_key", "Name": "Licence key", "Type": {"Id": 1, "Name": "Text"}, "Value": None, "IsSet": True, "IsHidden": True},
 ]
 
 
@@ -387,10 +462,24 @@ async def test_get_agent_passes_custom_properties_through_unchanged(server, mock
     result = await call_tool(server, "get_agent", {"agent_id": uid(7)})
     assert result == record
     assert result["CustomProperties"] == CUSTOM_PROPERTIES
-    assert [entry["Id"] for entry in result["CustomProperties"]] == [41, 42, 43]
-    assert [entry["Value"] for entry in result["CustomProperties"]] == ["Dell", None, "5"]
-    assert [entry["IsSet"] for entry in result["CustomProperties"]] == [True, False, False]
+    assert [entry["Id"] for entry in result["CustomProperties"]] == [41, 42, 43, 44]
+    assert [entry["Value"] for entry in result["CustomProperties"]] == ["Dell", None, "5", None]
+    assert [entry["IsSet"] for entry in result["CustomProperties"]] == [True, False, False, True]
+    assert [entry["IsHidden"] for entry in result["CustomProperties"]] == [False, False, False, True]
     assert len(mock_gorelo.requests) == 1  # one GET: the custom fields are part of the single record
+
+
+async def test_get_agent_does_not_hide_or_reshape_a_hidden_field(server, mock_gorelo):
+    """A hidden field (IsHidden true) has a null Value whatever is saved, and IsSet is still reported: the entry comes back as sent."""
+    hidden = {
+        "Id": 44, "Variable": "licence_key", "Name": "Licence key", "Type": {"Id": 1, "Name": "Text"},
+        "Value": None, "IsSet": True, "IsHidden": True,
+    }
+    record = agent_record(7, CustomProperties=[hidden])
+    mock_gorelo.on("GET", f"/v1/assets/agents/{uid(7)}", envelope(record))
+    result = await call_tool(server, "get_agent", {"agent_id": uid(7)})
+    assert result == record
+    assert result["CustomProperties"] == [hidden] and result["CustomProperties"][0]["IsSet"] is True
 
 
 async def test_get_agent_keeps_an_empty_custom_properties_list(server, mock_gorelo):
@@ -591,6 +680,138 @@ async def test_list_custom_assets_refuses_the_legacy_lowercase_body_instead_of_r
 
 
 # --------------------------------------------------------------------------
+# get_custom_asset
+# --------------------------------------------------------------------------
+
+GET_ASSET_PATH = f"{CUSTOM}/{uid(7)}"
+
+
+async def test_get_custom_asset_reads_one_asset_and_returns_the_record_unchanged(server, mock_gorelo):
+    record = custom_record(7, ContactId=7962, HardwareTypeId=118)
+    mock_gorelo.on("GET", GET_ASSET_PATH, envelope(record))
+    result = await call_tool(server, "get_custom_asset", {"custom_asset_id": uid(7)})
+    assert result == record
+    request = mock_gorelo.last
+    assert (request.method, request.path, request.query, request.content) == ("GET", GET_ASSET_PATH, {}, b"")
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_get_custom_asset_keeps_the_null_fields_as_gorelo_sent_them(server, mock_gorelo):
+    # a null Description, SerialNumber, IpAddress or ContactId is an answer, not a reason to refuse or to drop the key
+    record = custom_record(
+        7, Description=None, SerialNumber=None, IpAddress=None, ContactId=None, WarrantyEndDate=None, HardwareType=None,
+    )
+    mock_gorelo.on("GET", GET_ASSET_PATH, envelope(record))
+    result = await call_tool(server, "get_custom_asset", {"custom_asset_id": uid(7)})
+    assert result == record
+    assert all(result[key] is None for key in ("Description", "SerialNumber", "IpAddress", "ContactId"))
+
+
+@pytest.mark.parametrize("given", [uid(7).upper(), uid(7).replace("-", ""), uid(7).upper().replace("-", "")])
+async def test_get_custom_asset_accepts_any_case_and_form_of_the_uuid_and_sends_it_canonically(server, mock_gorelo, given):
+    mock_gorelo.on("GET", GET_ASSET_PATH, envelope(custom_record(7)))
+    await call_tool(server, "get_custom_asset", {"custom_asset_id": given})
+    assert mock_gorelo.last.path == GET_ASSET_PATH
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        " ",
+        "abc",
+        "123",
+        "00000001-aaaa-4bbb-8ccc-00000000000z",
+        "00000001-aaaa-4bbb-8ccc",
+        "..%2F..%2Fassets%2Fcustom",
+        "../custom",
+        f"{uid(7)}/extra",
+        f"{uid(7)}?x=1",
+        f"  {uid(7)}  ",  # nothing is trimmed or guessed
+        f"{uid(7)}\n",
+        "{" + uid(7) + "}",
+        "urn:uuid:" + uid(7),
+    ],
+)
+async def test_get_custom_asset_rejects_anything_that_is_not_a_uuid_naming_custom_asset_id_and_sends_nothing(server, mock_gorelo, bad):
+    text = await call_tool_error(server, "get_custom_asset", {"custom_asset_id": bad})
+    assert text == "custom_asset_id: expected a GUID such as 3f2b8c1e-0d4a-4b7e-9a51-2c6d8e9f0a1b, got text that is not a GUID"
+    assert mock_gorelo.requests == []
+
+
+async def test_get_custom_asset_rejects_an_empty_string_without_echoing_it(server, mock_gorelo):
+    text = await call_tool_error(server, "get_custom_asset", {"custom_asset_id": ""})
+    assert text == "custom_asset_id: expected a GUID such as 3f2b8c1e-0d4a-4b7e-9a51-2c6d8e9f0a1b, got an empty string"
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("bad", [7, 7.5, True, None, ["x"]])
+async def test_get_custom_asset_rejects_a_value_that_is_not_text_before_any_http_call(server, mock_gorelo, bad):
+    text = await call_tool_error(server, "get_custom_asset", {"custom_asset_id": bad})
+    assert "custom_asset_id" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_get_custom_asset_maps_a_missing_asset_to_a_tool_error(server, mock_gorelo):
+    mock_gorelo.on("GET", f"{CUSTOM}/{uid(9)}", error_envelope(404, [("070202", "The requested resource was not found.")]))
+    text = await call_tool_error(server, "get_custom_asset", {"custom_asset_id": uid(9)})
+    assert text == trace("Gorelo rejected get_custom_asset (HTTP 404, code 070202): The requested resource was not found.")
+
+
+@pytest.mark.parametrize("property_name", ["customAssetId", "CustomAssetId"])
+async def test_get_custom_asset_maps_a_gorelo_error_about_the_id_to_custom_asset_id(server, mock_gorelo, property_name):
+    mock_gorelo.on("GET", f"{CUSTOM}/{uid(9)}", error_envelope(400, [("070101", "The id is not valid.", property_name)]))
+    text = await call_tool_error(server, "get_custom_asset", {"custom_asset_id": uid(9)})
+    assert text == trace("Gorelo rejected get_custom_asset (HTTP 400, code 070101): custom_asset_id: The id is not valid.")
+
+
+async def test_get_custom_asset_refuses_a_success_without_data(server, mock_gorelo):
+    mock_gorelo.on("GET", GET_ASSET_PATH, envelope(None))
+    assert "Data is null" in await call_tool_error(server, "get_custom_asset", {"custom_asset_id": uid(7)})
+
+
+@pytest.mark.parametrize("data, found", [({}, "an empty object"), ([custom_record(7)], "a list of 1 item"), ("x", "a string")])
+async def test_get_custom_asset_refuses_a_record_that_is_not_an_object(server, mock_gorelo, data, found):
+    mock_gorelo.on("GET", GET_ASSET_PATH, envelope(data))
+    text = await call_tool_error(server, "get_custom_asset", {"custom_asset_id": uid(7)})
+    assert text.startswith(
+        "Gorelo returned an unexpected response for get_custom_asset: GET /v1/assets/custom/{customAssetId}: "
+        "expected Data to be a non-empty object"
+    )
+    assert f"but got {found}" in text and "refusing to guess" in text
+
+
+async def test_get_custom_asset_never_sends_a_delete_even_for_a_well_formed_id(server, mock_gorelo):
+    mock_gorelo.on("GET", GET_ASSET_PATH, envelope(custom_record(7)))
+    await call_tool(server, "get_custom_asset", {"custom_asset_id": uid(7)})
+    assert {r.method for r in mock_gorelo.requests} == {"GET"}
+
+
+def test_the_get_custom_asset_text_points_at_the_move_and_the_nulls():
+    text = flat(assets_module.get_custom_asset.__doc__)
+    assert "Description, SerialNumber, IpAddress and ContactId are null" in text
+    assert "update_custom_asset" in text
+
+
+def test_the_custom_asset_list_docstring_points_at_get_custom_asset():
+    text = flat(assets_module.list_custom_assets.__doc__)
+    assert "get_custom_asset reads one by UUID" in text
+    assert "There is no way to read one custom asset" not in text
+
+
+@pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
+def test_the_single_custom_asset_get_is_the_one_the_spec_text_describes():
+    get = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["paths"]["/v1/assets/custom/{customAssetId}"]["get"]
+    assert "Returns the same fields as an item of `GET /v1/assets/custom`." in flat(get["description"])
+    assert "404" in get["responses"]
+
+
+def test_the_single_custom_asset_get_answers_one_unpaged_custom_asset_row(spec_index):
+    op = spec_index.op("GET /v1/assets/custom/{customAssetId}")
+    assert op.response["data"] == "CustomAssetResponse" and op.paged is False
+    assert set(op.path_placeholders) == {"customAssetId"}
+
+
+# --------------------------------------------------------------------------
 # Strict ids: JSON true, "5" and 5.0 are refused before the tool runs
 # --------------------------------------------------------------------------
 
@@ -654,6 +875,7 @@ def test_the_spec_gives_the_custom_asset_row_the_new_fields(spec_index):
     fields = spec_index.schema("CustomAssetResponse")["fields"]
     assert {"ContactId", "HardwareTypeId", "HardwareType", "WarrantyEndDate"} <= set(fields)
     assert fields["WarrantyEndDate"]["format"] == "date"
+    assert fields["Description"]["nullable"] is True
 
 
 # --------------------------------------------------------------------------
@@ -753,7 +975,11 @@ async def test_create_and_update_expose_exactly_the_documented_parameters(server
     assert list(create.inputSchema["properties"]) == CREATE_PARAMS
     assert create.inputSchema["required"] == ["name", "client_id", "location_id", "hardware_type_id"]
     assert list(update.inputSchema["properties"]) == UPDATE_PARAMS
-    assert update.inputSchema["required"] == ["custom_asset_id", "client_id"]
+    assert update.inputSchema["required"] == ["custom_asset_id"]
+    props = update.inputSchema["properties"]
+    assert "MOVE" in props["client_id"]["description"] and "location_id" in props["client_id"]["description"]
+    assert "new client" in props["location_id"]["description"]
+    assert "(of the new client when moving)" in props["contact_id"]["description"]
     for tool in (create, update):
         assert all(p.get("description") for p in tool.inputSchema["properties"].values())
         assert tool.annotations.readOnlyHint is False
@@ -766,8 +992,13 @@ def test_the_write_docstrings_say_what_the_user_needs_to_know():
     create = flat(assets_module.create_custom_asset.__doc__)
     assert "timeline" in create and "cannot delete custom assets" in create and "Gorelo app" in create
     assert "list_custom_asset_hardware_types" in create
+    assert "read back by id" in create and "get_custom_asset" in create
     update = flat(assets_module.update_custom_asset.__doc__)
-    assert "client cannot be changed" in update.lower() and "clear_fields" in update and "not cleared" in update
+    for fragment in ("or move it to another client", "same Id", "not a copy", "clear_fields contact_id", "get_custom_asset",
+                     "related items", "assigning one adds it there", "replacing or clearing it removes the previous one",
+                     "not cleared", "cannot delete custom assets"):
+        assert fragment in update, fragment
+    assert "client cannot be changed" not in update.lower()
     for name in WRITE_TOOLS:
         assert "Side effects:" in flat(getattr(assets_module, name).__doc__)
 
@@ -778,76 +1009,114 @@ def test_the_write_docstrings_say_what_the_user_needs_to_know():
 
 
 def row_for(asset_id, **extra):
-    return custom_record(5, Id=asset_id, ClientId=9101, LocationId=4410, HardwareTypeId=118, ContactId=None, **extra)
+    return custom_record(
+        5, **{"Id": asset_id, "ClientId": 9101, "LocationId": 4410, "HardwareTypeId": 118, "ContactId": None, **extra}
+    )
 
 
-async def test_create_sends_the_pascal_case_body_then_reads_the_row_back_by_client(server, mock_gorelo):
+# The single GET of one custom asset: the same path as the PATCH of update_custom_asset.
+GET_ROW = PATCH_PATH
+OTHER_ASSET = uid(6)
+# Read-backs that are no usable record of the asset written: an empty object, another asset, a record without an Id.
+UNUSABLE_READ_BACKS = [
+    (envelope({}), "an empty object"),
+    (envelope(row_for(OTHER_ASSET)), f"the record of asset {OTHER_ASSET}"),
+    (envelope({"Name": "Switch 6"}), "a record without an Id"),
+]
+
+
+def unusable_read_back(found, written=ASSET):
+    """What a write returns when its read-back answers no usable record of the asset: {Id, warning}."""
+    return {
+        "Id": written,
+        "warning": (
+            f"the write succeeded; re-reading it returned no usable record of this asset ({found}). "
+            "Do not repeat the write; check with get_custom_asset."
+        ),
+    }
+
+
+async def test_create_sends_the_pascal_case_body_then_reads_the_row_back_by_id(server, mock_gorelo):
     row = row_for(ASSET)
     mock_gorelo.on("POST", CUSTOM, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, paged_envelope([custom_record(1), row]))
+    mock_gorelo.on("GET", GET_ROW, envelope(row))
     result = await call_tool(server, "create_custom_asset", CREATE_ALL)
     post, get = mock_gorelo.requests
     assert (post.method, post.path, post.query, post.json) == ("POST", CUSTOM, {}, CREATE_ALL_BODY)
-    assert (get.method, get.path) == ("GET", CUSTOM)
-    assert get.query == {"ClientIds": "9101", "PageSize": "200"}
+    assert (get.method, get.path, get.query, get.content) == ("GET", GET_ROW, {}, b"")
     assert len(mock_gorelo.requests) == 2
     assert result == row
 
 
 async def test_create_with_only_the_required_fields_omits_every_optional_key(server, mock_gorelo):
     mock_gorelo.on("POST", CUSTOM, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, paged_envelope([row_for(ASSET)]))
+    mock_gorelo.on("GET", GET_ROW, envelope(row_for(ASSET)))
     await call_tool(server, "create_custom_asset", CREATE_MIN)
     assert mock_gorelo.requests[0].json == {
         "Name": "Reception printer", "ClientId": 9101, "LocationId": 4410, "HardwareTypeId": 118
     }
 
 
-async def test_create_matches_the_written_id_ignoring_case(server, mock_gorelo):
-    row = row_for(ASSET_UP)
-    mock_gorelo.on("POST", CUSTOM, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, paged_envelope([row]))
-    assert await call_tool(server, "create_custom_asset", CREATE_MIN) == row
-
-
-async def test_create_scans_further_pages_for_the_new_row(server, mock_gorelo):
+async def test_create_reads_back_with_the_canonical_path_when_the_answer_id_is_upper_case(server, mock_gorelo):
     row = row_for(ASSET)
-    mock_gorelo.on("POST", CUSTOM, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, paged_responder([[custom_record(1)], [row]]))
+    mock_gorelo.on("POST", CUSTOM, envelope({"Id": ASSET_UP}))
+    mock_gorelo.on("GET", GET_ROW, envelope(row))
     assert await call_tool(server, "create_custom_asset", CREATE_MIN) == row
-    assert len(mock_gorelo.calls("GET", CUSTOM)) == 2
-
-
-async def test_create_returns_a_warning_when_the_row_is_not_in_the_list(server, mock_gorelo):
-    mock_gorelo.on("POST", CUSTOM, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, paged_envelope([custom_record(1)]))
-    result = await call_tool(server, "create_custom_asset", CREATE_MIN)
-    assert set(result) == {"Id", "warning"} and result["Id"] == ASSET
-    assert "the write succeeded" in result["warning"] and "Do not repeat the write" in result["warning"]
-    assert "not among" in result["warning"]
-
-
-async def test_create_returns_a_warning_when_the_scan_hits_its_cap_without_the_row(server, mock_gorelo, monkeypatch):
-    monkeypatch.setattr(assets_module, "READBACK_MAX_ITEMS", 2)
-    mock_gorelo.on("POST", CUSTOM, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, paged_responder([[custom_record(1), custom_record(2)], [row_for(ASSET)]]))
-    result = await call_tool(server, "create_custom_asset", CREATE_MIN)
-    assert set(result) == {"Id", "warning"} and "scan stopped" in result["warning"]
+    assert mock_gorelo.last.path == GET_ROW
 
 
 async def test_create_returns_a_warning_not_an_error_when_the_read_back_fails(server, mock_gorelo):
     mock_gorelo.on("POST", CUSTOM, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, error_envelope(500, [("070500", "Boom.")]))
+    mock_gorelo.on("GET", GET_ROW, error_envelope(500, [("070500", "Boom.")]))
     result = await call_tool(server, "create_custom_asset", CREATE_MIN)
     assert set(result) == {"Id", "warning"} and result["Id"] == ASSET
-    assert "re-reading it failed" in result["warning"] and "HTTP 500" in result["warning"]
+    warning = result["warning"]
+    assert "the write succeeded" in warning and "re-reading it failed" in warning and "HTTP 500" in warning
+    assert "Do not repeat the write" in warning and "GET /v1/assets/custom/{customAssetId}" in warning
 
 
-async def test_create_returns_a_warning_when_the_read_back_answers_something_odd(server, mock_gorelo):
+async def test_create_returns_a_warning_when_the_read_back_is_a_404(server, mock_gorelo):
     mock_gorelo.on("POST", CUSTOM, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, {"data": [], "nextCursor": None, "hasMore": False})
+    mock_gorelo.on("GET", GET_ROW, error_envelope(404, [("070202", "The requested resource was not found.")]))
+    result = await call_tool(server, "create_custom_asset", CREATE_MIN)
+    assert set(result) == {"Id", "warning"} and result["Id"] == ASSET
+    assert "HTTP 404" in result["warning"] and "Do not repeat the write" in result["warning"]
+
+
+@pytest.mark.parametrize("answer", [envelope(None), envelope([row_for(ASSET)])])
+async def test_create_returns_a_warning_when_the_read_back_answers_something_odd(server, mock_gorelo, answer):
+    mock_gorelo.on("POST", CUSTOM, envelope({"Id": ASSET}))
+    mock_gorelo.on("GET", GET_ROW, answer)
     result = await call_tool(server, "create_custom_asset", CREATE_MIN)
     assert set(result) == {"Id", "warning"}
+
+
+@pytest.mark.parametrize("answer, found", UNUSABLE_READ_BACKS)
+async def test_create_returns_a_warning_when_the_read_back_is_not_a_usable_record_of_the_asset(server, mock_gorelo, answer, found):
+    mock_gorelo.on("POST", CUSTOM, envelope({"Id": ASSET}))
+    mock_gorelo.on("GET", GET_ROW, answer)
+    assert await call_tool(server, "create_custom_asset", CREATE_MIN) == unusable_read_back(found)
+    assert [r.method for r in mock_gorelo.requests] == ["POST", "GET"]
+
+
+async def test_create_keeps_a_read_back_whose_id_differs_from_the_written_one_only_in_case(server, mock_gorelo):
+    row = row_for(ASSET)
+    mock_gorelo.on("POST", CUSTOM, envelope({"Id": ASSET_UP}))
+    mock_gorelo.on("GET", GET_ROW, envelope(row))
+    assert await call_tool(server, "create_custom_asset", CREATE_MIN) == row
+
+
+async def test_create_returns_a_warning_when_the_answer_id_is_not_a_uuid(server, mock_gorelo):
+    mock_gorelo.on("POST", CUSTOM, envelope({"Id": 7}))
+    result = await call_tool(server, "create_custom_asset", CREATE_MIN)
+    assert set(result) == {"Id", "warning"} and result["Id"] == 7
+    assert "the write succeeded" in result["warning"]
+    assert mock_gorelo.calls("GET") == []  # the path check refuses the id before any HTTP call
+
+
+def test_create_declares_no_list_scan():
+    create = next(s for s in REGISTRY.specs if s.name == "create_custom_asset")
+    assert create.ops == ["POST /v1/assets/custom", "GET /v1/assets/custom/{customAssetId}"]
 
 
 async def test_create_without_an_id_in_the_answer_is_an_unconfirmed_write_and_reads_nothing(server, mock_gorelo):
@@ -886,6 +1155,8 @@ async def test_create_maps_a_gorelo_400_to_the_snake_case_parameter(server, mock
         ({"warranty_end_date": "31/03/2027"}, "warranty_end_date: expected a calendar date written YYYY-MM-DD"),
         ({"warranty_end_date": "2027-03-31T00:00:00Z"}, "warranty_end_date: expected a calendar date"),
         ({"warranty_end_date": "20270331"}, "warranty_end_date: expected a calendar date"),
+        ({"warranty_end_date": "2027-03-31+02:00"}, "warranty_end_date: expected a calendar date"),
+        ({"warranty_end_date": "2027-03-31 10:00"}, "warranty_end_date: expected a calendar date"),
         ({"ip_address": "::1"}, "ip_address: expected an IPv4 address"),
         ({"ip_address": "2001:db8::1"}, "IPv6 is not accepted"),
         ({"ip_address": "300.1.1.1"}, "ip_address: expected an IPv4 address"),
@@ -915,7 +1186,7 @@ async def test_create_requires_the_four_ids_and_the_name(server, mock_gorelo, mi
 
 async def test_create_accepts_the_boundary_lengths_and_a_leap_day(server, mock_gorelo):
     mock_gorelo.on("POST", CUSTOM, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, paged_envelope([row_for(ASSET)]))
+    mock_gorelo.on("GET", GET_ROW, envelope(row_for(ASSET)))
     await call_tool(
         server, "create_custom_asset",
         {**CREATE_MIN, "name": "n" * 300, "description": "d" * 1000, "serial_number": "s" * 250, "warranty_end_date": "2028-02-29"},
@@ -930,65 +1201,87 @@ async def test_create_accepts_the_boundary_lengths_and_a_leap_day(server, mock_g
 
 
 def update_args(**extra):
-    return {"custom_asset_id": ASSET, "client_id": 9101, **extra}
+    return {"custom_asset_id": ASSET, **extra}
 
 
-async def test_update_sends_only_the_changed_fields_plus_client_id_and_reads_the_row_back(server, mock_gorelo):
+SECOND = 9102
+SECOND_LOCATION = 4420
+
+
+def moving(**extra):
+    """A call that moves the asset from client 9101 (what row_for holds) to client 9102."""
+    return update_args(client_id=SECOND, location_id=SECOND_LOCATION, **extra)
+
+
+def after_move(**extra):
+    return row_for(ASSET, ClientId=SECOND, LocationId=SECOND_LOCATION, **extra)
+
+
+async def test_update_without_client_id_sends_only_the_changed_fields_then_reads_the_row_back(server, mock_gorelo):
     row = row_for(ASSET, Name="New name")
     mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, paged_envelope([row]))
+    mock_gorelo.on("GET", PATCH_PATH, envelope(row))
     result = await call_tool(server, "update_custom_asset", update_args(name="New name"))
     patch, get = mock_gorelo.requests
-    assert (patch.method, patch.path, patch.query, patch.json) == ("PATCH", PATCH_PATH, {}, {"ClientId": 9101, "Name": "New name"})
-    assert (get.method, get.path, get.query) == ("GET", CUSTOM, {"ClientIds": "9101", "PageSize": "200"})
+    assert (patch.method, patch.path, patch.query, patch.json) == ("PATCH", PATCH_PATH, {}, {"Name": "New name"})
+    assert (get.method, get.path, get.query) == ("GET", PATCH_PATH, {})
     assert result == row
 
 
 async def test_update_sends_every_field_under_its_pascal_case_name(server, mock_gorelo):
     mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, paged_envelope([row_for(ASSET)]))
-    await call_tool(server, "update_custom_asset", update_args(**CREATE_ALL))
-    assert mock_gorelo.requests[0].json == CREATE_ALL_BODY
+    mock_gorelo.on("GET", PATCH_PATH, envelope(row_for(ASSET)))
+    await call_tool(server, "update_custom_asset", update_args(**{k: v for k, v in CREATE_ALL.items() if k != "client_id"}))
+    assert mock_gorelo.requests[0].json == {k: v for k, v in CREATE_ALL_BODY.items() if k != "ClientId"}
+    assert len(mock_gorelo.requests) == 2
 
 
 async def test_update_clear_fields_are_sent_as_json_null(server, mock_gorelo):
     mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, paged_envelope([row_for(ASSET)]))
+    mock_gorelo.on("GET", PATCH_PATH, envelope(row_for(ASSET)))
     await call_tool(server, "update_custom_asset", update_args(clear_fields=CLEARABLE))
     assert mock_gorelo.requests[0].json == {
-        "ClientId": 9101, "Description": None, "ContactId": None, "WarrantyEndDate": None,
-        "IpAddress": None, "SerialNumber": None,
+        "Description": None, "ContactId": None, "WarrantyEndDate": None, "IpAddress": None, "SerialNumber": None,
     }
     assert b'"Description":null' in mock_gorelo.requests[0].content.replace(b" ", b"")
 
 
 async def test_update_can_set_one_field_and_clear_another_in_one_call(server, mock_gorelo):
     mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, paged_envelope([row_for(ASSET)]))
+    mock_gorelo.on("GET", PATCH_PATH, envelope(row_for(ASSET)))
     await call_tool(server, "update_custom_asset", update_args(name="N", clear_fields=["ip_address", "ip_address"]))
-    assert mock_gorelo.requests[0].json == {"ClientId": 9101, "Name": "N", "IpAddress": None}
+    assert mock_gorelo.requests[0].json == {"Name": "N", "IpAddress": None}
 
 
 async def test_update_normalizes_an_uppercase_asset_id_and_matches_the_row(server, mock_gorelo):
     row = row_for(ASSET)
     mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, paged_envelope([row]))
+    mock_gorelo.on("GET", PATCH_PATH, envelope(row))
     assert await call_tool(server, "update_custom_asset", update_args(custom_asset_id=ASSET_UP, serial_number="S")) == row
-    assert mock_gorelo.requests[0].path == PATCH_PATH
+    assert [r.path for r in mock_gorelo.requests] == [PATCH_PATH, PATCH_PATH]
 
 
 async def test_update_read_back_not_found_returns_a_warning(server, mock_gorelo):
     mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, paged_envelope([]))
+    mock_gorelo.on("GET", PATCH_PATH, error_envelope(404, [("070202", "The requested resource was not found.")]))
     result = await call_tool(server, "update_custom_asset", update_args(name="N"))
-    assert set(result) == {"Id", "warning"} and result["Id"] == ASSET and "Do not repeat the write" in result["warning"]
+    assert set(result) == {"Id", "warning"} and result["Id"] == ASSET
+    assert "HTTP 404" in result["warning"] and "Do not repeat the write" in result["warning"]
 
 
 async def test_update_read_back_failure_returns_a_warning_not_an_error(server, mock_gorelo):
     mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
-    mock_gorelo.on("GET", CUSTOM, error_envelope(500, [("070500", "Boom.")]))
+    mock_gorelo.on("GET", PATCH_PATH, error_envelope(500, [("070500", "Boom.")]))
     result = await call_tool(server, "update_custom_asset", update_args(name="N"))
     assert set(result) == {"Id", "warning"} and "HTTP 500" in result["warning"]
+
+
+@pytest.mark.parametrize("answer, found", UNUSABLE_READ_BACKS)
+async def test_update_returns_a_warning_when_the_read_back_is_not_a_usable_record_of_the_asset(server, mock_gorelo, answer, found):
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
+    mock_gorelo.on("GET", PATCH_PATH, answer)
+    assert await call_tool(server, "update_custom_asset", update_args(name="N")) == unusable_read_back(found)
+    assert [r.method for r in mock_gorelo.requests] == ["PATCH", "GET"]
 
 
 async def test_update_without_an_id_in_the_answer_is_an_unconfirmed_write(server, mock_gorelo):
@@ -996,6 +1289,30 @@ async def test_update_without_an_id_in_the_answer_is_an_unconfirmed_write(server
     text = await call_tool_error(server, "update_custom_asset", update_args(name="N"))
     assert "update_custom_asset" in text
     assert len(mock_gorelo.requests) == 1
+
+
+@pytest.mark.parametrize("move, sent", [(False, ["PATCH"]), (True, ["GET", "PATCH"])])
+async def test_a_patch_that_answers_another_id_is_an_unconfirmed_write_naming_both_ids_and_reads_nothing_back(
+    server, mock_gorelo, move, sent
+):
+    if move:
+        mock_gorelo.on("GET", PATCH_PATH, envelope(row_for(ASSET)))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": OTHER_ASSET}))
+    text = await call_tool_error(server, "update_custom_asset", moving() if move else update_args(name="N"))
+    assert text == (
+        "Gorelo returned an unexpected response for update_custom_asset: PATCH /v1/assets/custom/{customAssetId}: "
+        f"Gorelo reported success for custom asset {ASSET} but answered with Id {OTHER_ASSET}; check both with "
+        "get_custom_asset. The change may or may not have been applied. Verify with a read before retrying."
+    )
+    assert text.count("may or may not have been applied") == 1 and text.lower().count("verify") == 1  # said once, not twice
+    assert [r.method for r in mock_gorelo.requests] == sent
+
+
+async def test_a_patch_that_answers_the_same_id_in_upper_case_is_the_same_asset(server, mock_gorelo):
+    row = row_for(ASSET)
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET_UP}))
+    mock_gorelo.on("GET", PATCH_PATH, envelope(row))
+    assert await call_tool(server, "update_custom_asset", update_args(name="N")) == row
 
 
 @pytest.mark.parametrize(
@@ -1015,10 +1332,22 @@ async def test_update_maps_a_gorelo_400_to_the_snake_case_parameter(server, mock
 
 
 async def test_update_maps_a_404_without_reading_back(server, mock_gorelo):
-    mock_gorelo.on("PATCH", PATCH_PATH, error_envelope(404, [("070404", "Custom asset not found.")]))
+    mock_gorelo.on("PATCH", PATCH_PATH, error_envelope(404, [("070202", "The requested resource was not found.")]))
     text = await call_tool_error(server, "update_custom_asset", update_args(name="N"))
     assert "update_custom_asset" in text and "HTTP 404" in text
     assert len(mock_gorelo.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "property_name, param",
+    [("ClientId", "client_id"), ("LocationId", "location_id"), ("ContactId", "contact_id")],
+)
+async def test_update_maps_a_gorelo_400_on_a_move_to_the_snake_case_parameter(server, mock_gorelo, property_name, param):
+    mock_gorelo.on("GET", PATCH_PATH, envelope(row_for(ASSET)))
+    mock_gorelo.on("PATCH", PATCH_PATH, error_envelope(400, [("070101", "Rejected value.", property_name)]))
+    text = await call_tool_error(server, "update_custom_asset", moving())
+    assert text == trace(f"Gorelo rejected update_custom_asset (HTTP 400, code 070101): {param}: Rejected value.")
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
 
 
 @pytest.mark.parametrize(
@@ -1047,6 +1376,10 @@ async def test_update_maps_a_404_without_reading_back(server, mock_gorelo):
         ({"clear_fields": ["client_id"]}, "clear_fields"),
         ({"clear_fields": "description"}, "clear_fields"),
         ({"clear_fields": [3]}, "clear_fields"),
+        ({"warranty_end_date": "2027-03-31T00:00:00Z"}, "warranty_end_date: expected a calendar date"),
+        ({"warranty_end_date": "2027-03-31+02:00"}, "warranty_end_date: expected a calendar date"),
+        ({"client_id": True}, "client_id"),
+        ({"client_id": -1, "location_id": 4410}, "client_id"),
     ],
 )
 async def test_update_refuses_bad_input_before_any_http_call(server, mock_gorelo, arguments, fragment):
@@ -1065,17 +1398,253 @@ async def test_update_refuses_a_value_together_with_a_clear_of_the_same_field(se
     assert mock_gorelo.requests == []
 
 
-async def test_update_with_nothing_to_change_besides_client_id_sends_nothing(server, mock_gorelo):
+async def test_update_with_client_id_alone_sends_nothing(server, mock_gorelo):
+    for client_id in (9101, SECOND):
+        text = await call_tool_error(server, "update_custom_asset", update_args(client_id=client_id))
+        assert "nothing to change" in text and "client_id alone changes nothing" in text and "location_id" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_update_with_nothing_at_all_sends_nothing(server, mock_gorelo):
     text = await call_tool_error(server, "update_custom_asset", update_args())
-    assert "nothing to change" in text and "client_id alone changes nothing" in text
+    assert "nothing to change" in text and "client_id alone changes nothing" in text and "location_id" in text
     assert mock_gorelo.requests == []
 
 
-async def test_update_requires_client_id_and_the_asset_id(server, mock_gorelo):
-    for arguments in ({"custom_asset_id": ASSET, "name": "N"}, {"client_id": 9101, "name": "N"}):
-        text = await call_tool_error(server, "update_custom_asset", arguments)
-        assert ("client_id" in text) or ("custom_asset_id" in text)
+async def test_update_requires_only_the_asset_id(server, mock_gorelo):
+    text = await call_tool_error(server, "update_custom_asset", {"name": "N"})
+    assert "custom_asset_id" in text
     assert mock_gorelo.requests == []
+
+
+async def test_update_naming_the_current_client_moves_nothing_and_still_sends_client_id(server, mock_gorelo):
+    after = row_for(ASSET, Name="New name")
+    mock_gorelo.on("GET", PATCH_PATH, in_order(envelope(row_for(ASSET)), envelope(after)))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
+    result = await call_tool(server, "update_custom_asset", update_args(client_id=9101, name="New name"))
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", PATCH_PATH), ("PATCH", PATCH_PATH), ("GET", PATCH_PATH)]
+    assert mock_gorelo.requests[1].json == {"ClientId": 9101, "Name": "New name"}
+    assert result == after
+
+
+async def test_update_naming_the_current_client_needs_no_location_or_contact_even_when_the_asset_has_a_contact(server, mock_gorelo):
+    before = row_for(ASSET, ContactId=7962)
+    after = row_for(ASSET, ContactId=7962, Name="N")
+    mock_gorelo.on("GET", PATCH_PATH, in_order(envelope(before), envelope(after)))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
+    result = await call_tool(server, "update_custom_asset", update_args(client_id=9101, name="N"))
+    assert mock_gorelo.requests[1].json == {"ClientId": 9101, "Name": "N"}
+    assert result == after
+
+
+async def test_update_moves_the_asset_to_another_client_after_reading_it(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, in_order(envelope(row_for(ASSET)), envelope(after_move())))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
+    result = await call_tool(server, "update_custom_asset", moving())
+    pre, patch, back = mock_gorelo.requests
+    for get in (pre, back):
+        assert (get.method, get.path, get.query, get.content) == ("GET", PATCH_PATH, {}, b"")
+    assert patch.json == {"ClientId": SECOND, "LocationId": SECOND_LOCATION}
+    assert result == after_move()
+
+
+@pytest.mark.parametrize("extra, expected", [({"contact_id": 7970}, 7970), ({"clear_fields": ["contact_id"]}, None)])
+async def test_update_moves_an_asset_that_holds_a_contact_when_a_contact_is_given_or_cleared(server, mock_gorelo, extra, expected):
+    held = row_for(ASSET, ContactId=7962)
+    mock_gorelo.on("GET", PATCH_PATH, in_order(envelope(held), envelope(after_move(ContactId=expected))))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
+    result = await call_tool(server, "update_custom_asset", moving(**extra))
+    assert mock_gorelo.requests[1].json == {"ClientId": SECOND, "LocationId": SECOND_LOCATION, "ContactId": expected}
+    assert result == after_move(ContactId=expected)
+
+
+async def test_update_moves_an_asset_that_has_no_client(server, mock_gorelo):
+    before = row_for(ASSET, ClientId=None, LocationId=None)
+    mock_gorelo.on("GET", PATCH_PATH, in_order(envelope(before), envelope(after_move())))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
+    result = await call_tool(server, "update_custom_asset", moving())
+    assert mock_gorelo.requests[1].json == {"ClientId": SECOND, "LocationId": SECOND_LOCATION}
+    assert result == after_move()
+
+
+async def test_update_can_change_other_fields_in_the_same_call_as_a_move(server, mock_gorelo):
+    after = after_move(Name="Moved printer", SerialNumber="S1")
+    mock_gorelo.on("GET", PATCH_PATH, in_order(envelope(row_for(ASSET)), envelope(after)))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
+    await call_tool(server, "update_custom_asset", moving(name="Moved printer", serial_number="S1"))
+    assert mock_gorelo.requests[1].json == {
+        "ClientId": SECOND, "LocationId": SECOND_LOCATION, "Name": "Moved printer", "SerialNumber": "S1",
+    }
+
+
+async def test_update_refuses_a_move_without_location_id(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, envelope(row_for(ASSET)))
+    text = await call_tool_error(server, "update_custom_asset", update_args(client_id=SECOND, name="N"))
+    assert text == (
+        "location_id: required when client_id moves the asset (it is at client 9101 now); "
+        "give a location of client 9102 (list_client_locations). Nothing was changed."
+    )
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+    assert mock_gorelo.calls("PATCH") == []
+
+
+async def test_update_refuses_a_move_of_an_asset_with_no_client_without_location_id(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, envelope(row_for(ASSET, ClientId=None)))
+    text = await call_tool_error(server, "update_custom_asset", update_args(client_id=SECOND, name="N"))
+    assert "location_id: required when client_id moves the asset (it has no client now)" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+    assert mock_gorelo.calls("PATCH") == []
+
+
+# The refusal of a move that leaves the asset's contact unsaid (_is_move), for contact 7962 and the new client 9102.
+MOVE_CONTACT_REFUSAL = (
+    "contact_id: the asset holds contact 7962; when client_id moves it, give contact_id (a contact of client 9102, "
+    "which may be 7962 if it already belongs to that client) or put contact_id in clear_fields to unassign it. "
+    "Nothing was changed."
+)
+
+
+async def test_update_refuses_a_move_that_leaves_the_contact_unsaid(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, envelope(row_for(ASSET, ContactId=7962)))
+    text = await call_tool_error(server, "update_custom_asset", moving())
+    assert text == MOVE_CONTACT_REFUSAL
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+    assert mock_gorelo.calls("PATCH") == []
+
+
+async def test_update_refuses_a_move_of_an_asset_with_no_client_that_holds_a_contact_with_the_same_text(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, envelope(row_for(ASSET, ClientId=None, LocationId=None, ContactId=7962)))
+    text = await call_tool_error(server, "update_custom_asset", moving())
+    assert text == MOVE_CONTACT_REFUSAL
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+    assert mock_gorelo.calls("PATCH") == []
+
+
+@pytest.mark.parametrize(
+    "held",
+    [row_for(ASSET, ClientId="x"), row_for(ASSET, ClientId=True), row_for(ASSET, ClientId=0), row_for(ASSET, ContactId="y")],
+)
+async def test_update_refuses_a_pre_read_it_cannot_use(server, mock_gorelo, held):
+    mock_gorelo.on("GET", PATCH_PATH, envelope(held))
+    text = await call_tool_error(server, "update_custom_asset", moving())
+    assert text.startswith("custom_asset_id: GET /v1/assets/custom/{customAssetId} returned a ")
+    assert text.endswith("refusing to guess whether client_id moves the asset. Nothing was changed.")
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+    assert mock_gorelo.calls("PATCH") == []
+
+
+async def test_update_stops_before_the_patch_when_the_pre_read_is_not_found(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, error_envelope(404, [("070202", "The requested resource was not found.")]))
+    text = await call_tool_error(server, "update_custom_asset", moving())
+    assert text == trace("Gorelo rejected update_custom_asset (HTTP 404, code 070202): The requested resource was not found.")
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+@pytest.mark.parametrize("answer, fragment", [(error_envelope(500, [("070500", "Boom.")]), "Boom."), (envelope(None), "Data is null")])
+async def test_update_stops_before_the_patch_when_the_pre_read_fails(server, mock_gorelo, answer, fragment):
+    mock_gorelo.on("GET", PATCH_PATH, answer)
+    text = await call_tool_error(server, "update_custom_asset", moving())
+    assert "update_custom_asset" in text and fragment in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+    assert mock_gorelo.calls("PATCH") == []
+
+
+async def test_update_raises_a_write_unconfirmed_error_when_the_asset_reads_back_at_the_old_client(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, in_order(envelope(row_for(ASSET)), envelope(row_for(ASSET))))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
+    text = await call_tool_error(server, "update_custom_asset", moving())
+    assert text.startswith(
+        "Gorelo returned an unexpected response for update_custom_asset: PATCH /v1/assets/custom/{customAssetId}: "
+        "Gorelo reported success but the asset reads back at client 9101, not at client 9102;"
+    )
+    assert "verify it with a read before repeating it" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH", "GET"]
+
+
+async def test_update_raises_the_same_error_when_the_asset_reads_back_with_no_client(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, in_order(envelope(row_for(ASSET)), envelope(row_for(ASSET, ClientId=None))))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
+    text = await call_tool_error(server, "update_custom_asset", moving())
+    assert "reads back at no client" in text and "verify it with a read before repeating it" in text
+
+
+async def test_update_returns_a_warning_when_the_read_back_of_a_move_fails(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, in_order(envelope(row_for(ASSET)), error_envelope(500, [("070500", "Boom.")])))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
+    result = await call_tool(server, "update_custom_asset", moving())
+    assert set(result) == {"Id", "warning"} and result["Id"] == ASSET
+
+
+@pytest.mark.parametrize("answer, found", UNUSABLE_READ_BACKS)
+async def test_a_move_whose_read_back_is_not_a_usable_record_of_the_asset_returns_a_warning_and_does_not_raise(
+    server, mock_gorelo, answer, found
+):
+    mock_gorelo.on("GET", PATCH_PATH, in_order(envelope(row_for(ASSET)), answer))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
+    assert await call_tool(server, "update_custom_asset", moving()) == unusable_read_back(found)
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH", "GET"]
+
+
+@pytest.mark.parametrize(
+    "failure, text",
+    [
+        (
+            httpx.ReadTimeout("slow"),
+            "Gorelo did not confirm update_custom_asset (the request timed out). The change may or may not have been "
+            "applied. Verify with a read before retrying.",
+        ),
+        (
+            httpx.ConnectError("refused"),
+            "Gorelo did not confirm update_custom_asset (the connection failed). The change may or may not have been "
+            "applied. Verify with a read before retrying.",
+        ),
+        (
+            httpx.Response(502, text="<html>Bad Gateway</html>"),
+            "Gorelo returned an unexpected response for update_custom_asset: PATCH /v1/assets/custom/{customAssetId}: "
+            "unexpected response shape; refusing to guess (HTTP 502, a body that is not JSON, content-type text/plain, "
+            "24 bytes). The change may or may not have been applied. Verify with a read before retrying.",
+        ),
+    ],
+    ids=["read-timeout", "connection-error", "502-gateway-page"],
+)
+async def test_a_move_whose_patch_times_out_loses_the_connection_or_answers_502_is_unconfirmed_and_not_repeated(
+    server, mock_gorelo, failure, text
+):
+    mock_gorelo.on("GET", PATCH_PATH, envelope(row_for(ASSET)))
+    mock_gorelo.on("PATCH", PATCH_PATH, failure)
+    assert await call_tool_error(server, "update_custom_asset", moving()) == text
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
+
+
+async def test_update_checks_the_new_client_only_for_a_move(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, in_order(envelope(row_for(ASSET)), envelope(row_for(ASSET, ClientId=9999))))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope({"Id": ASSET}))
+    result = await call_tool(server, "update_custom_asset", update_args(client_id=9101, name="N"))
+    assert result == row_for(ASSET, ClientId=9999)
+
+
+def test_update_declares_the_single_get_and_no_list():
+    spec = next(s for s in REGISTRY.specs if s.name == "update_custom_asset")
+    assert spec.ops == ["PATCH /v1/assets/custom/{customAssetId}", "GET /v1/assets/custom/{customAssetId}"]
+    assert spec.destructive_hint is True and spec.kind == "write"
+
+
+def test_the_patch_takes_a_nullable_client_id_in_the_spec_index(spec_index):
+    assert spec_index.op("PATCH /v1/assets/custom/{customAssetId}").body["fields"]["ClientId"]["nullable"] is True
+
+
+@pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
+def test_the_move_rules_the_update_tool_states_are_in_the_spec_text():
+    raw = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))
+    patch = flat(raw["paths"]["/v1/assets/custom/{customAssetId}"]["patch"]["description"])
+    assert "A new `ClientId` moves the asset to that client." in patch
+    assert "send a `LocationId` of the new client, and a `ContactId` of it or null" in patch
+    assert "assigning a contact adds it there, and replacing or clearing it removes the previous one" in patch
+    schemas = raw["components"]["schemas"]
+    client = flat(schemas["UpdateCustomAssetCommand"]["properties"]["ClientId"]["description"])
+    assert "must be an active client" in client and "A different client moves the asset" in client
+    for command in ("CreateCustomAssetCommand", "UpdateCustomAssetCommand"):
+        assert "A value with a time or a time zone is rejected" in flat(schemas[command]["properties"]["WarrantyEndDate"]["description"])
 
 
 def test_the_new_asset_modules_text_has_no_dashes():

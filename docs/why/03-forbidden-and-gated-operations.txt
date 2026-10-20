@@ -3,11 +3,14 @@
 WHAT
   Three levels, from strictest to loosest.
   1. Forbidden: never callable. DELETE on clients, contacts, tickets, agent assets, custom assets
-     and contracts, and POST /v1/api-keys. No tool may declare them and the client refuses them
-     with no HTTP call.
+     and contracts, and the API key operations: creating a key (POST /v1/api-keys) and revoking one
+     (DELETE /v1/api-keys/{apiKeyId}). No tool may declare them and the client refuses them with no
+     HTTP call.
   2. Gated: the delete and void tools (comments, time entries, uptime checks, items, invoices,
-     project tasks and comments) and create_approved_invoice. They are not registered at all
-     unless the operator sets GORELO_ENABLE_DESTRUCTIVE. Even then, each call needs confirm=true
+     project tasks and comments), remove_document_related_item, create_approved_invoice and
+     share_document. They are not registered at all unless the operator sets
+     GORELO_ENABLE_DESTRUCTIVE (1 for all of them, or a list of tool names for just those).
+     Even then, each call needs confirm=true
      (a real boolean; the text "true" or the number 1 do not count) and the refusal says what
      would happen. The AI model is told to ask the user before setting confirm.
   3. Everything else: ordinary reads and writes.
@@ -18,6 +21,13 @@ WHAT
   voiding it later through the Gorelo API does not reach that system. On 2026-10-04 the copy in
   Xero was still open minutes after a void. So creating an approved invoice is its own gated
   tool, and the delete_invoice text says the user must void the accounting copy by hand.
+  Documents get the same care. A public link (anyone who has it can read the document without
+  a login) and publishing to the client portal make a document readable outside the business.
+  That effect leaves Gorelo, like an Approved invoice, so turning it on is its own gated tool,
+  share_document. The tool that edits documents has no sharing parameter, and unshare_document
+  can only turn sharing off. A document cannot be deleted through the API at all: it can be
+  archived and restored. remove_document_related_item is gated because it is a delete, though
+  it removes only the link between two records.
 
 WHY
   A deleted client or ticket may be recoverable in the Gorelo app, but an AI model acting on a
@@ -40,8 +50,10 @@ WHERE IN THE CODE
                      match would have silently stopped protecting.
                      SIDE_EFFECT_GETS and is_side_effect_get: the invoice PDF export.
   server.py          _verify_ops refuses to start if a tool declares a forbidden operation.
-  tools/_common.py   Registry.select (gated tools only when destructive is on),
-                     _require_confirm_parameter, require_confirm.
+  tools/_common.py   Registry.select (gated tools only when destructive is on, and only the named
+                     ones when the value is a list), _require_confirm_parameter, require_confirm.
   tools/invoices.py  create_invoice, create_approved_invoice, delete_invoice.
-  settings.py        GORELO_ENABLE_DESTRUCTIVE.
+  tools/documents.py share_document, unshare_document, update_document, remove_document_related_item.
+  settings.py        GORELO_ENABLE_DESTRUCTIVE (the words, or a list of names).
+  server.py          resolve_gated_tools (the names must be gated tools of an enabled toolset).
   tests/test_integration.py  Every spec operation is declared, forbidden or deliberately excluded.

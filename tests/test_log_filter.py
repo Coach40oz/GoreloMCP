@@ -1,7 +1,7 @@
-"""server.LogValueFilter: argument values never reach FastMCP's log records (offline, no sockets).
+"""server.LogValueFilter: the log records of a rejected call and of an error that carries a log summary lose their argument values (offline, no sockets).
 
 FastMCP logs a rejected tool call with logger.exception, and pydantic's ValidationError prints every
-offending argument (`input_value=...`). Those are client names, emails and phone numbers. An error that
+offending argument (`input_value=...`). Those can be client names, emails, phone numbers or any other argument of a tool. An error that
 holds values the journal must not keep (update_client's alarm lists the previous values of custom fields,
 possibly a password or a licence key) says so with a log_summary attribute and is logged as that summary
 alone. main() installs the filter; these tests drive it with synthetic records, with a real rejected call

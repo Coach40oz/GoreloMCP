@@ -618,6 +618,20 @@ def test_select_filters_by_toolset_and_gates_destructive_tools():
     assert names(TOOLSETS, True) == [s.name for s in registry.specs]
 
 
+def test_select_keeps_only_the_named_gated_tools_when_given_names():
+    registry = _toolset_registry()
+
+    def names(toolsets, destructive, named):
+        return [s.name for s in registry.select(toolsets, destructive, named)]
+
+    assert names({"core"}, True, None) == ["core_read", "core_write", "core_delete"]  # no names: every gated tool, as before
+    assert names({"core"}, True, {"core_delete"}) == ["core_read", "core_write", "core_delete"]
+    assert names({"core"}, True, set()) == ["core_read", "core_write"]
+    assert names({"core"}, True, ["other"]) == ["core_read", "core_write"]  # a name that is not a gated tool keeps nothing
+    assert names({"core"}, False, {"core_delete"}) == ["core_read", "core_write"]  # names never switch the gate on
+    assert names({"tickets"}, True, {"core_delete"}) == ["tickets_read"]  # and never leave the toolsets
+
+
 # --------------------------------------------------------------------------
 # FastMCP metadata and schema identity
 # --------------------------------------------------------------------------
@@ -1385,9 +1399,10 @@ def test_server_info_of():
     class Spec:
         sha256 = "abc"
 
-    info = server_info_of(make_ctx(toolsets=["core"], destructive=True, spec=Spec()))
-    assert info == {"toolsets": ["core"], "destructive": True, "spec_sha256": "abc"}
-    assert server_info_of(make_ctx()) == {"toolsets": None, "destructive": None, "spec_sha256": None}
+    info = server_info_of(make_ctx(toolsets=["core"], destructive=True, gated_tools=["delete_item"], spec=Spec()))
+    assert info == {"toolsets": ["core"], "destructive": True, "gated_tools": ["delete_item"], "spec_sha256": "abc"}
+    assert server_info_of(make_ctx(gated_tools=[]))["gated_tools"] == []  # none registered is an answer, not a missing value
+    assert server_info_of(make_ctx()) == {"toolsets": None, "destructive": None, "gated_tools": None, "spec_sha256": None}
 
 
 # --------------------------------------------------------------------------
@@ -1657,6 +1672,8 @@ def test_csv_ids_errors_name_the_param(value, fragment):
         ("2026-10-01T14:30:00.123456+02:00", "2026-10-01T12:30:00.123456Z"),
         ("2026-10-01 14:30:00Z", "2026-10-01T14:30:00Z"),
         ("2026-12-31T23:30:00-05:00", "2027-01-01T04:30:00Z"),
+        ("0001-01-01T01:00:00+01:00", "0001-01-01T00:00:00Z"),
+        ("9999-12-31T22:59:59-01:00", "9999-12-31T23:59:59Z"),
         (datetime(2026, 10, 1, 9, 30, tzinfo=timezone(timedelta(hours=-5))), "2026-10-01T14:30:00Z"),
     ],
 )
@@ -1676,6 +1693,24 @@ def test_utc_iso_rejects_naive_and_malformed_values_naming_the_param(bad):
         utc_iso("started_on", bad)
     message = str(info.value)
     assert message.startswith("started_on:") and ("UTC offset" in message or "ISO 8601" in message)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "0001-01-01T00:00:00+01:00",
+        "9999-12-31T23:59:59-01:00",
+        datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1))),
+    ],
+)
+def test_utc_iso_out_of_range_dates_raise_a_value_error_naming_the_param(bad):
+    with pytest.raises(ValueError) as info:
+        utc_iso("started_on", bad)
+    assert str(info.value) == (
+        f"started_on: {bad!r} converts to a UTC time outside the years 0001 to 9999; "
+        "use a later date (or, near 9999, an earlier one)"
+    )
+    assert info.value.__suppress_context__  # raised from None: the OverflowError is not chained
 
 
 @pytest.mark.parametrize("value", ["US", "CA", "GB", "DE"])
@@ -2747,6 +2782,39 @@ def test_the_missing_scope_message_names_the_scope_and_says_how_to_fix_it():
     assert "does not have a scope this tool needs" in format_gorelo_error(unnamed, "t", {})
 
 
+@pytest.mark.parametrize(
+    "message, expected",
+    [
+        pytest.param(
+            "API key does not have 'Widgets' read access",
+            "the API key does not have the 'Widgets' scope with read access (Widgets:read)",
+            id="read",
+        ),
+        pytest.param(
+            "API key does not have 'Widgets' write access",
+            "the API key does not have the 'Widgets' scope with write access (Widgets:write)",
+            id="write",
+        ),
+        pytest.param(
+            "API key does not have 'Widgets' delete access",
+            "the API key does not have the 'Widgets' scope with delete access (Widgets:delete)",
+            id="delete",
+        ),
+        pytest.param(
+            "API key does not have 'Widgets' scope",
+            "the API key does not have the 'Widgets' scope",
+            id="scope-form",
+        ),
+    ],
+)
+def test_the_missing_scope_message_names_the_verb_when_gorelo_names_it(message, expected):
+    err = gerr(("080203", message, None), status=403)
+    assert format_gorelo_error(err, "list_documents", {}) == (
+        f"Gorelo rejected list_documents (HTTP 403, code 080203): {expected}. "
+        "Grant it on the API key in Gorelo, then retry [trace 00-abc-01]"
+    )
+
+
 def test_rate_limit_message():
     err = GoreloAPIError("x", status=429, op_key="GET /v1/tickets", kind="rate_limit")
     text = format_gorelo_error(err, "list_tickets", {})
@@ -3107,6 +3175,9 @@ REAL_DESTRUCTIVE_ARGUMENTS = {
     "delete_uptime_check": {"check_id": uid(4)},
     "delete_project_comment": {"project_id": uid(5), "comment_id": uid(6)},
     "delete_project_task": {"project_id": uid(5), "task_id": uid(7)},
+    # not a delete, but gated by the same flag: it turns a document's public link on or publishes it to the client portal
+    "share_document": {"document_id": uid(9), "public_link": True},
+    "remove_document_related_item": {"document_id": uid(9), "related_item_id": 7},
 }
 
 

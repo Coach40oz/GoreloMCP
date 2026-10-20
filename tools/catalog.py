@@ -1,5 +1,7 @@
 """Catalog items, categories and taxes (toolset "billing").
 
+list_items leaves archived items out unless status is archived or all (StatusIds=1,2); that is the spec's default (2026-10-17), not a choice of this tool.
+
 Tools:
 
     list_item_categories  read         GET /v1/items/categories
@@ -71,6 +73,9 @@ TAXES_OP = "GET /v1/taxes"
 
 ITEM_TYPE_IDS = {"product": 1, "bundle": 2}
 ITEM_STATUS_IDS = {"active": 1, "archived": 2}
+# list_items only: the wire value of each choice. "all" is the caller's explicit way to ask for both, because Gorelo leaves archived
+# items out of an unfiltered list (2026-10-17 spec) and StatusIds=1,2 is the way to include them.
+ITEM_LIST_STATUS = {"active": "1", "archived": "2", "all": "1,2"}
 QUERY_MAX_CHARS = 200
 
 # {tool param: Gorelo query name} for every filter of GET /v1/items. Like the body maps below it also
@@ -159,7 +164,7 @@ class SubItem(BaseModel):
 # --------------------------------------------------------------------------
 
 
-def _pick(param: str, value: str | None, table: Mapping[str, int]) -> int | None:
+def _pick(param: str, value: str | None, table: Mapping[str, int | str]) -> int | str | None:
     """The Gorelo id for a named choice. An unknown name is an error, never a silently dropped filter."""
     if value is None:
         return None
@@ -323,7 +328,10 @@ async def list_items(
     skus: Annotated[list[str] | None, Field(description="Exact; no commas in a value.")] = None,
     vendors: Annotated[list[str] | None, Field(description="Exact; no commas in a value.")] = None,
     part_numbers: Annotated[list[str] | None, Field(description="Exact; no commas in a value.")] = None,
-    status: Annotated[Literal["active", "archived"] | None, Field(description="Omit for both.")] = None,
+    status: Annotated[
+        Literal["active", "archived", "all"] | None,
+        Field(description="Omit for Active only (archived left out). 'archived': archived only. 'all': both."),
+    ] = None,
     query: Annotated[str | None, Field(description="Name or description keyword.")] = None,
     created_since: Annotated[str | None, Field(description="At or after.")] = None,
     created_before: Annotated[str | None, Field(description="At or before.")] = None,
@@ -334,8 +342,8 @@ async def list_items(
         str | None, Field(description="next_cursor from the previous call; same filters; repeat until has_more is false.")
     ] = None,
 ) -> dict:
-    """List catalog items (products and bundles), one page at a time. Only get_item returns a bundle's
-    SubItems; labor items never appear.
+    """List catalog items (products and bundles), one page at a time. Archived items are left out unless status is archived or all.
+    Only get_item returns a bundle's SubItems; labor items never appear.
     """
     filters = {
         "type": type,
@@ -356,7 +364,7 @@ async def list_items(
         {
             **filters,
             "type": _pick("type", type, ITEM_TYPE_IDS),
-            "status": _pick("status", status, ITEM_STATUS_IDS),
+            "status": _pick("status", status, ITEM_LIST_STATUS),
         }
     )
     page = await client_of(ctx).get_page(

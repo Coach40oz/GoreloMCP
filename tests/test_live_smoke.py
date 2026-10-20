@@ -7,8 +7,12 @@ Nothing touches the network or the app's .env.
 
 from __future__ import annotations
 
+import base64
 import collections
+import runpy
+from pathlib import Path
 
+import httpx
 import pytest
 from conftest import TEST_API_KEY, MockGorelo, envelope, error_envelope, paged_envelope, uid
 from site_helper import site_config_env  # noqa: F401  (autouse: points GORELO_SITE_CONFIG at invented values)
@@ -32,6 +36,8 @@ TICKETS = [
 ]
 COMMENT_ID, APPROVAL_ID, PROJECT_ID, TASK_ID = uid(11), uid(12), uid(21), uid(22)
 TEST_CLIENT_ID = 9501  # [clients] test_client of the invented site config (tests/site_helper.py)
+DOCUMENT_ID, VERSION_ID = uid(61), uid(62)
+PDF = b"%PDF-1.7 fake document"
 # CustomProperties as the single client and device records carry them (contract 1b1c0cec0e9a): one set text field, one unset
 # text field, one unset number field. The values are the invented "SECRET" text: they must never reach the printed table.
 FIELDS = [
@@ -43,7 +49,7 @@ FIELDS = [
 
 @pytest.fixture(autouse=True)
 def _never_read_the_real_env(monkeypatch, tmp_path):
-    """Whatever a test does, the live service's .env is not the file that gets opened."""
+    """Whatever a test does, the service's .env is not the file that gets opened."""
     monkeypatch.setattr(_env, "ENV_FILE", tmp_path / "no-such-dir" / ".env")
 
 
@@ -67,9 +73,9 @@ class ReadFake:
     """Serves GET routes for every read tool. `empty` names routes that answer an empty list, `fail` maps a route to a
     response, project_scope and forms_scope False answer the 403 with code 080203 on those routes."""
 
-    def __init__(self, *, project_scope=True, forms_scope=True, empty=(), fail=None):
+    def __init__(self, *, project_scope=True, forms_scope=True, documents_scope=True, empty=(), fail=None):
         self.mock = MockGorelo()
-        self.scopes = {"Project": project_scope, "Forms": forms_scope}
+        self.scopes = {"Project": project_scope, "Forms": forms_scope, "Documents": documents_scope}
         self.empty, self.fail = set(empty), dict(fail or {})
         # the CustomProperties each single record carries: a test may change them for all clients, one client or the agent
         self.client_fields: dict[int | None, object] = {None: [dict(f) for f in FIELDS]}
@@ -88,6 +94,8 @@ class ReadFake:
         on("/v1/assets/agents/{deviceId}", self.get_agent)
         on("/v1/assets/custom", Pages([row(uid(32))]))
         on("/v1/assets/custom/hardware-types", Items([row(42)]))
+        on("/v1/assets/custom/{customAssetId}", lambda q: envelope(row(last(q, 4))))
+        on("/v1/deletions", Pages([{"Type": {"Id": 1, "Name": "Client"}, "Id": "1042", "DeletedOn": "2026-10-16T12:00:00Z"}]))
         on("/v1/alerts", Pages([row(uid(33))]))
         on("/v1/tickets/statuses", Items([row(1), row(4)]))
         on("/v1/tickets/types", Items([row(7101)]))
@@ -138,6 +146,37 @@ class ReadFake:
         on("/v1/projects/{projectId}/comments/{commentId}", lambda q: envelope(row(last(q, 5))), scope="Project")
         on("/v1/forms", Pages([{"Id": "form-abc_1", "Title": SECRET}]), scope="Forms")
         on("/v1/forms/{formId}/responses", Pages([row(uid(56))]), scope="Forms")
+        self.document: dict | object = self.document_record()  # DROP: the record is not an object
+        self.pdf: httpx.Response = httpx.Response(
+            200, content=PDF, headers={"content-type": "application/pdf", "content-disposition": 'attachment; filename="d.pdf"'}
+        )
+        on("/v1/documents", Pages([{"Id": DOCUMENT_ID, "Title": SECRET, "Status": {"Id": 1, "Name": "Active"}}]), scope="Documents")
+        on("/v1/documents/{documentId}", lambda q: envelope(self.document), scope="Documents")
+        on("/v1/documents/{documentId}/pdf", lambda q: self.pdf, scope="Documents")
+        on(
+            "/v1/documents/{documentId}/versions",
+            Pages([{"VersionId": VERSION_ID, "IsCurrent": True, "Title": SECRET, "EditedById": 0, "EditedOn": "2026-10-16T12:00:00Z"}]),
+            scope="Documents",
+        )
+        on(
+            "/v1/documents/{documentId}/versions/{versionId}",
+            lambda q: envelope({"VersionId": last(q, 5), "IsCurrent": True, "Title": SECRET, "Body": SECRET, "Attachments": []}),
+            scope="Documents",
+        )
+        on(
+            "/v1/documents/{documentId}/related-items",
+            Items([{"Id": 7, "ItemId": uid(5), "ItemType": {"Id": 2, "Name": "Custom asset"}}]),
+            scope="Documents",
+        )
+
+    @staticmethod
+    def document_record(**more):
+        """A DocumentDetailModel (contract a7954b24844b): the title and the body are the invented SECRET text."""
+        return {
+            "Id": DOCUMENT_ID, "Title": SECRET, "Body": SECRET, "ParentDocumentId": None, "ClientId": CLIENT_ID,
+            "Status": {"Id": 1, "Name": "Active"}, "IsStarred": False, "PublicLinkEnabled": False, "PublishToPortalEnabled": False,
+            "Attachments": [{"Name": SECRET, "Url": "https://files.example.invalid/x?token=SECRET"}], "Children": [], "RelatedItems": [], **more,
+        }
 
     def _on(self, template, data, *, scope=None):
         def serve(request):
@@ -207,14 +246,18 @@ def outcomes(report) -> dict[str, smoke.Row]:
 
 def test_the_plan_covers_exactly_the_registered_read_tools_once_get_ticket_three_times_and_get_client_twice():
     reads = smoke.read_tools()
-    assert len(reads) == 52 and "export_invoice_pdf" not in reads
-    assert {"list_alerts", "get_invoice"} <= set(reads)
+    assert len(reads) == 60 and "export_invoice_pdf" not in reads
+    assert {"list_alerts", "get_invoice", "get_custom_asset", "list_deletions", "export_document_pdf"} <= set(reads)
+    assert {name for name, toolset in reads.items() if toolset == "documents"} == {
+        "list_documents", "get_document", "export_document_pdf", "list_document_versions", "get_document_version",
+        "list_document_related_items",
+    }
     assert {spec.name for spec in REGISTRY.specs if spec.kind == "read"} == set(reads)
     assert smoke.plan_problems(smoke.CASES, reads) == ([], [])
     tools = [case.tool for case in smoke.CASES]
     assert {name: count for name, count in collections.Counter(tools).items() if count > 1} == {"get_ticket": 3, "get_client": 2}
     labels = [case.row for case in smoke.CASES]
-    assert len(labels) == len(set(labels)) == 55
+    assert len(labels) == len(set(labels)) == 63
     assert [case.row for case in smoke.CASES if case.tool == "get_ticket"] == [
         "get_ticket (guid)", "get_ticket (number)", "get_ticket (display number)",
     ]
@@ -241,15 +284,15 @@ async def test_a_full_run_calls_every_read_tool_once_sends_only_gets_and_passes(
     fake = ReadFake()
     report = await run(fake)
     assert report.ok, "\n".join(lines)
-    assert len(report.rows) == 55 and all(r.outcome == smoke.OK for r in report.rows), [
+    assert len(report.rows) == 63 and all(r.outcome == smoke.OK for r in report.rows), [
         (r.label, r.outcome, r.note) for r in report.rows if r.outcome != smoke.OK
     ]
     assert {r.method for r in fake.mock.requests} == {"GET"}
-    # 52 calls with HTTP (two local tables make none) plus the search behind get_ticket by number and by display number, and
+    # 60 calls with HTTP (two local tables make none) plus the search behind get_ticket by number and by display number, and
     # the second get_client (the test client)
-    assert report.requests == len(fake.mock.requests) == 55 and report.refused == 0
-    assert report.counts() == {smoke.OK: 55, smoke.SCOPE_MISSING: 0, smoke.SKIPPED: 0, smoke.FAILED: 0}
-    assert lines[-1] == "result: PASSED" and "55 checks: 55 ok, 0 scope missing, 0 skipped, 0 FAILED; 55 requests sent" in lines[-2]
+    assert report.requests == len(fake.mock.requests) == 63 and report.refused == 0
+    assert report.counts() == {smoke.OK: 63, smoke.SCOPE_MISSING: 0, smoke.SKIPPED: 0, smoke.FAILED: 0}
+    assert lines[-1] == "result: PASSED" and "63 checks: 63 ok, 0 scope missing, 0 skipped, 0 FAILED; 63 requests sent" in lines[-2]
     assert not fake.mock.unmatched
 
 
@@ -257,11 +300,16 @@ async def test_the_rows_are_printed_as_they_complete_and_make_up_the_rendered_ta
     fake = ReadFake()
     seen = []
     report = await run(fake, echo=lambda line: seen.append((line, len(fake.mock.requests))))
-    assert [line for line, _ in seen] == report.render()
-    by_start = {line.split()[0]: made for line, made in seen if line.split()[0] in ("tool", "health_check", "list_clients", "list_form_responses")}
+    assert [line for line, _ in seen] == ["api host: api.usw.gorelo.io", *report.render()]
+    by_start = {
+        line.split()[0]: made
+        for line, made in seen
+        if line.split()[0] in ("tool", "health_check", "list_clients", "list_form_responses", "list_document_related_items")
+    }
     assert by_start["tool"] == 0  # the header is out before the first request
     assert by_start["health_check"] == 1 and by_start["list_clients"] == 2  # each row appears when its call is done
-    assert by_start["list_form_responses"] == 55  # the last row only after the last request
+    assert by_start["list_form_responses"] == 57  # the forms are not the last any more: 6 document requests follow
+    assert by_start["list_document_related_items"] == 63  # the last row only after the last request
 
 
 async def test_get_ticket_is_called_with_the_guid_the_number_and_the_display_number_of_a_listed_ticket(run):
@@ -471,7 +519,8 @@ async def test_the_smoke_stays_read_only_it_never_exports_an_invoice_pdf(run):
     fake = ReadFake()
     report = await run(fake)
     assert report.ok and {r.method for r in fake.mock.requests} == {"GET"}
-    assert not any(r.path.endswith("/pdf") for r in fake.mock.requests)  # the export records an event on the invoice
+    assert not any(r.path.startswith("/v1/invoices/") and r.path.endswith("/pdf") for r in fake.mock.requests)  # it records an event
+    assert [r.path for r in fake.mock.requests if r.path.endswith("/pdf")] == [f"/v1/documents/{DOCUMENT_ID}/pdf"]  # a read: no event
     assert "export_invoice_pdf" not in {case.tool for case in smoke.CASES}
 
 
@@ -492,7 +541,7 @@ async def test_the_table_has_counts_only_never_record_contents_and_never_the_key
     assert "FAILED" in taxes and "***" in taxes and TEST_API_KEY not in text
     # a failure shows Gorelo's message (the one place text from the API appears); no other row holds any
     assert text.count(SECRET) == 1
-    assert lines[0].startswith("tool") and lines[-1] == "result: FAILED"
+    assert lines[0] == "api host: api.usw.gorelo.io" and lines[1].startswith("tool") and lines[-1] == "result: FAILED"
 
 
 # --------------------------------------------------------------------------
@@ -709,8 +758,8 @@ async def test_the_requests_are_paced_one_second_apart(run, monkeypatch):
     monkeypatch.setattr(smoke, "Pacer", lambda interval: _env.Pacer(interval, clock=time.clock, sleep=time.sleep))
     assert smoke.PACE_SECONDS == 1.0
     report = await run(ReadFake(), pace=smoke.PACE_SECONDS)
-    assert report.ok and report.requests == 55
-    assert time.sleeps == [1.0] * 54  # one second between two requests, none before the first
+    assert report.ok and report.requests == 63
+    assert time.sleeps == [1.0] * 62  # one second between two requests, none before the first
 
 
 # --------------------------------------------------------------------------
@@ -842,7 +891,7 @@ def test_main_runs_the_smoke_end_to_end_and_its_exit_status_follows_the_result(m
         )
         assert smoke.main([]) == status
         out = capsys.readouterr().out.splitlines()
-        assert out[0].startswith("tool") and out[-1] == last
+        assert out[0] == "api host: api.usw.gorelo.io" and out[1].startswith("tool") and out[-1] == last
 
 
 def test_the_help_says_what_the_smoke_does_and_offers_no_flags(capsys):
@@ -868,3 +917,317 @@ def test_the_command_line_reports_a_missing_api_key_without_a_traceback(monkeypa
     monkeypatch.setattr(smoke, "live_settings", no_key)
     assert smoke.main([]) == 2
     assert "cannot start: GORELO_API_KEY is not set" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# The reads of contract a7954b24844b: get_custom_asset, list_deletions and the six document reads
+# --------------------------------------------------------------------------
+
+DOCUMENT_READS = [
+    "list_documents", "get_document", "export_document_pdf", "list_document_versions", "get_document_version",
+    "list_document_related_items",
+]
+
+
+async def test_the_new_reads_run_with_the_ids_the_lists_taught_and_check_only_shapes(run):
+    fake = ReadFake()
+    report = await run(fake)
+    assert report.ok
+    found = outcomes(report)
+    assert found["list_custom_assets"].outcome == smoke.OK and found["get_custom_asset"].note == "Id matches"
+    assert found["list_deletions"].note == "count=1 total_count=1"
+    assert [found[name].outcome for name in DOCUMENT_READS] == [smoke.OK] * 6
+    assert found["get_document"].note == "Id matches; status 1, 1 attachments, 0 children, 0 related items"
+    assert found["export_document_pdf"].note == f"{len(PDF)} bytes of application/pdf"
+    assert found["get_document_version"].note == "VersionId matches"  # a version's key is VersionId, not Id
+    assert found["list_document_related_items"].note == "count=1"
+    sent = [(r.path, r.query) for r in fake.mock.requests]
+    assert (f"/v1/assets/custom/{uid(32)}", {}) in sent
+    deletions = next(r for r in fake.mock.requests if r.path == "/v1/deletions")
+    assert deletions.method == "GET" and deletions.query == {"TypeIds": "1,2", "PageSize": "20"}  # types 1 and 2 only
+    for path in (
+        f"/v1/documents/{DOCUMENT_ID}", f"/v1/documents/{DOCUMENT_ID}/pdf", f"/v1/documents/{DOCUMENT_ID}/versions",
+        f"/v1/documents/{DOCUMENT_ID}/versions/{VERSION_ID}", f"/v1/documents/{DOCUMENT_ID}/related-items",
+    ):
+        assert any(request_path == path for request_path, _ in sent), path
+    assert {r.method for r in fake.mock.requests} == {"GET"}
+    text = "\n".join(found[name].note for name in DOCUMENT_READS)
+    assert SECRET not in text and "token=SECRET" not in text  # counts and sizes only: no title, body, file name or url
+
+
+async def test_the_order_of_the_new_cases_follows_what_each_one_needs(run):
+    report = await run(ReadFake())
+    names = [row_.label for row_ in report.rows]
+    assert names.index("list_custom_assets") + 1 == names.index("get_custom_asset")
+    assert names.index("list_alerts") + 1 == names.index("list_deletions")
+    start = names.index("list_documents")
+    assert names[start : start + 6] == DOCUMENT_READS and names[-1] == "list_document_related_items"
+
+
+async def test_a_403_with_the_documents_scope_message_is_scope_missing_and_not_a_failure(run):
+    fake = ReadFake(documents_scope=False)
+    report = await run(fake)
+    found = outcomes(report)
+    assert report.ok and found["list_documents"].outcome == smoke.SCOPE_MISSING and found["list_documents"].note == "Documents scope"
+    for name in DOCUMENT_READS[1:]:
+        assert found[name].outcome == smoke.SKIPPED, name
+    assert found["get_document"].note == "needs a document: list_documents: scope missing"
+    assert report.counts()[smoke.SCOPE_MISSING] == 1 and smoke.SCOPE_TOOLSETS == ("projects", "forms", "documents")
+    assert [r.path for r in fake.mock.requests if "/documents" in r.path] == ["/v1/documents"]  # nothing else was tried
+
+
+async def test_a_tenant_without_documents_or_custom_assets_skips_the_single_reads_and_fails_nothing(run):
+    fake = ReadFake(empty={"/v1/documents", "/v1/assets/custom"})
+    report = await run(fake)
+    found = outcomes(report)
+    assert report.ok and found["list_documents"].outcome == smoke.OK and found["list_documents"].note.startswith("count=0")
+    for name in ("get_document", "export_document_pdf", "list_document_versions", "list_document_related_items"):
+        assert found[name].outcome == smoke.SKIPPED and found[name].note == "needs a document: list_documents returned no rows", name
+    assert found["get_document_version"].outcome == smoke.SKIPPED and found["get_document_version"].note.startswith("needs a document")
+    assert found["get_custom_asset"].note == "needs a custom asset: list_custom_assets returned no rows"
+
+
+async def test_a_document_version_list_without_a_version_skips_the_single_version(run):
+    fake = ReadFake(empty={"/v1/documents/{documentId}/versions"})
+    report = await run(fake)
+    found = outcomes(report)
+    assert report.ok and found["get_document_version"].outcome == smoke.SKIPPED
+    assert found["get_document_version"].note == "needs a document version: list_document_versions returned no rows"
+
+
+@pytest.mark.parametrize(
+    "change, problem",
+    [
+        ({"Status": None}, "Status is not an object with a whole-number Id"),
+        ({"Status": {"Id": "1"}}, "Status is not an object with a whole-number Id"),
+        ({"Attachments": None}, "Attachments is not a list"),
+        ({"Children": "x"}, "Children is not a list"),
+        ({"RelatedItems": {}}, "RelatedItems is not a list"),
+        ({"IsStarred": "no"}, "IsStarred is not a boolean"),
+        ({"PublicLinkEnabled": None}, "PublicLinkEnabled is not a boolean"),
+        ({"PublishToPortalEnabled": 0}, "PublishToPortalEnabled is not a boolean"),
+    ],
+)
+async def test_a_document_record_of_another_shape_is_drift_and_fails_the_row(run, change, problem):
+    fake = ReadFake()
+    fake.document = fake.document_record(**change)
+    report = await run(fake)
+    found = outcomes(report)
+    assert not report.ok and found["get_document"].outcome == smoke.FAILED and problem in found["get_document"].note
+    assert found["list_documents"].outcome == smoke.OK and found["list_document_related_items"].outcome == smoke.OK
+
+
+async def test_a_document_that_answers_another_id_fails_the_row(run):
+    fake = ReadFake()
+    fake.document = fake.document_record(Id=uid(99))
+    found = outcomes(await run(fake))
+    assert found["get_document"].outcome == smoke.FAILED and found["get_document"].note == "the record's Id is not the one that was asked for"
+
+
+@pytest.mark.parametrize(
+    "response, problem",
+    [
+        (httpx.Response(200, content=b"not a pdf", headers={"content-type": "application/pdf"}), "does not start with %PDF"),
+        (httpx.Response(200, content=b"", headers={"content-type": "application/pdf"}), "the download is empty"),
+        (httpx.Response(200, json={"IsSuccess": True, "Data": {"Id": DOCUMENT_ID}}), "Gorelo returned an unexpected response"),
+        (httpx.Response(404, json={"IsSuccess": False, "Notifications": [{"Code": "070202", "Message": "nope"}]}), "document_id"),
+    ],
+)
+async def test_an_export_that_is_not_a_pdf_fails_the_row_and_nothing_else(run, response, problem):
+    fake = ReadFake()
+    fake.pdf = response
+    report = await run(fake)
+    found = outcomes(report)
+    assert not report.ok and found["export_document_pdf"].outcome == smoke.FAILED
+    assert problem in found["export_document_pdf"].note or "nope" in found["export_document_pdf"].note
+    assert found["list_document_versions"].outcome == smoke.OK and report.counts()[smoke.FAILED] == 1
+
+
+def test_check_file_reads_the_embedded_pdf_and_nothing_else():
+    class Block:
+        def __init__(self, type_, resource=None):
+            self.type, self.resource = type_, resource
+
+    def pdf(data, mime="application/pdf"):
+        return Block("resource", type("R", (), {"mimeType": mime, "blob": base64.b64encode(data).decode()})())
+
+    text = Block("text")
+    good = type("Result", (), {"content": [text, pdf(PDF)]})()
+    assert smoke.check_file(good) == f"{len(PDF)} bytes of application/pdf"
+    for content, problem in (
+        ([text], "no embedded file"),
+        ([], "no embedded file"),
+        ([pdf(PDF, "text/plain")], "of type 'text/plain', expected application/pdf"),
+        ([pdf(b"hello")], "does not start with %PDF"),
+        ([Block("resource", type("R", (), {"mimeType": "application/pdf", "blob": "###"})())], "not valid base64"),
+    ):
+        with pytest.raises(ShapeError, match=problem):
+            smoke.check_file(type("Result", (), {"content": content})())
+
+
+def test_check_record_takes_the_key_of_the_record():
+    assert smoke.check_record({"VersionId": "ABC"}, "abc", "VersionId") == "VersionId matches"
+    assert smoke.check_record({"VersionId": "ABC"}, None, "VersionId") == "VersionId present"
+    with pytest.raises(ShapeError, match="the record has no VersionId"):
+        smoke.check_record({"Id": 5}, 5, "VersionId")
+    with pytest.raises(ShapeError, match="the record's VersionId is not the one"):
+        smoke.check_record({"VersionId": "x"}, "y", "VersionId")
+
+
+# --------------------------------------------------------------------------
+# Hidden custom fields (contract a7954b24844b: IsHidden, and the Value of a hidden field is always null)
+# --------------------------------------------------------------------------
+
+HIDDEN = {"Id": 14, "Variable": "pin", "Name": "PIN", "Type": {"Id": 1, "Name": "Text"}, "Value": None, "IsSet": False, "IsHidden": True}
+
+
+def test_the_shape_check_accepts_is_hidden_when_it_is_a_boolean_and_refuses_anything_else():
+    fields = [{**FIELDS[0], "IsHidden": False}, HIDDEN, FIELDS[1]]  # present on some entries, absent on one: both are fine
+    assert smoke.custom_properties_of({"CustomProperties": fields}) == fields
+    for bad in ("true", 1, None, "no", [True]):
+        with pytest.raises(ShapeError, match="item 1: IsHidden is not a boolean"):
+            smoke.custom_properties_of({"CustomProperties": [{**FIELDS[0], "IsHidden": bad}]})
+
+
+def test_hidden_fields_are_counted_apart_and_never_as_unset_text_fields_the_area_could_use():
+    plain = {"CustomProperties": [dict(f) for f in FIELDS]}
+    assert smoke.custom_properties_note(plain) == "3 custom properties (1 set)"  # a tenant with none hidden reads as it always did
+    mixed = {"CustomProperties": [*FIELDS, HIDDEN]}
+    assert smoke.custom_properties_note(mixed) == "4 custom properties (1 set, 1 hidden)"
+    assert smoke.custom_properties_of_test_client_note(mixed) == (
+        "4 custom properties (1 set, 1 hidden, 1 unset text; the custom_properties write area needs none set and one unset text)"
+    )  # the hidden unset text field is not the 1: it is FIELDS[1]
+    only_hidden = {"CustomProperties": [HIDDEN]}
+    assert smoke.custom_properties_of_test_client_note(only_hidden) == (
+        "1 custom properties (0 set, 1 hidden, 0 unset text; the custom_properties write area needs none set and one unset text)"
+    )
+    assert smoke.is_hidden(HIDDEN) and not smoke.is_hidden(FIELDS[0]) and not smoke.is_hidden({"IsHidden": "true"})
+
+
+def test_a_hidden_field_that_shows_a_value_is_a_note_never_a_failure():
+    leaking = {**HIDDEN, "Value": "visible after all", "IsSet": True}
+    assert smoke.hidden_with_value([leaking, HIDDEN, FIELDS[0]]) == 1
+    note = smoke.custom_properties_note({"CustomProperties": [leaking]})
+    assert note == "1 custom properties (1 set, 1 hidden); note: 1 hidden field(s) show a Value, which the spec says is always null"
+    assert "visible after all" not in note and "visible after all" not in smoke.custom_properties_of_test_client_note({"CustomProperties": [leaking]})
+
+
+async def test_the_rows_of_a_tenant_with_hidden_fields_pass_and_print_counts_only(run, lines):
+    fake = ReadFake()
+    fake.client_fields[TEST_CLIENT_ID] = [*FIELDS, HIDDEN]
+    fake.agent_fields = [{**f, "IsHidden": False} for f in FIELDS] + [HIDDEN]  # every entry carries the key
+    report = await run(fake)
+    found = outcomes(report)
+    assert report.ok, "\n".join(lines)
+    assert found["get_agent"].note == "Id matches; 4 custom properties (1 set, 1 hidden)"
+    assert found["get_client (test client)"].note.startswith("Id matches; 4 custom properties (1 set, 1 hidden, 1 unset text;")
+
+
+# --------------------------------------------------------------------------
+# The row "test client status"
+# --------------------------------------------------------------------------
+
+
+async def test_an_active_test_client_gets_an_ok_row_before_the_cases(run, lines):
+    report = await run(ReadFake())
+    assert report.test_client is not None and report.test_client.label == "test client status"
+    assert report.test_client.outcome == smoke.OK and report.test_client.note == "Active (status 1): the write matrix may start"
+    assert lines[1].startswith("tool") and lines[2].startswith("test client status") and lines[3].startswith("health_check")
+    assert report.render()[:2] == lines[1:3] and "write matrix: BLOCKED" not in "\n".join(lines)
+    assert len(report.rows) == 63  # the status row is not one of the cases: counts and the summary line keep their shape
+
+
+# --------------------------------------------------------------------------
+# The API host of the run (GORELO_BASE_URL)
+# --------------------------------------------------------------------------
+
+
+async def test_the_first_line_names_the_api_host_of_the_settings_it_ran_with(make_settings, lines):
+    fake = ReadFake()
+    await smoke.run_smoke(
+        settings=make_settings(base_url="https://api.aue.gorelo.io/v1"), transport=fake.mock.transport, pace=0, echo=lines.append
+    )
+    assert lines[0] == "api host: api.aue.gorelo.io" and lines[1].startswith("tool")
+
+
+# --------------------------------------------------------------------------
+# The row "test client status"
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", [(4, "Archived"), (3, "Credit hold"), (None, None)])
+async def test_a_test_client_that_is_not_active_is_not_ready_and_does_not_fail_the_smoke(run, lines, status):
+    import site_helper
+
+    site_helper.CLIENT_STATUS[TEST_CLIENT_ID] = status
+    fake = ReadFake()
+    report = await run(fake)
+    assert report.ok  # reading goes on: only the matrix refuses
+    row_ = report.test_client
+    assert row_.outcome == smoke.NOT_READY == "NOT READY"
+    assert "the write matrix will refuse to start" in row_.note and "operator has to make it Active again in the Gorelo app" in row_.note
+    assert "never changes the status of a client" in row_.note
+    assert lines[-2] == "write matrix: BLOCKED until the operator makes the test client Active again in the Gorelo app"
+    assert lines[-1] == "result: PASSED"
+    assert all(r.outcome == smoke.OK for r in report.rows) and {r.method for r in fake.mock.requests} == {"GET"}
+    if status[0] == 4:
+        assert "Archived (status 4)" in row_.note
+
+
+async def test_a_status_that_was_not_read_is_not_ready_too(run, monkeypatch):
+    async def nothing(api_key, *, transport=None, cfg=None, base_url=None):
+        return {}
+
+    monkeypatch.setattr(smoke.live_guard, "verify_site_clients", nothing)
+    report = await run(ReadFake())
+    assert report.test_client.outcome == smoke.NOT_READY and "whose status was not read" in report.test_client.note
+
+
+# --------------------------------------------------------------------------
+# The API host of the run (GORELO_BASE_URL)
+# --------------------------------------------------------------------------
+
+
+async def test_the_smoke_passes_the_region_of_its_settings_to_the_check_and_to_the_guard(make_settings, monkeypatch):
+    seen = []
+
+    async def spy(api_key, *, transport=None, cfg=None, base_url=None):
+        seen.append(base_url)
+        return {}  # the stub stands in for the check; what matters is that it is asked for the configured host
+
+    monkeypatch.setattr(smoke.live_guard, "verify_site_clients", spy)
+    guards = []
+
+    class Spy(LiveGuard):
+        def __init__(self, *args, **kwargs):
+            guards.append(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(smoke, "LiveGuard", Spy)
+    australian = "https://api.aue.gorelo.io/v1"
+    fake = ReadFake()
+    report = await smoke.run_smoke(
+        settings=make_settings(base_url=australian), transport=fake.mock.transport, pace=0, echo=lambda line: None
+    )
+    assert seen == [australian] and guards == [{"base_url": australian}]
+    assert report.ok and {r.url.split("/")[2] for r in fake.mock.requests} == {"api.aue.gorelo.io"}  # every request went to that host only
+
+
+# --------------------------------------------------------------------------
+# The historical probes script (2026-10-01): its entry point refuses to run
+# --------------------------------------------------------------------------
+
+
+def test_the_probes_script_refuses_to_run_before_any_request_or_read(monkeypatch, capsys):
+    def no_client(*args, **kwargs):
+        raise AssertionError("the probes script built an HTTP client although it refuses to run")
+
+    monkeypatch.setattr(httpx, "Client", no_client)
+    script = Path(__file__).resolve().parents[1] / "scripts" / "live" / "probes_20261001.py"
+    with pytest.raises(SystemExit) as exited:
+        runpy.run_path(str(script), run_name="__main__")
+    assert exited.value.code == 2
+    assert capsys.readouterr().err == (
+        "probes_20261001.py is a historical record of the 2026-10-01 probes and does not run any more; "
+        "use scripts/live/smoke.py or scripts/live/write_matrix.py\n"
+    )

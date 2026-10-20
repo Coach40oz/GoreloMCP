@@ -18,8 +18,9 @@ WHAT
       capability set, no writable-and-executable memory. One setting per line, so any single
       one that breaks in your container can be removed alone.
     - NoNewPrivileges, PrivateTmp, ProtectHome, ProtectKernel*, RestrictSUIDSGID in the unit.
-    - The watcher gets only the API key. Its environment file (/etc/gorelo-mcp/watcher.env,
-      root-owned, mode 0600) holds GORELO_API_KEY and nothing else. The OAuth password and the
+    - The watcher gets only the API key (and, for an account hosted in Australia, the API address). Its
+      environment file (/etc/gorelo-mcp/watcher.env, root-owned, mode 0600) holds GORELO_API_KEY and,
+      for an account hosted in Australia, GORELO_BASE_URL, nothing else. The OAuth password and the
       public URL are deliberately not given to it.
     - Pinned dependencies. pyproject.toml pins exact versions and uv.lock pins the tree; a test
       pins the lock file's hashes. The login gate refuses to start on a fastmcp or mcp version it
@@ -27,7 +28,17 @@ WHAT
     - Unattended upgrades with Debian's default configuration (security fixes and stable
       point-release updates, no automatic reboot) are part of INSTALL step 1.2. They are a host
       setting, not something this repository can enforce.
-    - The log never holds client data: parameter names only, and a filter trims framework logs.
+    - The log holds Gorelo request paths with their record ids and the names of the query parameters and body
+      fields, never their values. A failed tool call is logged with its error text, which can quote what the call
+      was given and Gorelo's own message. The authorize and register lines hold the visitor's address (`ip=`), and so
+      does a refused request body on /authorize, /token, /register or /revoke (`body outcome=`); sign-in lines hold a
+      client id's first 8 characters; a valid request also names the client as it registered
+      (`name=`), and a registration refused for a redirect address or a blocked redirect holds that address's host
+      (`redirect=`). The web server adds one access line per HTTP request: the visitor's address, the path and the
+      query string in full, the HTTP version and the status. The API key and the password are never logged. A filter
+      trims FastMCP's own logs: it cuts the argument values out of a validation error, logs an error that carries a
+      summary (the custom field alarm, the attachment refusal) as that summary alone, and redacts `input_value=` text
+      from messages; other errors are logged as they are.
 
 WHY
   The process holds a Gorelo key and talks to the internet through a tunnel. Each measure
