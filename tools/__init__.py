@@ -28,6 +28,7 @@ from tools import (  # noqa: F401
     org,
     project_tasks,
     projects,
+    scripts,
     tickets,
     time_entries,
     uptime,

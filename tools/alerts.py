@@ -38,6 +38,13 @@ spec of 2026-10-14 said Ignored, and answers 400 for any other id), TypeIds (the
 text of the spec, 0 (N/A) for an alert it cannot name, 400 outside 0-20), ClientIds, DeviceIds, CreatedSince (at or
 after), CreatedBefore (strictly before) and SortOrder (desc, newest first, is the default). DismissedOn and
 DismissedBy are set only while an alert is dismissed.
+
+Contract 05200951c89e (2026-10-22) adds the subject of an alert: POST takes AgentAssetId, CustomAssetId and UptimeId (GUIDs,
+"at most one of" them, the asset must belong to ClientId; checked by Gorelo, the tool refuses two at once before any
+request) and GET takes AgentAssetIds, CustomAssetIds and UptimeIds. DeviceId and UptimeCheckId on an alert row are
+deprecated (AgentAssetId and UptimeId replace them, same values); DeviceIds stays as the deprecated alias of
+AgentAssetIds, which Gorelo ignores when AgentAssetIds is sent. PostAlertRequest never had a device or uptime-check
+field, so post_alert has no old counterpart to guard.
 """
 
 from datetime import datetime
@@ -56,6 +63,7 @@ from tools._common import (
     csv_ids,
     describe_value,
     gorelo_tool,
+    guid,
     guids,
     non_empty,
     ok_result,
@@ -75,7 +83,14 @@ FIELD_MAP = {
     "resource": "Resource",
     "severity": "Severity",
     "description": "Description",
+    "agent_asset_id": "AgentAssetId",
+    "custom_asset_id": "CustomAssetId",
+    "uptime_id": "UptimeId",
 }
+
+# The three optional subjects of an alert: "at most one of AgentAssetId, CustomAssetId and UptimeId may be sent" (the
+# spec text of PostAlertRequest.AgentAssetId); the agent or custom asset "must belong to ClientId" (checked by Gorelo).
+SUBJECT_PARAMS = ("agent_asset_id", "custom_asset_id", "uptime_id")
 
 # AlertSeverity: the four values Gorelo accepts, with the names it publishes.
 SEVERITY_NAMES = {1: "Critical", 2: "Error", 3: "Warning", 4: "Information"}
@@ -121,6 +136,9 @@ FILTER_FIELDS = {
     "type_ids": "TypeIds",
     "client_ids": "ClientIds",
     "device_ids": "DeviceIds",
+    "agent_asset_ids": "AgentAssetIds",
+    "custom_asset_ids": "CustomAssetIds",
+    "uptime_ids": "UptimeIds",
     "created_since": "CreatedSince",
     "created_before": "CreatedBefore",
     "sort_order": "SortOrder",
@@ -136,16 +154,37 @@ async def post_alert(
     resource: Annotated[str, Field(description="What the alert is about, e.g. a host name.")],
     severity: Annotated[int, Strict(), Field(description=f"{SEVERITY_HELP}.")],
     description: Annotated[str | None, Field(description="Free-text details.")] = None,
+    agent_asset_id: Annotated[
+        str | None, Field(description="Agent asset GUID (list_agents) the alert is about; must belong to client_id. At most one of the three subjects.")
+    ] = None,
+    custom_asset_id: Annotated[
+        str | None, Field(description="Custom asset GUID (list_custom_assets) the alert is about; must belong to client_id. At most one subject.")
+    ] = None,
+    uptime_id: Annotated[str | None, Field(description="Uptime GUID (list_uptime_checks) the alert is about. At most one subject.")] = None,
 ) -> dict:
     """Post an external alert for a client's resource; returns {"ok": true} when Gorelo accepts it.
-    Severity: 1 Critical, 2 Error, 3 Warning, 4 Information. Side effects: per the tenant's alert rules it may open a ticket or notify technicians; posting twice may notify twice. Alerts cannot be deleted through the API, so a mistake is fixed in the Gorelo app. If a call fails or times out, do not post it again until list_alerts (newest first, no client_ids filter: external alerts carry no client id) shows whether it arrived; ask the user first.
+    Severity: 1 Critical, 2 Error, 3 Warning, 4 Information. Optionally link it to one agent asset, custom asset or uptime (not more than one). Side effects: per the tenant's alert rules it may open a ticket or notify technicians; posting twice may notify twice. Alerts cannot be deleted through the API, so a mistake is fixed in the Gorelo app. If a call fails or times out, do not post it again until list_alerts (newest first, no client_ids filter: external alerts carry no client id) shows whether it arrived; ask the user first.
     """
     non_empty("name", name)
     non_empty("resource", resource)
     cid = positive_id("client_id", client_id)
     level = _severity(severity)
+    subjects = {
+        param: None if value is None else guid(param, value)
+        for param, value in zip(SUBJECT_PARAMS, (agent_asset_id, custom_asset_id, uptime_id), strict=True)
+    }
+    given = [param for param, value in subjects.items() if value is not None]
+    if len(given) > 1:
+        raise ValueError(f"{given[1]}: at most one of {', '.join(SUBJECT_PARAMS)} may be sent, got {' and '.join(given)}")
     body = build_body(
-        {"name": name, "client_id": cid, "resource": resource, "severity": level, "description": description},
+        {
+            "name": name,
+            "client_id": cid,
+            "resource": resource,
+            "severity": level,
+            "description": description,
+            **subjects,
+        },
         FIELD_MAP,
     )
     try:
@@ -265,7 +304,14 @@ async def list_alerts(
             "a Script alert without one matched through its device."
         ),
     ] = None,
-    device_ids: Annotated[list[str] | None, Field(description="Device GUIDs (list_agents).")] = None,
+    device_ids: Annotated[
+        list[str] | None, Field(description="Deprecated alias of agent_asset_ids (list_agents); Gorelo ignores it when agent_asset_ids is given.")
+    ] = None,
+    agent_asset_ids: Annotated[list[str] | None, Field(description="Agent asset GUIDs (list_agents).")] = None,
+    custom_asset_ids: Annotated[
+        list[str] | None, Field(description="Custom asset GUIDs (list_custom_assets): Warranty Expiration alerts and API alerts posted for one.")
+    ] = None,
+    uptime_ids: Annotated[list[str] | None, Field(description="Uptime GUIDs (list_uptime_checks).")] = None,
     created_since: Annotated[str | None, Field(description="At or after this instant (UTC offset required).")] = None,
     created_before: Annotated[str | None, Field(description="Strictly before this instant (UTC offset required).")] = None,
     sort_order: Annotated[Literal["desc", "asc"], Field(description="desc: newest first. asc: oldest first.")] = "desc",
@@ -275,7 +321,7 @@ async def list_alerts(
     ] = None,
 ) -> dict:
     """List alerts raised in Gorelo, including those sent with post_alert, one page at a time: newest first unless sort_order is asc.
-    Alerts cannot be deleted. DismissedOn and DismissedBy are set only while an alert is dismissed. status: new=1, dismissed=2, ticketed=3.
+    Row fields DeviceId and UptimeCheckId are deprecated (use AgentAssetId, UptimeId). Alerts cannot be deleted. DismissedOn and DismissedBy are set only while an alert is dismissed.
     type_ids: Uptime=1, API=2, Script=3, External=4, Slide=5, Huntress=6, Error Event Log=7, Disk Usage=8, Connectivity=9, Process=10, Service=11, Antivirus=12, Redfish=13, CPU=14, Memory=15, Ping=16, Windows Updates=17, Warranty Expiration=18, Domain Expiration=19, Contract Expiration=20 (7-17 are device checks; 0 (N/A) matches an alert this scale cannot name; an id outside 0-20 is refused).
     """
     names = _status_filter(status)
@@ -292,6 +338,9 @@ async def list_alerts(
         "type_ids": types,
         "client_ids": positive_ids("client_ids", client_ids),
         "device_ids": guids("device_ids", device_ids),
+        "agent_asset_ids": guids("agent_asset_ids", agent_asset_ids),
+        "custom_asset_ids": guids("custom_asset_ids", custom_asset_ids),
+        "uptime_ids": guids("uptime_ids", uptime_ids),
         "created_since": since,
         "created_before": before,
         "sort_order": _sort_order(sort_order),
@@ -301,6 +350,9 @@ async def list_alerts(
         "TypeIds": csv_ids("type_ids", types),
         "ClientIds": csv_ids("client_ids", filters["client_ids"]),
         "DeviceIds": csv_ids("device_ids", filters["device_ids"]),
+        "AgentAssetIds": csv_ids("agent_asset_ids", filters["agent_asset_ids"]),
+        "CustomAssetIds": csv_ids("custom_asset_ids", filters["custom_asset_ids"]),
+        "UptimeIds": csv_ids("uptime_ids", filters["uptime_ids"]),
         "CreatedSince": since,
         "CreatedBefore": before,
         "SortOrder": filters["sort_order"],

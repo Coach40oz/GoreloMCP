@@ -31,8 +31,8 @@ pytestmark = pytest.mark.anyio
 DELETIONS = "/v1/deletions"
 LIST_PARAMS = ["type_ids", "since", "page_size", "cursor"]
 LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
-TYPE_HELP = "1 Client, 2 Contact, 3 Contract, 4 Ticket, 5 Item, 6 Invoice, 7 Custom asset, 8 Project, 9 Task"
-TYPE_NAMES = {1: "Client", 2: "Contact", 3: "Contract", 4: "Ticket", 5: "Item", 6: "Invoice", 7: "Custom asset", 8: "Project", 9: "Task"}
+TYPE_HELP = "1 Client, 2 Contact, 3 Contract, 4 Ticket, 5 Item, 6 Invoice, 7 Custom asset, 8 Project, 9 Task, 10 Agent asset"
+TYPE_NAMES = {1: "Client", 2: "Contact", 3: "Contract", 4: "Ticket", 5: "Item", 6: "Invoice", 7: "Custom asset", 8: "Project", 9: "Task", 10: "Agent asset"}
 
 
 def trace(text):
@@ -160,6 +160,7 @@ def test_the_type_table_and_the_texts_are_the_ones_in_the_spec():
     op = spec["paths"]["/v1/deletions"]["get"]
     params = {p["name"]: flat(p["description"]) for p in op["parameters"]}
     types = {int(n): name.strip() for n, name in re.findall(r"(\d+) ([A-Z][A-Za-z ]*?)(?=,|\.)", params["TypeIds"])}
+    # contract 05200951c89e added type 10 Agent asset to the text
     assert types == deletions_module.DELETION_TYPES
     assert params["TypeIds"].startswith("Required.") and "Up to 10 values; any other value is a 400." in params["TypeIds"]
     assert "ISO-8601 UTC timestamp; keeps only deletions at or after it." in params["Since"]
@@ -307,10 +308,10 @@ async def test_an_empty_page_is_reported_as_one_with_its_total(full_server, mock
 
 
 async def test_the_rows_come_back_unchanged_with_the_id_as_text(full_server, mock_gorelo):
-    rows = [deletion_row(n, type_id) for n, type_id in enumerate(range(1, 10), start=1)]
+    rows = [deletion_row(n, type_id) for n, type_id in enumerate(range(1, 11), start=1)]
     mock_gorelo.on("GET", DELETIONS, paged_envelope(rows))
-    result = await call_tool(full_server, "list_deletions", {"type_ids": list(range(1, 10))})
-    assert result["items"] == rows and result["count"] == 9
+    result = await call_tool(full_server, "list_deletions", {"type_ids": list(range(1, 11))})
+    assert result["items"] == rows and result["count"] == 10
     assert all(isinstance(item["Id"], str) for item in result["items"])
     assert [item["Id"] for item in result["items"][:3]] == ["1001", "1002", "1003"]  # a number, as text
     assert result["items"][3]["Id"] == uid(4)  # a GUID
@@ -389,7 +390,7 @@ LOCAL_ERRORS = [
     pytest.param({"type_ids": "1,2"}, "type_ids: expected a list of type ids such as [1, 4], got a string", id="type-ids-text"),
     pytest.param({"type_ids": 4}, "type_ids: expected a list of type ids such as [1, 4], got a number", id="type-ids-number"),
     pytest.param({"type_ids": [0]}, f"type_ids[0]: 0 is not a record type; valid ids: {TYPE_HELP}", id="type-0"),
-    pytest.param({"type_ids": [1, 10]}, "type_ids[1]: 10 is not a record type; valid ids: 1 Client", id="type-10"),
+    pytest.param({"type_ids": [1, 11]}, "type_ids[1]: 11 is not a record type; valid ids: 1 Client", id="type-11"),
     pytest.param({"type_ids": [-1]}, "type_ids[0]: -1 is not a record type", id="negative-type"),
     pytest.param({"type_ids": [2**63]}, "type_ids[0]: 9223372036854775808 is not a record type", id="huge-type"),
     pytest.param({"type_ids": [True]}, "type_ids[0]: a boolean is not a record type", id="bool-type"),

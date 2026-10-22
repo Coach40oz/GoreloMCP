@@ -2,7 +2,7 @@
 
 These pin the tool surface: the exact tool names per toolset,
 the default exposure, destructive gating, MCP hints, LLM-facing metadata, and that every one of the
-117 spec operations (2026-10-17 contract) is either declared by a tool, forbidden, or deliberately
+125 spec operations (2026-10-22 contract) is either declared by a tool, forbidden, or deliberately
 excluded. The 2026-10-12 contract added the custom asset create, update and hardware types (declared by tools) and
 GET /v1/api-keys and DELETE /v1/api-keys/{apiKeyId} (deliberately not exposed: no tool reaches /v1/api-keys at all).
 The 2026-10-17 contract (a7954b24844b) added fourteen operations and every one has a tool: the twelve document operations
@@ -32,6 +32,9 @@ EXPECTED = {
             "list_org_groups", "list_org_users", "list_agents", "get_agent", "list_custom_assets",
             "list_custom_asset_hardware_types", "create_custom_asset", "update_custom_asset",
             "post_alert", "list_alerts", "get_custom_asset", "list_deletions",
+            # 1.4.0 (contract 05200951c89e, 125 operations): the per-agent reads, the asset types and the scripts
+            "list_agent_apps", "get_agent_hardware", "list_agent_patches", "list_agent_available_updates",
+            "list_agent_tags", "list_asset_types", "list_scripts", "get_script",
         },
         "gated": set(),
     },
@@ -172,9 +175,9 @@ def test_registry_matches_the_configured_surface_exactly():
         got_gated = {n for n, s in specs.items() if s.toolset == toolset and s.kind == "destructive"}
         assert got_regular == groups["regular"], (toolset, got_regular ^ groups["regular"])
         assert got_gated == groups["gated"], (toolset, got_gated ^ groups["gated"])
-    assert len(specs) == 111  # 92 tools in 1.2.0; 1.3.0 added get_custom_asset, list_deletions and the 17 document tools
+    assert len(specs) == 119  # 92 tools in 1.2.0; 1.3.0 added get_custom_asset, list_deletions and the 17 document tools; 1.4.0 eight reads
     regular = {n for n, s in specs.items() if s.kind != "destructive"}
-    assert (len(regular), len(specs) - len(regular)) == (101, 10)  # the two new gated tools are share_document and remove_document_related_item
+    assert (len(regular), len(specs) - len(regular)) == (109, 10)  # (101 until 1.4.0) the two 1.3.0 gated tools are share_document and remove_document_related_item
 
 
 def test_all_24_legacy_tool_names_still_exist():
@@ -191,7 +194,7 @@ def test_every_spec_operation_is_covered_or_deliberately_excluded(spec_index):
     assert not declared & EXCLUDED_OPS
     uncovered = set(spec_index.ops) - declared - forbidden - EXCLUDED_OPS
     assert uncovered == set(), sorted(uncovered)
-    assert len(spec_index.ops) == 117
+    assert len(spec_index.ops) == 125
     assert not any("/v1/payments" in op for op in declared)  # payments are recorded money: no tool reaches them
 
 
@@ -228,12 +231,12 @@ def test_each_operation_the_2026_10_12_spec_added_is_declared_by_exactly_the_too
 
 
 @pytest.mark.anyio
-async def test_default_toolsets_expose_63_tools_and_no_gated_ones(server_factory):
+async def test_default_toolsets_expose_71_tools_and_no_gated_ones(server_factory):
     server = server_factory(toolsets=frozenset(DEFAULT_TOOLSETS), destructive=False)
     names = {t.name for t in await list_tools(server)}
     expected = set().union(*(EXPECTED[ts]["regular"] for ts in DEFAULT_TOOLSETS))
     assert names == expected
-    assert len(names) == 63  # 58 until the 2026-10-12 contract added the three custom asset tools, 61 until the 2026-10-17 one added get_custom_asset and list_deletions
+    assert len(names) == 71  # 63 until 1.4.0 added eight core reads; 58 until the 2026-10-12 contract added the three custom asset tools, 61 until the 2026-10-17 one added get_custom_asset and list_deletions
     assert {"list_alerts", "get_invoice", "create_invoice", "get_custom_asset", "list_deletions"} <= names
     assert "create_approved_invoice" not in names  # it needs GORELO_ENABLE_DESTRUCTIVE as well
     assert not any("document" in name for name in names)  # the documents toolset is off by default
@@ -316,13 +319,16 @@ async def test_destructive_tools_require_confirm_defaulting_to_false(server_fact
 async def test_default_tools_list_stays_within_budget(server_factory):
     tools_list = await list_tools(server_factory(toolsets=frozenset(DEFAULT_TOOLSETS), destructive=False))
     size = len(json.dumps([t.model_dump(mode="json", exclude_none=True) for t in tools_list]))
-    # The budget sits about 1 percent above the size measured for 1.3.0 (see the constant below). It
+    # The budget sits about 1 percent above the size measured for 1.4.0 (see the constant below). It
     # was raised once for the three default tools contract e15cb5a18ec2 added, once more for the custom properties of
     # contract 1b1c0cec0e9a and twice for release 1.3.0; growth beyond it needs a deliberate bump, because every byte here is
     # context claude.ai loads in every conversation that uses the connector.
     assert size < TOOLS_LIST_BUDGET_BYTES, size
 
 
+# For 1.4.0 the default tools/list measured 104_409 bytes: the eight new core tools (6_301 bytes) and the new 1.4.0 parameters of
+# list_clients, update_client, list_alerts, post_alert, list_tickets and the custom asset tools. The budget is that plus about 1 percent,
+# rounded up to the next 100.
 # The default tools/list measured 95425 bytes for 1.3.0 (90209 for 1.2.0; the documents toolset and the gated tools are not in
 # it): the deletions and custom asset tools, the strict status texts, the upload_attachment text, health_check's api_host and
 # gated_tools; the budget is that plus about 1 percent. The budget leaves 975 bytes above that: the size plus 1 percent, rounded
@@ -334,7 +340,7 @@ async def test_default_tools_list_stays_within_budget(server_factory):
 # same contract's sentence on the two device tools, 108 bytes for the update_client sentence that has the model compare
 # the returned Values with what it sent, and 103 bytes for the one that says update_client reads the client first. At 1.2.0
 # the budget left 891 bytes (about 1 percent) above that.
-TOOLS_LIST_BUDGET_BYTES = 96400
+TOOLS_LIST_BUDGET_BYTES = 105500
 MAX_TOOL_DESCRIPTION_CHARS = 900
 MAX_PARAM_DESCRIPTION_CHARS = 220
 

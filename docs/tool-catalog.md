@@ -11,7 +11,7 @@ uv run --frozen python scripts/gen_tool_catalog.py
 
 `tests/test_tool_catalog.py` fails when the committed file differs from a fresh generation.
 
-The registry holds 111 tools in 8 toolsets. A server started with the default settings (toolsets core, tickets, time, billing, uptime; GORELO_ENABLE_DESTRUCTIVE off, so no gated tool: no delete or void tool, no `remove_document_related_item`, no `create_approved_invoice` and no `share_document`) registers 63 of them.
+The registry holds 119 tools in 8 toolsets. A server started with the default settings (toolsets core, tickets, time, billing, uptime; GORELO_ENABLE_DESTRUCTIVE off, so no gated tool: no delete or void tool, no `remove_document_related_item`, no `create_approved_invoice` and no `share_document`) registers 71 of them.
 
 How to read it:
 
@@ -25,7 +25,7 @@ How to read it:
 
 | Toolset | Default | Tools | read | write | destructive |
 |---|---|---|---|---|---|
-| core | yes | 22 | 15 | 7 | 0 |
+| core | yes | 30 | 23 | 7 | 0 |
 | tickets | yes | 19 | 12 | 6 | 1 |
 | time | yes | 7 | 4 | 2 | 1 |
 | billing | yes | 15 | 8 | 4 | 3 |
@@ -33,7 +33,7 @@ How to read it:
 | projects | no | 22 | 11 | 9 | 2 |
 | forms | no | 3 | 2 | 1 | 0 |
 | documents | no | 17 | 6 | 9 | 2 |
-| Total | | 111 | 60 | 41 | 10 |
+| Total | | 119 | 68 | 41 | 10 |
 
 ## core
 
@@ -44,21 +44,29 @@ In the default set.
 | `create_client` | write | `POST /v1/clients` | `name`, `location_name` | Create a client together with its default location; returns the created client record. |
 | `create_contact` | write | `POST /v1/contacts` | `client_id`, `first_name`, `last_name`, `primary_email` | Create a contact under a client; returns the created contact record. |
 | `create_custom_asset` | write | `POST /v1/assets/custom`, `GET /v1/assets/custom/{customAssetId}` | `name`, `client_id`, `location_id`, `hardware_type_id` | Create a custom (non-agent) asset at a location of a client; returns the new row (read back by id), or {Id, warning} if the read-back fails: then do not repeat the create; check with get_custom_asset. |
-| `get_agent` | read | `GET /v1/assets/agents/{deviceId}` | `agent_id` | Get one agent (managed device) by UUID; returns Gorelo's full device record, including CustomProperties (a field with IsHidden true has a null Value; IsSet still says whether one is saved). |
+| `get_agent` | read | `GET /v1/assets/agents/{agentAssetId}` | `agent_id` | Get one agent (managed device) by UUID; returns Gorelo's full device record, including CustomProperties (a field with IsHidden true has a null Value; IsSet still says whether one is saved). |
+| `get_agent_hardware` | read | `GET /v1/assets/agents/{agentAssetId}/hardware` | `agent_id` | Get the hardware of one agent from its last scan; returns {LastScannedOn, HardwareType, TotalMemoryBytes, Processors, Disks (each with its partitions)}. |
 | `get_client` | read | `GET /v1/clients/{clientId}` | `client_id` | Get one client by id; returns Gorelo's client record. |
 | `get_contact` | read | `GET /v1/contacts/{contactId}` | `contact_id` | Get one contact by id; returns Gorelo's contact record (SecondaryEmail is never included). |
-| `get_custom_asset` | read | `GET /v1/assets/custom/{customAssetId}` | `custom_asset_id` | Get one custom (non-agent) asset by UUID; returns the same fields as a list_custom_assets row (Description, SerialNumber, IpAddress and ContactId are null when the asset has none). |
+| `get_custom_asset` | read | `GET /v1/assets/custom/{customAssetId}` | `custom_asset_id` | Get one custom (non-agent) asset by UUID; returns the same fields as a list_custom_assets row (Description, SerialNumber, LocalIPAddress and ContactId are null when the asset has none; Type replaces the deprecated HardwareType, HardwareTypeId and IpAddress). |
+| `get_script` | read | `GET /v1/scripts/{scriptId}` | `script_id` | Get one script with its current Content; returns Id, Title, Type, Version, IsFavorite, ParentScriptId, RunAsUser, TimeoutSeconds, Content, CreatedOn and UpdatedOn. |
 | `health_check` | read | `GET /v1/clients` | none | Check the Gorelo API answers and this server understands it; returns {ok, api, api_host, total_clients, toolsets, destructive, gated_tools, spec_sha256}. |
+| `list_agent_apps` | read | `GET /v1/assets/agents/{agentAssetId}/apps` | `agent_id` | List the apps installed on one agent, from its last scan; returns {LastScannedOn, Items}. |
+| `list_agent_available_updates` | read | `GET /v1/assets/agents/{agentAssetId}/patches/available` | `agent_id` | List the updates still pending on one agent, from its last scan (no new scan is started); returns {LastScannedOn, WindowsUpdateStatus, Items}. |
+| `list_agent_patches` | read | `GET /v1/assets/agents/{agentAssetId}/patches` | `agent_id` | List the patches installed on one agent, newest first (Windows and macOS); returns {LastScannedOn, Items}. |
+| `list_agent_tags` | read | `GET /v1/assets/agents/{agentAssetId}/tags` | `agent_id` | List the tags of one agent; returns {items, count}, each item {Id, Name, Type, Conditions}. |
 | `list_agents` | read | `GET /v1/assets/agents` | none | List agents (managed devices) one page per call; returns {items, has_more, next_cursor, total_count, ...}. |
 | `list_alerts` | read | `GET /v1/alerts` | none | List alerts raised in Gorelo, including those sent with post_alert, one page at a time: newest first unless sort_order is asc. |
+| `list_asset_types` | read | `GET /v1/assets/types` | none | List the asset types; returns {items, count}, each item {Id, Name}. |
 | `list_client_locations` | read | `GET /v1/clients/{clientId}/locations` | `client_id` | List every location of one client (not paged); returns {items, count}. |
 | `list_clients` | read | `GET /v1/clients` | none | List clients one page per call; returns {items, has_more, next_cursor, total_count, ...}. |
 | `list_contacts` | read | `GET /v1/contacts` | none | List contacts one page per call; returns {items, has_more, next_cursor, total_count, ...}. |
-| `list_custom_asset_hardware_types` | read | `GET /v1/assets/custom/hardware-types` | none | List the hardware types a custom asset can be given; returns {items, count}, each item {Id, Name, CreatedOn, UpdatedOn}. |
+| `list_custom_asset_hardware_types` | read | `GET /v1/assets/custom/hardware-types` | none | DEPRECATED by Gorelo: use list_asset_types. |
 | `list_custom_assets` | read | `GET /v1/assets/custom` | none | List custom (non-agent) assets one page per call; returns {items, has_more, next_cursor, total_count, ...}. |
 | `list_deletions` | read | `GET /v1/deletions` | `type_ids` | List records deleted in Gorelo, oldest first, one page per call; returns {items, has_more, next_cursor, ...}. |
 | `list_org_groups` | read | `GET /v1/organization/groups` | none | List every technician group (not paged); returns {items, count}. |
 | `list_org_users` | read | `GET /v1/organization/users` | none | List users (technicians); without status_ids Gorelo lists Pending and Active. |
+| `list_scripts` | read | `GET /v1/scripts` | none | List the active scripts in the provider's library, one page per call; returns {items, has_more, next_cursor, ...}. |
 | `post_alert` | write | `POST /v1/alerts` | `name`, `client_id`, `resource`, `severity` | Post an external alert for a client's resource; returns {"ok": true} when Gorelo accepts it. |
 | `update_client` | write (overwrites data) | `GET /v1/clients/{clientId}`, `PATCH /v1/clients/{clientId}` | `client_id` | Update a client's name, status, billing name, alternate name or custom fields; returns the updated client record. |
 | `update_contact` | write (overwrites data) | `GET /v1/contacts/{contactId}`, `PATCH /v1/contacts/{contactId}` | `contact_id` | Update a contact; returns the updated contact record. |
@@ -132,12 +140,12 @@ In the default set.
 
 | Tool | Kind | Ops | Required params | What it does |
 |---|---|---|---|---|
-| `create_uptime_check` | write | `POST /v1/uptime`, `GET /v1/uptime/{checkId}` | `check_type`, `frequency_minutes`, `region` | Create an uptime check and return it. |
-| `delete_uptime_check` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `DELETE /v1/uptime/{checkId}` | `check_id` | Delete one uptime check by Id: a soft delete (deactivated, schedule cancelled) that stops monitoring its target. |
-| `get_uptime_check` | read | `GET /v1/uptime/{checkId}` | `check_id` | Get one uptime check by Id: target, status, region, tags and maintenance window. |
+| `create_uptime_check` | write | `POST /v1/uptime`, `GET /v1/uptime/{uptimeId}` | `check_type`, `frequency_minutes`, `region` | Create an uptime check and return it. |
+| `delete_uptime_check` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `DELETE /v1/uptime/{uptimeId}` | `check_id` | Delete one uptime check by Id: a soft delete (deactivated, schedule cancelled) that stops monitoring its target. |
+| `get_uptime_check` | read | `GET /v1/uptime/{uptimeId}` | `check_id` | Get one uptime check by Id: target, status, region, tags and maintenance window. |
 | `list_uptime_checks` | read | `GET /v1/uptime` | none | List uptime checks, one page at a time. |
-| `set_uptime_maintenance` | write (overwrites data) | `PATCH /v1/uptime/{checkId}`, `GET /v1/uptime/{checkId}` | `check_id`, `enabled` | Start or end a maintenance window on an uptime check and return it. |
-| `update_uptime_check` | write (overwrites data) | `PATCH /v1/uptime/{checkId}`, `GET /v1/uptime/{checkId}` | `check_id` | Change fields of an uptime check (partial update) and return it; tag_ids replaces the whole list. |
+| `set_uptime_maintenance` | write (overwrites data) | `PATCH /v1/uptime/{uptimeId}`, `GET /v1/uptime/{uptimeId}` | `check_id`, `enabled` | Start or end a maintenance window on an uptime check and return it. |
+| `update_uptime_check` | write (overwrites data) | `PATCH /v1/uptime/{uptimeId}`, `GET /v1/uptime/{uptimeId}` | `check_id` | Change fields of an uptime check (partial update) and return it; tag_ids replaces the whole list. |
 
 ## projects
 

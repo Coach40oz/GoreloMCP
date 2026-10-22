@@ -3,25 +3,25 @@
 Tools:
 
     list_uptime_checks      read         GET /v1/uptime
-    get_uptime_check        read         GET /v1/uptime/{checkId}
-    create_uptime_check     write        POST /v1/uptime, GET /v1/uptime/{checkId}
-    update_uptime_check     write        PATCH /v1/uptime/{checkId}, GET /v1/uptime/{checkId}
-    set_uptime_maintenance  write        PATCH /v1/uptime/{checkId}, GET /v1/uptime/{checkId}
-    delete_uptime_check     destructive  DELETE /v1/uptime/{checkId}
+    get_uptime_check        read         GET /v1/uptime/{uptimeId}
+    create_uptime_check     write        POST /v1/uptime, GET /v1/uptime/{uptimeId}
+    update_uptime_check     write        PATCH /v1/uptime/{uptimeId}, GET /v1/uptime/{uptimeId}
+    set_uptime_maintenance  write        PATCH /v1/uptime/{uptimeId}, GET /v1/uptime/{uptimeId}
+    delete_uptime_check     destructive  DELETE /v1/uptime/{uptimeId}
 
 Ops owned by this module:
 
     GET /v1/uptime
-    GET /v1/uptime/{checkId}
+    GET /v1/uptime/{uptimeId}
     POST /v1/uptime
-    PATCH /v1/uptime/{checkId}
-    DELETE /v1/uptime/{checkId}
+    PATCH /v1/uptime/{uptimeId}
+    DELETE /v1/uptime/{uptimeId}
 
 Check types: 1 ICMP (target ip), 2 HTTP (target url), 3 TCP (target ip and port). Regions: 1 Seattle,
 2 Sydney, 3 UK, 4 Frankfurt. The ip of an ICMP or TCP check is a literal IP address, never a host name.
 A new check starts monitoring at once. POST and PATCH answer with only the check Id, so the write tools
 read the check back with reread_after_write. update_uptime_check never sends MaintenanceMode and
-set_uptime_maintenance sends nothing else: they share PATCH /v1/uptime/{checkId} but change disjoint parts of
+set_uptime_maintenance sends nothing else: they share PATCH /v1/uptime/{uptimeId} but change disjoint parts of
 the check. TagIds replace the whole list; an empty list (every tag removed) is only sent through
 clear_tags=true. The Target of a PATCH is always sent complete: when the caller changes only part of it
 (for example the port of a TCP check) update_uptime_check reads the check first, validates the given
@@ -64,10 +64,10 @@ from tools._common import (
 )
 
 LIST_OP = "GET /v1/uptime"
-GET_OP = "GET /v1/uptime/{checkId}"
+GET_OP = "GET /v1/uptime/{uptimeId}"
 CREATE_OP = "POST /v1/uptime"
-UPDATE_OP = "PATCH /v1/uptime/{checkId}"
-DELETE_OP = "DELETE /v1/uptime/{checkId}"
+UPDATE_OP = "PATCH /v1/uptime/{uptimeId}"
+DELETE_OP = "DELETE /v1/uptime/{uptimeId}"
 
 CHECK_TYPE_IDS = {"icmp": 1, "http": 2, "tcp": 3}
 CHECK_TYPE_NAMES = {type_id: name for name, type_id in CHECK_TYPE_IDS.items()}
@@ -98,7 +98,7 @@ FILTER_FIELDS = {
 }
 LIST_FIELD_MAP = {**FILTER_FIELDS, "page_size": "PageSize", "cursor": "Cursor"}
 
-# Body fields that CreateUptimeCheckCommand and UpdateUptimeCheckCommand share.
+# Body fields that CreateUptimeCommand and UpdateUptimeCommand share (named *UptimeCheck* before contract 05200951c89e).
 CHECK_BODY = {
     "check_type": "TypeId",
     "frequency_minutes": "Frequency",
@@ -344,14 +344,14 @@ async def list_uptime_checks(
     return paged_result(page, filters)
 
 
-@gorelo_tool(toolset="uptime", kind="read", ops=[GET_OP], field_map={"check_id": "checkId"})
+@gorelo_tool(toolset="uptime", kind="read", ops=[GET_OP], field_map={"check_id": "uptimeId"})
 async def get_uptime_check(
     ctx: Context,
     check_id: Annotated[str, Field(description="GUID (list_uptime_checks).")],
 ) -> dict:
     """Get one uptime check by Id: target, status, region, tags and maintenance window."""
     data = await client_of(ctx).get_one(
-        GET_OP, path_params={"checkId": guid("check_id", check_id)}, tool="get_uptime_check"
+        GET_OP, path_params={"uptimeId": guid("check_id", check_id)}, tool="get_uptime_check"
     )
     return expect_object(data, GET_OP, tool="get_uptime_check")
 
@@ -415,7 +415,7 @@ async def create_uptime_check(
     written = await client_of(ctx).post(CREATE_OP, json_body=body, tool="create_uptime_check")
     check_id = created_id(written, CREATE_OP, tool="create_uptime_check")
     return await reread_after_write(
-        ctx, GET_OP, path_params={"checkId": check_id}, tool="create_uptime_check", written_id=check_id
+        ctx, GET_OP, path_params={"uptimeId": check_id}, tool="create_uptime_check", written_id=check_id
     )
 
 
@@ -428,7 +428,7 @@ async def create_uptime_check(
     toolset="uptime",
     kind="write",
     ops=[UPDATE_OP, GET_OP],
-    field_map={**CHECK_BODY, "check_id": "checkId"},
+    field_map={**CHECK_BODY, "check_id": "uptimeId"},
     destructive_hint=True,
 )
 async def update_uptime_check(
@@ -498,7 +498,7 @@ async def update_uptime_check(
         # Gorelo takes the Target as a whole, so a partial change (the port of a TCP check) needs the rest of
         # it. Read the check first: its type says which fields may be given, the stored target fills the rest.
         record = expect_object(
-            await client.get_one(GET_OP, path_params={"checkId": check_guid}, tool="update_uptime_check"),
+            await client.get_one(GET_OP, path_params={"uptimeId": check_guid}, tool="update_uptime_check"),
             GET_OP,
             tool="update_uptime_check",
         )
@@ -514,10 +514,10 @@ async def update_uptime_check(
     )
     if not body:
         raise ValueError("no change requested: give at least one field to change, or clear_tags=true")
-    written = await client.patch(UPDATE_OP, path_params={"checkId": check_guid}, json_body=body, tool="update_uptime_check")
+    written = await client.patch(UPDATE_OP, path_params={"uptimeId": check_guid}, json_body=body, tool="update_uptime_check")
     expect_object(written, UPDATE_OP, tool="update_uptime_check")
     return await reread_after_write(
-        ctx, GET_OP, path_params={"checkId": check_guid}, tool="update_uptime_check", written_id=check_guid
+        ctx, GET_OP, path_params={"uptimeId": check_guid}, tool="update_uptime_check", written_id=check_guid
     )
 
 
@@ -530,7 +530,7 @@ async def update_uptime_check(
     toolset="uptime",
     kind="write",
     ops=[UPDATE_OP, GET_OP],
-    field_map={**MAINTENANCE_BODY, "check_id": "checkId"},
+    field_map={**MAINTENANCE_BODY, "check_id": "uptimeId"},
     destructive_hint=True,
 )
 async def set_uptime_maintenance(
@@ -602,11 +602,11 @@ async def set_uptime_maintenance(
         MAINTENANCE_BODY,
     )
     written = await client_of(ctx).patch(
-        UPDATE_OP, path_params={"checkId": check_guid}, json_body=body, tool="set_uptime_maintenance"
+        UPDATE_OP, path_params={"uptimeId": check_guid}, json_body=body, tool="set_uptime_maintenance"
     )
     expect_object(written, UPDATE_OP, tool="set_uptime_maintenance")
     return await reread_after_write(
-        ctx, GET_OP, path_params={"checkId": check_guid}, tool="set_uptime_maintenance", written_id=check_guid
+        ctx, GET_OP, path_params={"uptimeId": check_guid}, tool="set_uptime_maintenance", written_id=check_guid
     )
 
 
@@ -615,7 +615,7 @@ async def set_uptime_maintenance(
 # --------------------------------------------------------------------------
 
 
-@gorelo_tool(toolset="uptime", kind="destructive", ops=[DELETE_OP], field_map={"check_id": "checkId"})
+@gorelo_tool(toolset="uptime", kind="destructive", ops=[DELETE_OP], field_map={"check_id": "uptimeId"})
 async def delete_uptime_check(
     ctx: Context,
     check_id: Annotated[str, Field(description="GUID (list_uptime_checks).")],
@@ -633,5 +633,5 @@ async def delete_uptime_check(
             "monitored. Nothing has been sent to Gorelo."
         ),
     )
-    data = await client_of(ctx).delete(DELETE_OP, path_params={"checkId": check_guid}, tool="delete_uptime_check")
+    data = await client_of(ctx).delete(DELETE_OP, path_params={"uptimeId": check_guid}, tool="delete_uptime_check")
     return expect_object(data, DELETE_OP, tool="delete_uptime_check")

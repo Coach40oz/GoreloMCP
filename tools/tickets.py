@@ -133,6 +133,9 @@ SEARCH_LIMIT_MAX = 500
 LOOKUP_PAGE_SIZE = 50
 LOOKUP_MAX_PAGES = 20
 
+# GET /v1/tickets DeviceIds: "Comma-separated agent ids (GUIDs, up to 100)".
+DEVICE_IDS_MAX = 100
+
 # Snake_case parameter -> query parameter of GET /v1/tickets (also used to name the parameter in errors).
 LIST_QUERY_FIELDS: dict[str, str] = {
     "status_ids": "StatusIds",
@@ -143,6 +146,7 @@ LIST_QUERY_FIELDS: dict[str, str] = {
     "contact_ids": "ContactIds",
     "tag_ids": "TagIds",
     "group_ids": "GroupIds",
+    "device_ids": "DeviceIds",
     "query": "Query",
     "updated_since": "UpdatedSince",
     "updated_before": "UpdatedBefore",
@@ -628,6 +632,9 @@ async def list_tickets(
     contact_ids: Annotated[list[StrictId] | None, Field(description="Primary contact ids (list_contacts)")] = None,
     tag_ids: Annotated[list[StrictId] | None, Field(description="Tag ids, any match (list_ticket_tags)")] = None,
     group_ids: Annotated[list[StrictId] | None, Field(description="Group ids, any match (list_org_groups)")] = None,
+    device_ids: Annotated[
+        list[str] | None, Field(description="Agent asset GUIDs (list_agents), up to 100; a ticket matches if any is linked to it")
+    ] = None,
     query: Annotated[str | None, Field(description="Text in title, number or display number (max 200)")] = None,
     updated_since: Annotated[str | None, Field(description="Updated at or after (ISO 8601)")] = None,
     updated_before: Annotated[str | None, Field(description="Updated before (ISO 8601)")] = None,
@@ -657,6 +664,10 @@ async def list_tickets(
         "tag_ids": positive_ids("tag_ids", tag_ids),
         "group_ids": positive_ids("group_ids", group_ids),
     }
+    devices = guids("device_ids", device_ids)
+    if devices is not None and len(devices) > DEVICE_IDS_MAX:
+        raise ValueError(f"device_ids: at most {DEVICE_IDS_MAX} values, got {len(devices)}")
+    checked["device_ids"] = devices
     api_query: dict[str, Any] = {}
     filters: dict[str, Any] = {}
     for param, ids in checked.items():

@@ -398,12 +398,12 @@ Live requests per area (method and spec path, in the order they are sent; the te
     uptime:
         GET /v1/clients/{clientId}/locations  # the test client's location (Matrix.location() is cached: not sent when an earlier area in the same run, custom_assets with --with-custom-assets, already read it)
         POST /v1/uptime  # http check, the probe domain URL, seattle, every 60 minutes
-        GET /v1/uptime/{checkId}
-        PATCH /v1/uptime/{checkId}  # maintenance window: start now, 60 minutes
-        GET /v1/uptime/{checkId}
-        PATCH /v1/uptime/{checkId}  # description
-        GET /v1/uptime/{checkId}
-        DELETE /v1/uptime/{checkId}
+        GET /v1/uptime/{uptimeId}
+        PATCH /v1/uptime/{uptimeId}  # maintenance window: start now, 60 minutes
+        GET /v1/uptime/{uptimeId}
+        PATCH /v1/uptime/{uptimeId}  # description
+        GET /v1/uptime/{uptimeId}
+        DELETE /v1/uptime/{uptimeId}
     projects:
         GET /v1/projects  # scope probe; a 403 with code 080203 ends the area here (skipped)
         GET /v1/forms  # scope probe (no forms write step)

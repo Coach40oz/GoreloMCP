@@ -90,7 +90,7 @@ FORBIDDEN_OPS = frozenset(
         "DELETE /v1/clients/{clientId}",
         "DELETE /v1/contacts/{contactId}",
         "DELETE /v1/tickets/{ticketId}",
-        "DELETE /v1/assets/agents/{deviceId}",
+        "DELETE /v1/assets/agents/{agentAssetId}",
         "DELETE /v1/assets/custom/{customAssetId}",
         "DELETE /v1/contracts/{contractId}",
         "POST /v1/api-keys",

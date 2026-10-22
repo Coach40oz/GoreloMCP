@@ -75,7 +75,7 @@ def demo_registry() -> Registry:
         require_confirm(confirm, action=f"delete item {item_id}")
         return {}
 
-    @registry.tool(toolset="uptime", kind="destructive", ops=["DELETE /v1/uptime/{checkId}"])
+    @registry.tool(toolset="uptime", kind="destructive", ops=["DELETE /v1/uptime/{uptimeId}"])
     async def delete_check(
         ctx: Context,
         check_id: Annotated[str, Field(description="Check id.")],

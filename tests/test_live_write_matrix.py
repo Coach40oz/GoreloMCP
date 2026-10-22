@@ -443,9 +443,9 @@ class FakeGorelo:
         r("GET", "/v1/invoices/{invoiceId}/pdf", self.get_invoice_pdf)
         r("DELETE", "/v1/invoices/{invoiceId}", self.delete_invoice)
         r("POST", "/v1/uptime", self.post_uptime)
-        r("GET", "/v1/uptime/{checkId}", lambda q: self.get_thing(q, self.uptime, "uptime check"))
-        r("PATCH", "/v1/uptime/{checkId}", self.patch_uptime)
-        r("DELETE", "/v1/uptime/{checkId}", lambda q: self.delete_thing(q, self.uptime, "uptime check"))
+        r("GET", "/v1/uptime/{uptimeId}", lambda q: self.get_thing(q, self.uptime, "uptime check"))
+        r("PATCH", "/v1/uptime/{uptimeId}", self.patch_uptime)
+        r("DELETE", "/v1/uptime/{uptimeId}", lambda q: self.delete_thing(q, self.uptime, "uptime check"))
         r("GET", "/v1/projects", self.scoped("project_scope", lambda q: self.paged(list(self.projects.values()), q)))
         r("GET", "/v1/forms", self.scoped("forms_scope", lambda q: self.paged([], q)))
         r("GET", "/v1/projects/types", self.scoped("project_scope", lambda q: envelope(self.project_types)))
@@ -1425,12 +1425,12 @@ GOLDEN = {
     "uptime": [
         "GET /v1/clients/{clientId}/locations",
         "POST /v1/uptime",
-        "GET /v1/uptime/{checkId}",
-        "PATCH /v1/uptime/{checkId}",
-        "GET /v1/uptime/{checkId}",
-        "PATCH /v1/uptime/{checkId}",
-        "GET /v1/uptime/{checkId}",
-        "DELETE /v1/uptime/{checkId}",
+        "GET /v1/uptime/{uptimeId}",
+        "PATCH /v1/uptime/{uptimeId}",
+        "GET /v1/uptime/{uptimeId}",
+        "PATCH /v1/uptime/{uptimeId}",
+        "GET /v1/uptime/{uptimeId}",
+        "DELETE /v1/uptime/{uptimeId}",
     ],
     "projects": [
         "GET /v1/projects",

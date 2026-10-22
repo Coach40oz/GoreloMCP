@@ -66,7 +66,7 @@ Allowlist (write mode). "Run-created" means the id is in the manifest of this ru
     POST /attachments             multipart; itemType Ticket, Task or Project and itemId a run-created record of it; itemType
                                   Document only with allow_documents (never from a cleanup), itemId a run-created document
     POST /time-entries            TicketId (or TaskId) run-created; UserId is the operator user
-    PATCH, DELETE /time-entries/{timeEntryId}, /items/{itemId}, /uptime/{checkId}   run-created record
+    PATCH, DELETE /time-entries/{timeEntryId}, /items/{itemId}, /uptime/{uptimeId}   run-created record
     POST /items, /uptime, /projects    ClientId is the test client
     POST, PATCH /uptime           Target.Url, if present, is a http(s) URL on the probe domain or a subdomain; Target.Ip
                                   is not allowed (a check probes its target every minute)
@@ -340,7 +340,7 @@ _NEVER: dict[str, str] = {
     "POST /v1/api-keys": "the live harness never creates API keys (an API key is a credential)",
     "GET /v1/api-keys": "the live harness never lists API keys (an API key is a credential)",
     "DELETE /v1/api-keys/{apiKeyId}": "the live harness never revokes API keys (an API key is a credential)",
-    "DELETE /v1/assets/agents/{deviceId}": "deleting an agent asset UNINSTALLS the RMM agent from the host",
+    "DELETE /v1/assets/agents/{agentAssetId}": "deleting an agent asset UNINSTALLS the RMM agent from the host",
     "DELETE /v1/assets/custom/{customAssetId}": "this harness never deletes a custom asset (the spec's soft DELETE is not used)",
     "DELETE /v1/contracts/{contractId}": "the live harness never deletes contracts",
     "POST /v1/payments": "the live harness never records payments (a payment is accounting data that reaches the connected system)",
@@ -396,8 +396,8 @@ _PATH_KINDS: dict[str, tuple[tuple[str, str], ...]] = {
     "PATCH /v1/assets/custom/{customAssetId}": (("custom_asset", "customAssetId"),),
     "PATCH /v1/items/{itemId}": (("item", "itemId"),),
     "DELETE /v1/items/{itemId}": (("item", "itemId"),),
-    "PATCH /v1/uptime/{checkId}": (("uptime", "checkId"),),
-    "DELETE /v1/uptime/{checkId}": (("uptime", "checkId"),),
+    "PATCH /v1/uptime/{uptimeId}": (("uptime", "uptimeId"),),
+    "DELETE /v1/uptime/{uptimeId}": (("uptime", "uptimeId"),),
     "DELETE /v1/invoices/{invoiceId}": (("invoice", "invoiceId"),),
     "PATCH /v1/projects/{projectId}": _PROJECT,
     "DELETE /v1/projects/{projectId}": _PROJECT,
@@ -2006,7 +2006,7 @@ class LiveGuard:
         self._require_test_client(req, self._scalar_int(req, "ClientId"), required=True)
         self._check_probe_target(req)
 
-    @_rule("PATCH /v1/uptime/{checkId}", "ClientId, if present, is the test client; Target.Url on the probe domain only, no Target.Ip")
+    @_rule("PATCH /v1/uptime/{uptimeId}", "ClientId, if present, is the test client; Target.Url on the probe domain only, no Target.Ip")
     def _patch_uptime(self, req: _Req) -> None:
         self._require_test_client(req, self._scalar_int(req, "ClientId"), required=False)
         self._check_probe_target(req)

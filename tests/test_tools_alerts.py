@@ -29,7 +29,7 @@ from tools._common import REGISTRY
 pytestmark = pytest.mark.anyio
 
 ALERTS = "/v1/alerts"
-PARAMS = ["name", "client_id", "resource", "severity", "description"]
+PARAMS = ["name", "client_id", "resource", "severity", "description", "agent_asset_id", "custom_asset_id", "uptime_id"]
 REQUIRED = ["name", "client_id", "resource", "severity"]
 GIVEN = {"name": "Disk usage above 90%", "client_id": 9101, "resource": "SRV-DB-01", "severity": 2}
 
@@ -79,6 +79,7 @@ def test_every_field_map_path_is_a_body_field_of_the_op(spec_index):
     op = spec_index.op("POST /v1/alerts")
     assert spec.field_map == {
         "name": "Name", "client_id": "ClientId", "resource": "Resource", "severity": "Severity", "description": "Description",
+        "agent_asset_id": "AgentAssetId", "custom_asset_id": "CustomAssetId", "uptime_id": "UptimeId",
     }
     assert set(spec.field_map.values()) == set(op.body["fields"])
     assert set(op.body["required"]) <= set(spec.field_map.values())
@@ -165,6 +166,47 @@ async def test_post_alert_sends_the_description_when_given_and_only_then(server,
     }
     await call_tool(server, "post_alert", GIVEN)
     assert "Description" not in mock_gorelo.last.json
+
+
+@pytest.mark.parametrize(
+    "param, field",
+    [("agent_asset_id", "AgentAssetId"), ("custom_asset_id", "CustomAssetId"), ("uptime_id", "UptimeId")],
+)
+async def test_post_alert_sends_the_one_subject_as_a_canonical_guid_under_its_pascal_name(server, mock_gorelo, param, field):
+    mock_gorelo.on("POST", ALERTS, envelope(True))
+    assert await call_tool(server, "post_alert", {**GIVEN, param: uid(5).upper()}) == {"ok": True}
+    assert mock_gorelo.last.json == {
+        "Name": "Disk usage above 90%", "ClientId": 9101, "Resource": "SRV-DB-01", "Severity": 2, field: uid(5),
+    }
+    await call_tool(server, "post_alert", GIVEN)
+    assert not {"AgentAssetId", "CustomAssetId", "UptimeId"} & set(mock_gorelo.last.json)
+
+
+@pytest.mark.parametrize(
+    "arguments, fragment",
+    [
+        ({"agent_asset_id": "nope"}, "agent_asset_id: expected a GUID"),
+        ({"custom_asset_id": "5"}, "custom_asset_id: expected a GUID"),
+        ({"uptime_id": ""}, "uptime_id: expected a GUID"),
+        (
+            {"agent_asset_id": uid(1), "uptime_id": uid(2)},
+            "uptime_id: at most one of agent_asset_id, custom_asset_id, uptime_id may be sent, got agent_asset_id and uptime_id",
+        ),
+        (
+            {"agent_asset_id": uid(1), "custom_asset_id": uid(2), "uptime_id": uid(3)},
+            "custom_asset_id: at most one of agent_asset_id, custom_asset_id, uptime_id may be sent, got agent_asset_id and custom_asset_id and uptime_id",
+        ),
+    ],
+)
+async def test_post_alert_refuses_a_bad_subject_or_more_than_one_before_any_request(server, mock_gorelo, arguments, fragment):
+    assert fragment in await call_tool_error(server, "post_alert", {**GIVEN, **arguments})
+    assert mock_gorelo.requests == []
+
+
+async def test_a_gorelo_400_about_a_subject_names_the_snake_case_parameter(server, mock_gorelo):
+    mock_gorelo.on("POST", ALERTS, error_envelope(400, [("070101", "Not a client asset.", "AgentAssetId")]))
+    text = await call_tool_error(server, "post_alert", {**GIVEN, "agent_asset_id": uid(1)})
+    assert "agent_asset_id: Not a client asset." in text
 
 
 @pytest.mark.parametrize("severity", [1, 2, 3, 4])
@@ -383,7 +425,7 @@ async def test_post_alert_declares_no_read_so_it_makes_no_other_request(server, 
 # --------------------------------------------------------------------------
 
 LIST_PARAMS = [
-    "status", "type_ids", "client_ids", "device_ids", "created_since", "created_before", "sort_order", "page_size", "cursor",
+    "status", "type_ids", "client_ids", "device_ids", "agent_asset_ids", "custom_asset_ids", "uptime_ids", "created_since", "created_before", "sort_order", "page_size", "cursor",
 ]
 LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
 TYPE_HELP = (
@@ -404,6 +446,9 @@ def alert_row(n=1, **extra):
         "Message": "",
         "ClientId": None,  # an external alert carries no client id
         "DeviceId": None,
+        "AgentAssetId": None,
+        "CustomAssetId": None,
+        "UptimeId": None,
         "CheckId": None,
         "UptimeCheckId": None,
         "TicketId": None,
@@ -450,7 +495,8 @@ def test_the_module_declares_exactly_the_two_alert_tools_and_names_both_ops():
 def test_every_query_name_of_the_op_is_a_filter_or_a_paging_name_of_the_tool(spec_index):
     spec = next(s for s in REGISTRY.specs if s.name == "list_alerts")
     op = spec_index.op("GET /v1/alerts")
-    assert set(spec.field_map.values()) == set(op.query_params)  # nothing the spec offers is left out, nothing invented
+    # nothing the spec offers is left out, nothing invented
+    assert set(spec.field_map.values()) == set(op.query_params)
     assert spec.field_map["page_size"] == "PageSize" and spec.field_map["cursor"] == "Cursor"
     assert set(alerts_module.FILTER_FIELDS) == set(LIST_PARAMS) - {"page_size", "cursor"}
 
@@ -493,7 +539,9 @@ async def test_the_parameter_texts_carry_the_id_sources_and_what_was_seen_of_the
     assert "never" not in text["client_ids"].lower() and "always" not in text["client_ids"].lower()  # a hedge, no promise
     # the old text said "Not verified for Uptime and External alerts" and never told the model that they have no ClientId
     assert "Not verified" not in text["client_ids"] and "can still match through its device's client" not in text["client_ids"]
-    assert "list_agents" in text["device_ids"]
+    assert "list_agents" in text["device_ids"] and "Deprecated alias of agent_asset_ids" in text["device_ids"]
+    assert "list_agents" in text["agent_asset_ids"] and "list_custom_assets" in text["custom_asset_ids"]
+    assert "list_uptime_checks" in text["uptime_ids"]
     assert "At or after" in text["created_since"] and "Strictly before" in text["created_before"]
     assert "UTC offset" in text["created_since"] and "UTC offset" in text["created_before"]
     assert "named in the tool text" in text["type_ids"]
@@ -509,9 +557,9 @@ def test_the_docstring_gives_the_type_names_and_what_the_model_must_know():
     doc = " ".join(inspect.getdoc(alerts_module.list_alerts).split())
     assert TYPE_HELP in doc and alerts_module.TYPE_HELP == TYPE_HELP
     assert "(7-17 are device checks; 0 (N/A) matches an alert this scale cannot name; an id outside 0-20 is refused)" in doc
-    assert "status: new=1, dismissed=2, ticketed=3." in doc
     assert "including those sent with post_alert" in doc
     assert "Alerts cannot be deleted." in doc
+    assert "Row fields DeviceId and UptimeCheckId are deprecated (use AgentAssetId, UptimeId)." in doc
     assert "DismissedOn and DismissedBy are set only while an alert is dismissed" in doc
     assert "newest first unless sort_order is asc" in doc
     assert 40 < len(inspect.getdoc(alerts_module.list_alerts)) <= 700
@@ -590,6 +638,9 @@ async def test_every_filter_goes_out_under_its_spec_name(full_server, mock_gorel
         "type_ids": [1, 4, 0],
         "client_ids": [9102, 9101],
         "device_ids": [uid(7).upper(), uid(8).replace("-", "")],  # canonical lowercase on the wire
+        "agent_asset_ids": [uid(3).upper(), uid(4)],
+        "custom_asset_ids": [uid(5)],
+        "uptime_ids": [uid(6).replace("-", "")],
         "created_since": "2026-10-01T08:00:00Z",
         "created_before": "2026-10-02T08:00:00+02:00",  # converted to UTC
         "sort_order": "asc",
@@ -602,6 +653,9 @@ async def test_every_filter_goes_out_under_its_spec_name(full_server, mock_gorel
         "TypeIds": "1,4,0",
         "ClientIds": "9102,9101",
         "DeviceIds": f"{uid(7)},{uid(8)}",
+        "AgentAssetIds": f"{uid(3)},{uid(4)}",
+        "CustomAssetIds": uid(5),
+        "UptimeIds": uid(6),
         "CreatedSince": "2026-10-01T08:00:00Z",
         "CreatedBefore": "2026-10-02T06:00:00Z",
         "SortOrder": "asc",
@@ -614,6 +668,9 @@ async def test_every_filter_goes_out_under_its_spec_name(full_server, mock_gorel
         "type_ids": [1, 4, 0],
         "client_ids": [9102, 9101],
         "device_ids": [uid(7), uid(8)],
+        "agent_asset_ids": [uid(3), uid(4)],
+        "custom_asset_ids": [uid(5)],
+        "uptime_ids": [uid(6)],
         "created_since": "2026-10-01T08:00:00Z",
         "created_before": "2026-10-02T06:00:00Z",
         "sort_order": "asc",
@@ -788,6 +845,9 @@ async def test_list_alerts_is_registered_in_the_core_toolset_only(server_factory
         ("TypeIds", "type_ids"),
         ("ClientIds", "client_ids"),
         ("DeviceIds", "device_ids"),
+        ("AgentAssetIds", "agent_asset_ids"),
+        ("CustomAssetIds", "custom_asset_ids"),
+        ("UptimeIds", "uptime_ids"),
         ("CreatedSince", "created_since"),
         ("CreatedBefore", "created_before"),
         ("SortOrder", "sort_order"),

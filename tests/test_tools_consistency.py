@@ -210,6 +210,7 @@ PAGED_LISTS = {
     "list_uptime_checks",
     "list_contracts",
     "list_alerts",
+    "list_scripts",
     "list_documents",
     "list_document_versions",
     "list_deletions",

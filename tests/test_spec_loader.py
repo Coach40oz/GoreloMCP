@@ -127,7 +127,7 @@ def test_the_real_index_loads_with_every_operation(spec_index):
     swapped = json.loads(DEFAULT_OVERRIDES_PATH.read_text(encoding="utf-8"))["replace_ops"]
     assert swapped == {}
     assert set(spec_index.ops) == (set(raw["ops"]) - set(swapped)) | set(swapped.values())
-    assert len(spec_index.ops) == len(raw["ops"]) == 117
+    assert len(spec_index.ops) == len(raw["ops"]) == 125
     # the hashes still describe the published spec, which is what the changelog watcher compares
     assert spec_index.sha256 == raw["sha256"] and spec_index.contract_sha256 == raw["contract_sha256"]
     assert spec_index.openapi == raw["openapi"] and spec_index.source == raw["source"]
@@ -145,7 +145,7 @@ def test_opspec_fields_for_a_real_operation(spec_index):
 
 def test_query_params_keep_the_exact_spec_casing(spec_index):
     op = spec_index.op("GET /v1/tickets")
-    assert op.paged is True and op.page_size_rule == "clamp"
+    assert op.paged is True and op.page_size_rule == "reject"  # clamp until contract 05200951c89e
     assert {"StatusIds", "ClientIds", "Cursor", "PageSize", "UpdatedSince"} <= set(op.query_params)
     assert "statusids" not in op.query_params
 

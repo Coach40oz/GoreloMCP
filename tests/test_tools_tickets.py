@@ -218,8 +218,8 @@ EXPECTED_TOOLS = {
 EXPECTED_PARAMS = {
     "list_tickets": [
         "status_ids", "client_ids", "priority_ids", "type_ids", "lead_assignee_ids", "contact_ids", "tag_ids",
-        "group_ids", "query", "updated_since", "updated_before", "created_since", "created_before", "sort_by",
-        "sort_order", "page_size", "cursor",
+        "group_ids", "device_ids", "query", "updated_since", "updated_before", "created_since", "created_before",
+        "sort_by", "sort_order", "page_size", "cursor",
     ],
     "search_tickets": [
         "client_id", "status", "priority", "type", "query", "updated_since", "created_since", "unassigned_only",
@@ -318,6 +318,7 @@ def test_the_field_maps_name_real_spec_fields_and_cover_every_field(spec_index):
     expected |= {f"BillingOverride.{name}" for name in billing}
     assert set(tickets.UPDATE_FIELDS.values()) == expected
     listing = spec_index.op("GET /v1/tickets")
+    assert "DeviceIds" in listing.query_params  # new in contract 05200951c89e
     assert set(tickets.LIST_QUERY_FIELDS.values()) | {"PageSize", "Cursor"} == set(listing.query_params)
     assert set(tickets.LIST_ERROR_FIELDS.values()) == set(listing.query_params)
     assert set(tickets.SEARCH_ERROR_FIELDS.values()) <= {"ClientIds", "StatusIds", "PriorityIds", "TypeIds", "Query", "UpdatedSince", "CreatedSince"}
@@ -414,7 +415,7 @@ RESOLVERS = {
     "list_tickets": {
         "status_ids": "list_ticket_statuses", "client_ids": "list_clients", "type_ids": "list_ticket_types",
         "lead_assignee_ids": "list_org_users", "contact_ids": "list_contacts", "tag_ids": "list_ticket_tags",
-        "group_ids": "list_org_groups", "priority_ids": "list_ticket_priorities",
+        "group_ids": "list_org_groups", "priority_ids": "list_ticket_priorities", "device_ids": "list_agents",
     },
     "search_tickets": {"client_id": "list_clients", "status": "list_ticket_statuses", "type": "list_ticket_types"},
     "create_ticket": {
@@ -634,6 +635,7 @@ async def test_list_tickets_sends_every_filter_with_the_spec_names_and_reports_t
             "contact_ids": [9103],
             "tag_ids": [5, 6],
             "group_ids": [7201],
+            "device_ids": [DEV_B.upper(), DEV_A],
             "query": "  printer  ",
             "updated_since": "2026-10-01T09:30:00-05:00",
             "updated_before": "2026-10-02T00:00:00Z",
@@ -654,6 +656,7 @@ async def test_list_tickets_sends_every_filter_with_the_spec_names_and_reports_t
         "ContactIds": "9103",
         "TagIds": "5,6",
         "GroupIds": "7201",
+        "DeviceIds": f"{DEV_B},{DEV_A}",
         "Query": "printer",
         "UpdatedSince": "2026-10-01T14:30:00Z",
         "UpdatedBefore": "2026-10-02T00:00:00Z",
@@ -673,6 +676,7 @@ async def test_list_tickets_sends_every_filter_with_the_spec_names_and_reports_t
         "contact_ids": [9103],
         "tag_ids": [5, 6],
         "group_ids": [7201],
+        "device_ids": [DEV_B, DEV_A],
         "query": "printer",
         "updated_since": "2026-10-01T14:30:00Z",
         "updated_before": "2026-10-02T00:00:00Z",
@@ -684,6 +688,9 @@ async def test_list_tickets_sends_every_filter_with_the_spec_names_and_reports_t
     assert result["page_size"] == 25 and result["has_more"] is False and result["next_cursor"] is None
 
 
+DEV_A = "11111111-2222-4333-8444-555555555555"
+DEV_B = "66666666-7777-4888-9999-000000000000"
+
 SINGLE_LIST_FILTERS = [
     ("status_ids", [7, 8], "StatusIds", "7,8"),
     ("client_ids", [9102], "ClientIds", "9102"),
@@ -693,6 +700,8 @@ SINGLE_LIST_FILTERS = [
     ("contact_ids", [9103, 9104], "ContactIds", "9103,9104"),
     ("tag_ids", [5], "TagIds", "5"),
     ("group_ids", [7201], "GroupIds", "7201"),
+    ("device_ids", [DEV_A.upper()], "DeviceIds", DEV_A),
+    ("device_ids", [DEV_A, DEV_B.replace("-", "")], "DeviceIds", f"{DEV_A},{DEV_B}"),
     ("query", "TCK-1234", "Query", "TCK-1234"),
     ("updated_since", "2026-10-01T00:00:00Z", "UpdatedSince", "2026-10-01T00:00:00Z"),
     ("updated_before", "2026-10-01T02:00:00+02:00", "UpdatedBefore", "2026-10-01T00:00:00Z"),
@@ -770,6 +779,9 @@ LIST_VALIDATION = [
     pytest.param({"client_ids": [5, 0]}, f"client_ids[1]: {NOT_POSITIVE}", id="second-client-id-zero"),
     pytest.param({"type_ids": [-3]}, f"type_ids[0]: {NOT_POSITIVE}", id="negative-type-id"),
     pytest.param({"group_ids": []}, f"group_ids: {NO_IDS}", id="empty-group-ids"),
+    pytest.param({"device_ids": []}, "device_ids: expected at least one GUID, got an empty list", id="empty-device-ids"),
+    pytest.param({"device_ids": [DEV_A, "not-a-guid"]}, "device_ids[1]: expected a GUID such as", id="bad-device-id"),
+    pytest.param({"device_ids": [DEV_A] * 101}, "device_ids: at most 100 values, got 101", id="too-many-device-ids"),
     pytest.param({"lead_assignee_ids": [0]}, f"lead_assignee_ids[0]: {NOT_POSITIVE}", id="assignee-zero"),
     pytest.param({"contact_ids": [2**63]}, "contact_ids[0]: expected a positive whole number such as 123, got a number above", id="contact-id-above-int64"),
     pytest.param({"priority_ids": [5]}, "priority_ids[0]: must be one of 0 None, 1 Urgent, 2 High, 3 Normal, 4 Low", id="priority-5"),
@@ -840,7 +852,7 @@ async def test_list_tickets_maps_a_gorelo_error_to_the_snake_case_parameter(serv
     )
 
 
-@pytest.mark.parametrize("prop, param", [("Query", "query"), ("UpdatedSince", "updated_since"), ("SortBy", "sort_by"), ("Cursor", "cursor"), ("PriorityIds", "priority_ids")])
+@pytest.mark.parametrize("prop, param", [("Query", "query"), ("UpdatedSince", "updated_since"), ("SortBy", "sort_by"), ("Cursor", "cursor"), ("PriorityIds", "priority_ids"), ("DeviceIds", "device_ids")])
 async def test_list_tickets_maps_every_query_name_back_to_its_parameter(server, mock_gorelo, prop, param):
     mock_gorelo.on("GET", LIST, error_envelope(400, [("070101", "bad value", prop)]))
     text = await call_tool_error(server, "list_tickets")

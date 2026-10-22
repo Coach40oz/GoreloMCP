@@ -2954,7 +2954,7 @@ NEVER_OPS = {
     "POST /v1/api-keys",
     "GET /v1/api-keys",
     "DELETE /v1/api-keys/{apiKeyId}",
-    "DELETE /v1/assets/agents/{deviceId}",
+    "DELETE /v1/assets/agents/{agentAssetId}",
     "DELETE /v1/assets/custom/{customAssetId}",
     "DELETE /v1/contracts/{contractId}",
     "POST /v1/payments",
@@ -3101,7 +3101,7 @@ def test_what_the_guard_looks_up_by_shape_is_compared_with_the_spec_by_shape():
     assert guard_module._NEVER and {normalize_op_key(key) for key in guard_module._NEVER} <= shapes
     assert {normalize_op_key(key) for key in guard_module.SIDE_EFFECT_GETS} <= shapes
     assert guard_module._SIDE_EFFECT_SHAPES == {"GET /v1/invoices/{}/pdf"}
-    assert guard_module._never_reason("DELETE /v1/assets/agents/{id}") == guard_module._NEVER["DELETE /v1/assets/agents/{deviceId}"]
+    assert guard_module._never_reason("DELETE /v1/assets/agents/{id}") == guard_module._NEVER["DELETE /v1/assets/agents/{agentAssetId}"]
     assert guard_module._is_side_effect_get("GET /v1/invoices/{id}/pdf")
     # and a key that names nothing is caught by the same comparison
     assert normalize_op_key("DELETE /v1/invoices/{typo}") in shapes

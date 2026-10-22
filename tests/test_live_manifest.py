@@ -880,7 +880,7 @@ DELETE_ROUTES = {
     "/v1/tickets/{ticketId}/comments/{commentId}": envelope({"Id": "x"}),
     "/v1/time-entries/{timeEntryId}": envelope({"Id": TIME_ENTRY, "Outcome": "Deleted"}),
     "/v1/items/{itemId}": envelope({"Id": ITEM}),
-    "/v1/uptime/{checkId}": envelope({"Id": UPTIME}),
+    "/v1/uptime/{uptimeId}": envelope({"Id": UPTIME}),
     "/v1/projects/{projectId}": envelope({"Id": PROJECT}),
     "/v1/projects/{projectId}/tasks/{taskId}": envelope({"Id": TASK}),
     "/v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}": envelope({"Id": PROJECT_COMMENT}),

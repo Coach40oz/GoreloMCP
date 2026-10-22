@@ -183,7 +183,7 @@
           {
             "name": "DeviceIds",
             "in": "query",
-            "description": "Comma-separated device ids (guids).",
+            "description": "Deprecated alias of agentAssetIds. Still accepted; ignored when agentAssetIds is supplied.",
             "schema": {
               "type": "string"
             }
@@ -204,6 +204,30 @@
             "schema": {
               "type": "string",
               "format": "date-time"
+            }
+          },
+          {
+            "name": "AgentAssetIds",
+            "in": "query",
+            "description": "Comma-separated agent asset ids (guids).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "CustomAssetIds",
+            "in": "query",
+            "description": "Comma-separated custom asset ids (guids). Matches the alerts about a custom asset: `Warranty Expiration` alerts, and `API` alerts posted with a `CustomAssetId`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "UptimeIds",
+            "in": "query",
+            "description": "Comma-separated uptime ids (guids).",
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -297,6 +321,7 @@
           "Assets"
         ],
         "summary": "Lists agent (managed device) assets for the service provider using cursor pagination.\r\nResults are sorted by `createdOn` descending (newest first).",
+        "description": "<b>Agents awaiting adoption</b> - installed but not yet assigned to a client in the app - are\r\n            included. They have `ClientId: null` and `LocationId: null`, and any status. A\r\n            `clientIds` filter leaves them out (they have no client to match), and a co-managed\r\n            technician, who sees only their own clients' agents, never sees them. Once adopted, the same\r\n            agent keeps its `Id` and carries the client and location it was given.",
         "operationId": "get_v1_assets_agents",
         "parameters": [
           {
@@ -310,7 +335,7 @@
           {
             "name": "PageSize",
             "in": "query",
-            "description": "Number of items per page. Clamped to 1–200 (default 50).",
+            "description": "Number of items per page, 1-200 (default 50). Out of range is rejected, not clamped.",
             "schema": {
               "type": "integer",
               "format": "int32",
@@ -320,7 +345,7 @@
           {
             "name": "StatusIds",
             "in": "query",
-            "description": "Comma-separated device status ids to include: 1 Unreachable, 2 Active, 3 Inactive, 4 Pending Delete, 6 Pending client inactive. Up to 100 ids; any other value is a 400. Deleted and client-inactivated devices are excluded either way.",
+            "description": "Comma-separated device status ids to include: 1 Unreachable, 2 Online, 3 Offline, 4 Pending Delete, 6 Pending client inactive. Up to 100 ids; any other value is a 400. Deleted and client-inactivated devices are excluded either way.",
             "schema": {
               "type": "string"
             }
@@ -384,17 +409,17 @@
             "content": {
               "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/DeviceListItemResponseListBaseResponse"
+                  "$ref": "#/components/schemas/AgentAssetListItemResponseListBaseResponse"
                 }
               },
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DeviceListItemResponseListBaseResponse"
+                  "$ref": "#/components/schemas/AgentAssetListItemResponseListBaseResponse"
                 }
               },
               "text/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DeviceListItemResponseListBaseResponse"
+                  "$ref": "#/components/schemas/AgentAssetListItemResponseListBaseResponse"
                 }
               }
             }
@@ -481,7 +506,7 @@
           {
             "name": "PageSize",
             "in": "query",
-            "description": "Number of items per page. Clamped to 1–200 (default 50).",
+            "description": "Number of items per page, 1-200 (default 50). Out of range is rejected, not clamped.",
             "schema": {
               "type": "integer",
               "format": "int32",
@@ -848,7 +873,7 @@
           "Assets"
         ],
         "summary": "Updates a custom asset. Send only the fields you want to change.",
-        "description": "An omitted field is left alone, and re-sending a value the asset already holds is a no-op\r\nrather than an error. Sending nothing at all is a 400.\r\n            \r\n`Description`, `ContactId`, `WarrantyEndDate`, `IpAddress` and\r\n`SerialNumber` are cleared by sending them as null. `Name`, `LocationId` and\r\n`HardwareTypeId` cannot be cleared; null leaves them unchanged.\r\n            \r\nA new `ClientId` moves the asset to that client. The asset's location and contact\r\nmust belong to the new client, so send a `LocationId` of the new client, and a\r\n`ContactId` of it or null, unless the ones the asset holds already belong to it.\r\n            \r\nThe primary contact is also listed under the asset's related items: assigning a contact\r\nadds it there, and replacing or clearing it removes the previous one.",
+        "description": "An omitted field is left alone, and re-sending a value the asset already holds is a no-op\r\nrather than an error. Sending nothing at all is a 400.\r\n            \r\n`Description`, `ContactId`, `WarrantyEndDate`, `WarrantyStartDate`,\r\n`Manufacturer`, `Model`, `IpAddress` and `SerialNumber` are cleared by\r\nsending them as null. `WarrantyStartDate`, `Manufacturer` and `Model` are kept\r\nfor API callers only: the Gorelo app does not show them, and changing only those records\r\nnothing on the asset's timeline. `Name`, `LocationId` and\r\n`HardwareTypeId` cannot be cleared; null leaves them unchanged.\r\n            \r\nA new `ClientId` moves the asset to that client. The asset's location and contact\r\nmust belong to the new client, so send a `LocationId` of the new client, and a\r\n`ContactId` of it or null, unless the ones the asset holds already belong to it.\r\n            \r\nThe primary contact is also listed under the asset's related items: assigning a contact\r\nadds it there, and replacing or clearing it removes the previous one.",
         "operationId": "patch_v1_assets_custom_customAssetId",
         "parameters": [
           {
@@ -1093,18 +1118,18 @@
         }
       }
     },
-    "/v1/assets/agents/{deviceId}": {
+    "/v1/assets/agents/{agentAssetId}": {
       "get": {
         "tags": [
           "Assets"
         ],
         "summary": "Gets a single agent (managed device) asset by id.",
-        "operationId": "get_v1_assets_agents_deviceId",
+        "operationId": "get_v1_assets_agents_agentAssetId",
         "parameters": [
           {
-            "name": "deviceId",
+            "name": "agentAssetId",
             "in": "path",
-            "description": "Device identifier.",
+            "description": "Agent asset identifier.",
             "required": true,
             "schema": {
               "type": "string",
@@ -1118,17 +1143,17 @@
             "content": {
               "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/DeviceResponseBaseResponse"
+                  "$ref": "#/components/schemas/AgentAssetResponseBaseResponse"
                 }
               },
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DeviceResponseBaseResponse"
+                  "$ref": "#/components/schemas/AgentAssetResponseBaseResponse"
                 }
               },
               "text/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DeviceResponseBaseResponse"
+                  "$ref": "#/components/schemas/AgentAssetResponseBaseResponse"
                 }
               }
             }
@@ -1221,10 +1246,10 @@
         ],
         "summary": "Deletes an agent (managed device) asset.",
         "description": "This is the same delete the app performs: the RMM agent is uninstalled from the host and the\r\ndevice is deactivated rather than removed, so its history on tickets and contacts survives.\r\nA device that is already deleted or already uninstalling succeeds without a second uninstall\r\ncommand, so a retried request is safe.",
-        "operationId": "delete_v1_assets_agents_deviceId",
+        "operationId": "delete_v1_assets_agents_agentAssetId",
         "parameters": [
           {
-            "name": "deviceId",
+            "name": "agentAssetId",
             "in": "path",
             "description": "Device to delete.",
             "required": true,
@@ -1318,13 +1343,892 @@
         }
       }
     },
+    "/v1/assets/agents/{agentAssetId}/patches": {
+      "get": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Lists the patches installed on an agent.",
+        "description": "The patches the agent reported in its last scan, newest install first, with the time of that\r\nscan. Windows and macOS agents. Not paginated. An agent that has never reported returns\r\n`LastScannedOn: null` and no items.",
+        "operationId": "get_v1_assets_agents_agentAssetId_patches",
+        "parameters": [
+          {
+            "name": "agentAssetId",
+            "in": "path",
+            "description": "Agent asset identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPatchListModelBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPatchListModelBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPatchListModelBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/assets/agents/{agentAssetId}/patches/available": {
+      "get": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Lists the Windows updates pending on an agent.",
+        "description": "The updates the agent's last update scan found pending, with the agent's update status. Read\r\nfrom the last scan only: no new scan is started. Windows agents only - a macOS agent is a 400\r\non `DeviceId`. A Windows agent with no scan available returns `LastScannedOn: null`\r\nand no items. Not paginated.",
+        "operationId": "get_v1_assets_agents_agentAssetId_patches_available",
+        "parameters": [
+          {
+            "name": "agentAssetId",
+            "in": "path",
+            "description": "Agent asset identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAvailableUpdateListModelBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAvailableUpdateListModelBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAvailableUpdateListModelBaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/assets/agents/{agentAssetId}/apps": {
+      "get": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Lists the applications installed on an agent.",
+        "description": "The applications the agent reported in its last scan, sorted by name, with the time of that\r\nscan. Not paginated. An agent that has never reported returns `LastScannedOn: null` and\r\nno items.",
+        "operationId": "get_v1_assets_agents_agentAssetId_apps",
+        "parameters": [
+          {
+            "name": "agentAssetId",
+            "in": "path",
+            "description": "Agent asset identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAppListModelBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAppListModelBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentAppListModelBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/assets/agents/{agentAssetId}/hardware": {
+      "get": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Gets an agent's processors, memory and disks.",
+        "description": "Processors and disks from the agent's last scan, total memory and the hardware type from the\r\nagent's record. Sizes are in bytes.",
+        "operationId": "get_v1_assets_agents_agentAssetId_hardware",
+        "parameters": [
+          {
+            "name": "agentAssetId",
+            "in": "path",
+            "description": "Agent asset identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentHardwareModelBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentHardwareModelBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentHardwareModelBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/assets/agents/{agentAssetId}/tags": {
+      "get": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Lists the tags on an agent.",
+        "description": "Every tag on the agent, returned whole: not paginated. `New` first, then by name. An agent\r\nwith no tags returns an empty list.",
+        "operationId": "get_v1_assets_agents_agentAssetId_tags",
+        "parameters": [
+          {
+            "name": "agentAssetId",
+            "in": "path",
+            "description": "Agent asset identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTagModelListBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTagModelListBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTagModelListBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/scripts": {
+      "get": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Lists the service provider's scripts using cursor pagination.",
+        "description": "Active scripts only. Scripts form a tree through `ParentScriptId` - the web shows a script\r\nwith children as a folder - and every level is listed unless `parentScriptId` narrows it.\r\nThe list does not include a script's content; `GET /v1/scripts/{scriptId}` does.",
+        "operationId": "get_v1_scripts",
+        "parameters": [
+          {
+            "name": "Cursor",
+            "in": "query",
+            "description": "Opaque pagination cursor from a previous page; omit for the first page.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "PageSize",
+            "in": "query",
+            "description": "Number of items per page, 1 to 200 (default 50). Any other value is a 400.",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 50
+            }
+          },
+          {
+            "name": "SortBy",
+            "in": "query",
+            "description": "`createdOn` (default) or `updatedOn`.",
+            "schema": {
+              "type": "string",
+              "default": "createdOn"
+            }
+          },
+          {
+            "name": "SortOrder",
+            "in": "query",
+            "description": "`desc` (default) or `asc`.",
+            "schema": {
+              "type": "string",
+              "default": "desc"
+            }
+          },
+          {
+            "name": "TypeIds",
+            "in": "query",
+            "description": "Comma-separated script types: 1 Powershell, 2 Command Line, 3 Bash. Any other value is a 400.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ParentScriptId",
+            "in": "query",
+            "description": "Only the scripts directly under this one.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "IsFavorite",
+            "in": "query",
+            "description": "`true` for favorites only, `false` for the rest.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "Query",
+            "in": "query",
+            "description": "Keyword matched against the title. Up to 200 characters.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScriptListItemModelListBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScriptListItemModelListBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScriptListItemModelListBaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/scripts/{scriptId}": {
+      "get": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Gets a script, with its content.",
+        "description": "Returns the script's current version. An unknown or deleted script is a 404.",
+        "operationId": "get_v1_scripts_scriptId",
+        "parameters": [
+          {
+            "name": "scriptId",
+            "in": "path",
+            "description": "Script identifier.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScriptDetailModelBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScriptDetailModelBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScriptDetailModelBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/assets/types": {
+      "get": {
+        "tags": [
+          "Assets"
+        ],
+        "summary": "Lists the asset types.",
+        "description": "Every active asset type of the service provider, as `{ Id, Name }`: the defaults (Desktop,\r\nLaptop, Printer and so on) and the ones it added. `Id` is the `Type.Id` an agent asset\r\nor a custom asset carries, and the `HardwareTypeId``POST` and <c>PATCH\r\n/v1/assets/custom</c> accept. Not paginated.",
+        "operationId": "get_v1_assets_types",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodeModelListBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodeModelListBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodeModelListBaseResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/assets/custom/hardware-types": {
       "get": {
         "tags": [
           "Assets"
         ],
-        "summary": "Lists the hardware types a custom asset can be given.",
-        "description": "The active custom asset types of the service provider: the set of `HardwareTypeId` values\r\n`POST` and `PATCH /v1/assets/custom` accept. Not paginated.",
+        "summary": "Lists the hardware types a custom asset can be given. <b>Deprecated:</b> use `GET /v1/assets/types`.",
+        "description": "An alias of `GET /v1/assets/types`, kept with its original shape: the same active asset\r\ntypes, with `CreatedOn` and `UpdatedOn` beside each `Id` and `Name`. Not paginated.",
         "operationId": "get_v1_assets_custom_hardware-types",
         "responses": {
           "200": {
@@ -1387,7 +2291,8 @@
               }
             }
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/v1/uptime": {
@@ -1544,22 +2449,22 @@
           "content": {
             "application/json-patch+json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateUptimeCheckCommand"
+                "$ref": "#/components/schemas/CreateUptimeCommand"
               }
             },
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateUptimeCheckCommand"
+                "$ref": "#/components/schemas/CreateUptimeCommand"
               }
             },
             "text/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateUptimeCheckCommand"
+                "$ref": "#/components/schemas/CreateUptimeCommand"
               }
             },
             "application/*+json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateUptimeCheckCommand"
+                "$ref": "#/components/schemas/CreateUptimeCommand"
               }
             }
           }
@@ -1570,17 +2475,17 @@
             "content": {
               "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/CreateUptimeCheckResultBaseResponse"
+                  "$ref": "#/components/schemas/CreateUptimeResultBaseResponse"
                 }
               },
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CreateUptimeCheckResultBaseResponse"
+                  "$ref": "#/components/schemas/CreateUptimeResultBaseResponse"
                 }
               },
               "text/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CreateUptimeCheckResultBaseResponse"
+                  "$ref": "#/components/schemas/CreateUptimeResultBaseResponse"
                 }
               }
             }
@@ -1648,18 +2553,18 @@
         }
       }
     },
-    "/v1/uptime/{checkId}": {
+    "/v1/uptime/{uptimeId}": {
       "get": {
         "tags": [
           "Assets"
         ],
         "summary": "Gets a single uptime check by id.",
-        "operationId": "get_v1_uptime_checkId",
+        "operationId": "get_v1_uptime_uptimeId",
         "parameters": [
           {
-            "name": "checkId",
+            "name": "uptimeId",
             "in": "path",
-            "description": "Uptime check identifier.",
+            "description": "Uptime identifier.",
             "required": true,
             "schema": {
               "type": "string",
@@ -1776,12 +2681,12 @@
         ],
         "summary": "Updates an uptime check. Send only the fields you want to change.",
         "description": "An omitted field is left alone, and re-sending a value the check already holds is a no-op\r\nrather than an error. Sending nothing at all is a 400.\r\n            \r\n`TagIds` replaces the check's tags outright; an empty array clears them. Changing\r\n`TypeId` requires a `Target` for the new type, because the two are stored\r\ntogether and the old target would not fit.\r\n            \r\n`MaintenanceMode` starts or ends a maintenance window for this check. Omit it to\r\nleave the current state alone; send `Enabled: true` with a start, a duration and a\r\nreason to begin one, or `Enabled: false` on its own to end it. A duration of zero\r\nmeans the window does not expire on its own.",
-        "operationId": "patch_v1_uptime_checkId",
+        "operationId": "patch_v1_uptime_uptimeId",
         "parameters": [
           {
-            "name": "checkId",
+            "name": "uptimeId",
             "in": "path",
-            "description": "Uptime check to update.",
+            "description": "Uptime to update.",
             "required": true,
             "schema": {
               "type": "string",
@@ -1794,22 +2699,22 @@
           "content": {
             "application/json-patch+json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateUptimeCheckCommand"
+                "$ref": "#/components/schemas/UpdateUptimeCommand"
               }
             },
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateUptimeCheckCommand"
+                "$ref": "#/components/schemas/UpdateUptimeCommand"
               }
             },
             "text/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateUptimeCheckCommand"
+                "$ref": "#/components/schemas/UpdateUptimeCommand"
               }
             },
             "application/*+json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateUptimeCheckCommand"
+                "$ref": "#/components/schemas/UpdateUptimeCommand"
               }
             }
           }
@@ -1820,17 +2725,17 @@
             "content": {
               "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/UpdateUptimeCheckResultBaseResponse"
+                  "$ref": "#/components/schemas/UpdateUptimeResultBaseResponse"
                 }
               },
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UpdateUptimeCheckResultBaseResponse"
+                  "$ref": "#/components/schemas/UpdateUptimeResultBaseResponse"
                 }
               },
               "text/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UpdateUptimeCheckResultBaseResponse"
+                  "$ref": "#/components/schemas/UpdateUptimeResultBaseResponse"
                 }
               }
             }
@@ -1923,12 +2828,12 @@
         ],
         "summary": "Deletes an uptime check.",
         "description": "This is the same delete the app performs: the check is deactivated rather than removed, its\r\nmonitoring schedule is cancelled in the region that runs it, and its cached status is cleared.\r\nDeleting an already-deleted check succeeds, so a retried request is safe.",
-        "operationId": "delete_v1_uptime_checkId",
+        "operationId": "delete_v1_uptime_uptimeId",
         "parameters": [
           {
-            "name": "checkId",
+            "name": "uptimeId",
             "in": "path",
-            "description": "Uptime check to delete.",
+            "description": "Uptime to delete.",
             "required": true,
             "schema": {
               "type": "string",
@@ -1942,17 +2847,17 @@
             "content": {
               "text/plain": {
                 "schema": {
-                  "$ref": "#/components/schemas/DeleteUptimeCheckResultBaseResponse"
+                  "$ref": "#/components/schemas/DeleteUptimeResultBaseResponse"
                 }
               },
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DeleteUptimeCheckResultBaseResponse"
+                  "$ref": "#/components/schemas/DeleteUptimeResultBaseResponse"
                 }
               },
               "text/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DeleteUptimeCheckResultBaseResponse"
+                  "$ref": "#/components/schemas/DeleteUptimeResultBaseResponse"
                 }
               }
             }
@@ -2515,7 +3420,7 @@
           {
             "name": "PageSize",
             "in": "query",
-            "description": "Number of items per page. Clamped to 1–200 (default 50).",
+            "description": "Number of items per page, 1-200 (default 50). Out of range is rejected, not clamped.",
             "schema": {
               "type": "integer",
               "format": "int32",
@@ -3281,7 +4186,7 @@
           {
             "name": "PageSize",
             "in": "query",
-            "description": "Number of items per page. Clamped to 1-200 (default 50).",
+            "description": "Number of items per page, 1-200 (default 50). Out of range is rejected, not clamped.",
             "schema": {
               "type": "integer",
               "format": "int32",
@@ -4128,7 +5033,7 @@
           "Billing"
         ],
         "summary": "Deletes or voids an invoice, depending on its current status.",
-        "description": "Mirrors the app's own delete/void action on the invoice list - one endpoint, the outcome\r\ndepends on the invoice's current status:\r\n<list type=\"table\"><item><term>Draft</term><description>Deleted - the response's `StatusId` is 6\r\n(Deleted), and the invoice is gone from `GET /v1/invoices` entirely.</description></item><item><term>Approved</term><description>Voided instead - the response's `StatusId` is\r\n4 (Void), and the invoice stays visible on `GET /v1/invoices`.</description></item><item><term>Any other status</term><description>Refused with 409 - only a Draft or\r\nApproved invoice can be removed this way.</description></item></list>\n\r\nDeleting an invoice that's already deleted, or already void, is treated as success. An\r\ninvoice that doesn't exist, or belongs to another service provider, is a 404 - the two are\r\nnever distinguished.\r\n",
+        "description": "Mirrors the app's own delete/void action on the invoice list - one endpoint, the outcome\r\ndepends on the invoice's current status:\r\n<list type=\"table\"><item><term>Draft</term><description>Deleted - the response's `StatusId` is 6\r\n(Deleted), and the invoice is gone from `GET /v1/invoices` entirely.</description></item><item><term>Approved</term><description>Voided instead - the response's `StatusId` is\r\n4 (Void), and the invoice stays visible on `GET /v1/invoices`.</description></item><item><term>Any other status</term><description>Refused with 409 - only a Draft or\r\nApproved invoice can be removed this way.</description></item></list>\n\r\nA delete or void also sends the status change to the connected accounting system, as the\r\napp's own delete/void does.\r\n\n\r\nDeleting an invoice that's already deleted, or already void, is treated as success. An\r\ninvoice that doesn't exist, or belongs to another service provider, is a 404 - the two are\r\nnever distinguished.\r\n",
         "operationId": "delete_v1_invoices_invoiceId",
         "parameters": [
           {
@@ -5326,7 +6231,7 @@
           {
             "name": "PageSize",
             "in": "query",
-            "description": "Number of items per page. Clamped to 1–200 (default 50).",
+            "description": "Number of items per page, 1-200 (default 50). Out of range is rejected, not clamped.",
             "schema": {
               "type": "integer",
               "format": "int32",
@@ -5345,6 +6250,14 @@
             "name": "Query",
             "in": "query",
             "description": "Keyword matched against the client name, alternate name, billing name and web domains. Up to 200 characters.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "GroupIds",
+            "in": "query",
+            "description": "Comma-separated group ids (from GET /v1/organization/groups); keeps clients subscribed to any of them. Up to 100 values.",
             "schema": {
               "type": "string"
             }
@@ -6518,7 +7431,7 @@
           {
             "name": "PageSize",
             "in": "query",
-            "description": "Number of items per page. Clamped to 1–200 (default 50).",
+            "description": "Number of items per page, 1-200 (default 50). Out of range is rejected, not clamped.",
             "schema": {
               "type": "integer",
               "format": "int32",
@@ -6817,7 +7730,7 @@
           {
             "name": "TypeIds",
             "in": "query",
-            "description": "Required. Comma-separated record types to include: 1 Client, 2 Contact, 3 Contract, 4 Ticket, 5 Item, 6 Invoice, 7 Custom asset, 8 Project, 9 Task. Up to 10 values; any other value is a 400.",
+            "description": "Required. Comma-separated record types to include: 1 Client, 2 Contact, 3 Contract, 4 Ticket, 5 Item, 6 Invoice, 7 Custom asset, 8 Project, 9 Task, 10 Agent asset. Up to 10 values; any other value is a 400.",
             "schema": {
               "type": "string"
             }
@@ -6960,7 +7873,7 @@
           "Documents"
         ],
         "summary": "Lists the service provider's documents.",
-        "description": "Active documents only, unless statusIds names Archived. Archiving a\r\ndocument archives every document below it. To pick up only what changed since a previous\r\nsync, pass updatedSince and createdSince.",
+        "description": "Active documents only, unless statusIds names Archived. Archiving a\r\ndocument archives every document below it. To pick up only what changed since a previous\r\nsync, pass updatedSince: a new document counts as updated when it was\r\ncreated, so it is included.",
         "operationId": "get_v1_documents",
         "parameters": [
           {
@@ -7049,7 +7962,7 @@
           {
             "name": "UpdatedSince",
             "in": "query",
-            "description": "Keeps only documents updated at or after this UTC instant (ISO 8601). Documents never updated are left out.",
+            "description": "Keeps only documents updated at or after this UTC instant (ISO 8601). A document never edited since it was created counts as updated at its creation time.",
             "schema": {
               "type": "string",
               "format": "date-time"
@@ -7085,7 +7998,7 @@
           {
             "name": "SortBy",
             "in": "query",
-            "description": "Sort field: `createdOn` (default) or `updatedOn`.",
+            "description": "Sort field: `createdOn` (default), `updatedOn` or `documentOrder` (the order the app shows siblings in; use it with parentDocumentId).",
             "schema": {
               "type": "string",
               "default": "createdOn"
@@ -7408,7 +8321,7 @@
           "Documents"
         ],
         "summary": "Updates a document.",
-        "description": "Send only what changes. A changed `Title` or `Body` is saved as a new version.\r\n            \r\n`StatusId` 2 archives the document and the documents directly under it; 1 restores an\r\narchived document to the top level, as the app does. `Move` puts the document under\r\nanother parent, or at the top level of a client (or internal), and gives everything nested\r\nunder it the same client; its position among its new siblings is unchanged.\r\n            \r\n`Attachments` replaces the whole list: upload each file with `POST /v1/attachments`\r\nand send every name and url, including the ones to keep. An empty array removes them all.",
+        "description": "Send only what changes. A changed `Title` or `Body` is saved as a new version.\r\n            \r\n`StatusId` 2 archives the document and every document below it, at any depth; 1\r\nrestores an archived document to the top level, and the documents below it stay archived.\r\n`Move` puts the document under another parent, or at the top level of a client (or\r\ninternal), last among its new siblings, and gives everything nested under it the same client.\r\n            \r\n`Attachments` replaces the whole list: upload each file with `POST /v1/attachments`\r\nand send every name and url, including the ones to keep. An empty array removes them all.",
         "operationId": "patch_v1_documents_documentId",
         "parameters": [
           {
@@ -8190,7 +9103,7 @@
           "Documents"
         ],
         "summary": "Lists the records a document is related to.",
-        "description": "Not paginated: a document's related items are returned whole. `ItemType` is\r\n1 Document, 2 Custom asset, 3 Contact, 4 Device, 5 Structured document or 6 Password.",
+        "description": "Not paginated: a document's related items are returned whole. `ItemType` is\r\n1 Document, 2 Custom asset, 3 Contact, 4 Agent asset, 5 Structured document or 6 Password.",
         "operationId": "get_v1_documents_documentId_related-items",
         "parameters": [
           {
@@ -9028,7 +9941,7 @@
           {
             "name": "PageSize",
             "in": "query",
-            "description": "Number of items per page. Clamped to 1–200 (default 50).",
+            "description": "Number of items per page, 1-200 (default 50). Out of range is rejected, not clamped.",
             "schema": {
               "type": "integer",
               "format": "int32",
@@ -13732,7 +14645,7 @@
           {
             "name": "PageSize",
             "in": "query",
-            "description": "Number of items per page. Clamped to 1–200 (default 50).",
+            "description": "Number of items per page, 1-200 (default 50). Out of range is rejected, not clamped.",
             "schema": {
               "type": "integer",
               "format": "int32",
@@ -13817,6 +14730,14 @@
             "name": "GroupIds",
             "in": "query",
             "description": "Comma-separated group ids; a ticket matches if it is subscribed to any of them.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "DeviceIds",
+            "in": "query",
+            "description": "Comma-separated agent ids (GUIDs, up to 100); a ticket matches if any of those agents is linked to it.",
             "schema": {
               "type": "string"
             }
@@ -14992,7 +15913,7 @@
           {
             "name": "PageSize",
             "in": "query",
-            "description": "Number of items per page. Clamped to 1–200 (default 50).",
+            "description": "Number of items per page, 1-200 (default 50). Out of range is rejected, not clamped.",
             "schema": {
               "type": "integer",
               "format": "int32",
@@ -15642,12 +16563,12 @@
         "properties": {
           "ItemId": {
             "type": "string",
-            "description": "The record's id, as text: a Guid for a document, custom asset or device, a number for a contact.",
+            "description": "The record's id, as text: a Guid for a document, custom asset or agent asset, a number for a contact.",
             "nullable": true
           },
           "ItemTypeId": {
             "type": "integer",
-            "description": "1 Document, 2 Custom asset, 3 Contact, 4 Device, 5 Structured document, 6 Password.",
+            "description": "1 Document, 2 Custom asset, 3 Contact, 4 Agent asset, 5 Structured document, 6 Password.",
             "format": "int64"
           }
         },
@@ -15668,6 +16589,1022 @@
         },
         "additionalProperties": false,
         "description": "Links a document to other records."
+      },
+      "AgentAppListModel": {
+        "type": "object",
+        "properties": {
+          "LastScannedOn": {
+            "type": "string",
+            "description": "When the agent last reported its applications (UTC); `null` when it never has.",
+            "format": "date-time",
+            "nullable": true
+          },
+          "Items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentAppModel"
+            },
+            "description": "Installed applications, by name. Empty when the agent never reported any."
+          }
+        },
+        "additionalProperties": false,
+        "description": "The applications installed on an agent, from its last stored scan."
+      },
+      "AgentAppListModelBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "$ref": "#/components/schemas/AgentAppListModel"
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentAppModel": {
+        "type": "object",
+        "properties": {
+          "AppId": {
+            "type": "string",
+            "description": "The application's package identifier from its install source (for example its winget id);\r\n`null` when the application has no managed source.",
+            "nullable": true,
+            "example": "Google.Chrome"
+          },
+          "Name": {
+            "type": "string",
+            "description": "Application name.",
+            "example": "Google Chrome"
+          },
+          "Version": {
+            "type": "string",
+            "description": "Installed version.",
+            "nullable": true,
+            "example": "129.0.6668.90"
+          },
+          "Publisher": {
+            "type": "string",
+            "description": "Publisher.",
+            "nullable": true,
+            "example": "Google LLC"
+          },
+          "InstalledOn": {
+            "type": "string",
+            "description": "The date the application was installed; `null` when not reported.",
+            "format": "date",
+            "nullable": true
+          },
+          "Source": {
+            "type": "string",
+            "description": "Install source: `winget` or `AppX`; `null` for any other or no source.",
+            "nullable": true,
+            "example": "winget"
+          },
+          "AvailableVersion": {
+            "type": "string",
+            "description": "The version an upgrade would install; `null` when no upgrade is available.",
+            "nullable": true,
+            "example": "130.0.6723.59"
+          }
+        },
+        "additionalProperties": false,
+        "description": "One installed application."
+      },
+      "AgentAssetListItemResponse": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "string",
+            "description": "Device identifier.",
+            "format": "uuid"
+          },
+          "Name": {
+            "type": "string",
+            "description": "Device name."
+          },
+          "Status": {
+            "$ref": "#/components/schemas/CodeModel"
+          },
+          "ClientId": {
+            "type": "integer",
+            "description": "Identifier of the client the device belongs to. `null` for an agent awaiting adoption -\r\ninstalled but not yet assigned to a client in the app. Such an agent is listed like any other,\r\nin whatever status it reports, with `LocationId` null too.",
+            "format": "int64",
+            "nullable": true
+          },
+          "LocationId": {
+            "type": "integer",
+            "description": "Identifier of the client location the device belongs to. `null` for an agent awaiting\r\nadoption.",
+            "format": "int64",
+            "nullable": true
+          },
+          "ContactId": {
+            "type": "integer",
+            "description": "Identifier of the contact the agent asset is assigned to. Null when unassigned.",
+            "format": "int64",
+            "nullable": true,
+            "example": 7962
+          },
+          "CreatedOn": {
+            "type": "string",
+            "description": "Creation timestamp (UTC). Default sort key (ascending) for the agents list endpoint.",
+            "format": "date-time"
+          },
+          "UpdatedOn": {
+            "type": "string",
+            "description": "Last-updated timestamp (UTC).",
+            "format": "date-time",
+            "nullable": true
+          },
+          "DisplayName": {
+            "type": "string",
+            "description": "Display name, always filled in: the override set in the app, or `Name` (what the agent\r\nreports) when there is none."
+          },
+          "Description": {
+            "type": "string",
+            "description": "Free-text description."
+          },
+          "Banner": {
+            "type": "string",
+            "description": "Banner / label text. Null when the asset has none.",
+            "nullable": true
+          },
+          "TimeZone": {
+            "type": "string",
+            "description": "IANA time zone identifier for the device."
+          },
+          "LastBootUpTime": {
+            "type": "string",
+            "description": "Last boot-up time (UTC).",
+            "format": "date-time",
+            "nullable": true
+          },
+          "LastDisconnectDateTime": {
+            "type": "string",
+            "description": "Last disconnect time (UTC).",
+            "format": "date-time",
+            "nullable": true
+          },
+          "LastLoggedOnUser": {
+            "type": "string",
+            "description": "Last logged-on user (display name)."
+          },
+          "LastLoggedOnUserUpn": {
+            "type": "string",
+            "description": "Last logged-on user principal name (UPN)."
+          },
+          "LastLoggedOnUserDatetime": {
+            "type": "string",
+            "description": "Timestamp of the last user logon (UTC).",
+            "format": "date-time",
+            "nullable": true
+          },
+          "Os": {
+            "type": "string",
+            "description": "Operating system (full string)."
+          },
+          "OsType": {
+            "type": "string",
+            "description": "Operating system type."
+          },
+          "OsName": {
+            "type": "string",
+            "description": "Operating system name."
+          },
+          "OsVersion": {
+            "type": "string",
+            "description": "Operating system version."
+          },
+          "OsArchitecture": {
+            "type": "string",
+            "description": "Operating system architecture."
+          },
+          "HardwareArchitecture": {
+            "type": "string",
+            "description": "Hardware architecture."
+          },
+          "Type": {
+            "$ref": "#/components/schemas/CodeModel"
+          },
+          "HardwareType": {
+            "type": "string",
+            "description": "Hardware type name. <b>Deprecated:</b> use `Type`, which also carries the id.",
+            "deprecated": true
+          },
+          "Manufacturer": {
+            "type": "string",
+            "description": "Hardware manufacturer."
+          },
+          "Model": {
+            "type": "string",
+            "description": "Hardware model."
+          },
+          "SerialNumber": {
+            "type": "string",
+            "description": "Hardware serial number. The same name and value on a custom asset (`SerialNumber`)."
+          },
+          "SerialNo": {
+            "type": "string",
+            "description": "Hardware serial number. <b>Deprecated:</b> use `SerialNumber`, which has the same value.",
+            "deprecated": true
+          },
+          "WarrantyStartDate": {
+            "type": "string",
+            "description": "Warranty start date (UTC). Sourced from the device's warranty record.",
+            "format": "date-time",
+            "nullable": true
+          },
+          "WarrantyEndDate": {
+            "type": "string",
+            "description": "Warranty end date (UTC). Sourced from the device's warranty record.",
+            "format": "date-time",
+            "nullable": true
+          },
+          "Cpu": {
+            "type": "string",
+            "description": "CPU description."
+          },
+          "Memory": {
+            "type": "string",
+            "description": "Total memory."
+          },
+          "Disk": {
+            "type": "string",
+            "description": "Disk description."
+          },
+          "LocalIPAddress": {
+            "type": "string",
+            "description": "Local IP address."
+          },
+          "PublicIPAddress": {
+            "type": "string",
+            "description": "Public IP address."
+          },
+          "Uuid": {
+            "type": "string",
+            "description": "Device UUID."
+          },
+          "ShellVersion": {
+            "type": "string",
+            "description": "Agent shell version."
+          },
+          "RmmVersion": {
+            "type": "string",
+            "description": "RMM agent version."
+          },
+          "InstallerVersion": {
+            "type": "string",
+            "description": "Installer version."
+          },
+          "SecurityPosture": {
+            "$ref": "#/components/schemas/SecurityPostureModel"
+          }
+        },
+        "additionalProperties": false,
+        "description": "An agent (managed device) asset as listed by `GET /v1/assets/agents`. Timestamps are UTC."
+      },
+      "AgentAssetListItemResponseListBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentAssetListItemResponse"
+            },
+            "nullable": true
+          },
+          "DataContext": {
+            "$ref": "#/components/schemas/PaginationDataContext"
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentAssetResponse": {
+        "type": "object",
+        "properties": {
+          "CustomProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomPropertyValue"
+            },
+            "description": "Every custom field the service provider has defined for devices, with its effective value\r\non this device (saved, else the field's default, else null) and `IsSet` saying whether\r\na value is saved. Empty only when no custom fields are defined."
+          },
+          "Id": {
+            "type": "string",
+            "description": "Device identifier.",
+            "format": "uuid"
+          },
+          "Name": {
+            "type": "string",
+            "description": "Device name."
+          },
+          "Status": {
+            "$ref": "#/components/schemas/CodeModel"
+          },
+          "ClientId": {
+            "type": "integer",
+            "description": "Identifier of the client the device belongs to. `null` for an agent awaiting adoption -\r\ninstalled but not yet assigned to a client in the app. Such an agent is listed like any other,\r\nin whatever status it reports, with `LocationId` null too.",
+            "format": "int64",
+            "nullable": true
+          },
+          "LocationId": {
+            "type": "integer",
+            "description": "Identifier of the client location the device belongs to. `null` for an agent awaiting\r\nadoption.",
+            "format": "int64",
+            "nullable": true
+          },
+          "ContactId": {
+            "type": "integer",
+            "description": "Identifier of the contact the agent asset is assigned to. Null when unassigned.",
+            "format": "int64",
+            "nullable": true,
+            "example": 7962
+          },
+          "CreatedOn": {
+            "type": "string",
+            "description": "Creation timestamp (UTC). Default sort key (ascending) for the agents list endpoint.",
+            "format": "date-time"
+          },
+          "UpdatedOn": {
+            "type": "string",
+            "description": "Last-updated timestamp (UTC).",
+            "format": "date-time",
+            "nullable": true
+          },
+          "DisplayName": {
+            "type": "string",
+            "description": "Display name, always filled in: the override set in the app, or `Name` (what the agent\r\nreports) when there is none."
+          },
+          "Description": {
+            "type": "string",
+            "description": "Free-text description."
+          },
+          "Banner": {
+            "type": "string",
+            "description": "Banner / label text. Null when the asset has none.",
+            "nullable": true
+          },
+          "TimeZone": {
+            "type": "string",
+            "description": "IANA time zone identifier for the device."
+          },
+          "LastBootUpTime": {
+            "type": "string",
+            "description": "Last boot-up time (UTC).",
+            "format": "date-time",
+            "nullable": true
+          },
+          "LastDisconnectDateTime": {
+            "type": "string",
+            "description": "Last disconnect time (UTC).",
+            "format": "date-time",
+            "nullable": true
+          },
+          "LastLoggedOnUser": {
+            "type": "string",
+            "description": "Last logged-on user (display name)."
+          },
+          "LastLoggedOnUserUpn": {
+            "type": "string",
+            "description": "Last logged-on user principal name (UPN)."
+          },
+          "LastLoggedOnUserDatetime": {
+            "type": "string",
+            "description": "Timestamp of the last user logon (UTC).",
+            "format": "date-time",
+            "nullable": true
+          },
+          "Os": {
+            "type": "string",
+            "description": "Operating system (full string)."
+          },
+          "OsType": {
+            "type": "string",
+            "description": "Operating system type."
+          },
+          "OsName": {
+            "type": "string",
+            "description": "Operating system name."
+          },
+          "OsVersion": {
+            "type": "string",
+            "description": "Operating system version."
+          },
+          "OsArchitecture": {
+            "type": "string",
+            "description": "Operating system architecture."
+          },
+          "HardwareArchitecture": {
+            "type": "string",
+            "description": "Hardware architecture."
+          },
+          "Type": {
+            "$ref": "#/components/schemas/CodeModel"
+          },
+          "HardwareType": {
+            "type": "string",
+            "description": "Hardware type name. <b>Deprecated:</b> use `Type`, which also carries the id.",
+            "deprecated": true
+          },
+          "Manufacturer": {
+            "type": "string",
+            "description": "Hardware manufacturer."
+          },
+          "Model": {
+            "type": "string",
+            "description": "Hardware model."
+          },
+          "SerialNumber": {
+            "type": "string",
+            "description": "Hardware serial number. The same name and value on a custom asset (`SerialNumber`)."
+          },
+          "SerialNo": {
+            "type": "string",
+            "description": "Hardware serial number. <b>Deprecated:</b> use `SerialNumber`, which has the same value.",
+            "deprecated": true
+          },
+          "WarrantyStartDate": {
+            "type": "string",
+            "description": "Warranty start date (UTC). Sourced from the device's warranty record.",
+            "format": "date-time",
+            "nullable": true
+          },
+          "WarrantyEndDate": {
+            "type": "string",
+            "description": "Warranty end date (UTC). Sourced from the device's warranty record.",
+            "format": "date-time",
+            "nullable": true
+          },
+          "Cpu": {
+            "type": "string",
+            "description": "CPU description."
+          },
+          "Memory": {
+            "type": "string",
+            "description": "Total memory."
+          },
+          "Disk": {
+            "type": "string",
+            "description": "Disk description."
+          },
+          "LocalIPAddress": {
+            "type": "string",
+            "description": "Local IP address."
+          },
+          "PublicIPAddress": {
+            "type": "string",
+            "description": "Public IP address."
+          },
+          "Uuid": {
+            "type": "string",
+            "description": "Device UUID."
+          },
+          "ShellVersion": {
+            "type": "string",
+            "description": "Agent shell version."
+          },
+          "RmmVersion": {
+            "type": "string",
+            "description": "RMM agent version."
+          },
+          "InstallerVersion": {
+            "type": "string",
+            "description": "Installer version."
+          },
+          "SecurityPosture": {
+            "$ref": "#/components/schemas/SecurityPostureModel"
+          }
+        },
+        "additionalProperties": false,
+        "description": "A single agent, as returned by `GET /v1/assets/agents/{deviceId}`: the list shape plus its\r\ncustom properties, which the list leaves out. Timestamps are UTC."
+      },
+      "AgentAssetResponseBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "$ref": "#/components/schemas/AgentAssetResponse"
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentAvailableUpdateListModel": {
+        "type": "object",
+        "properties": {
+          "LastScannedOn": {
+            "type": "string",
+            "description": "When the agent last scanned for updates (UTC); `null` when no scan is cached.",
+            "format": "date-time",
+            "nullable": true
+          },
+          "WindowsUpdateStatus": {
+            "$ref": "#/components/schemas/CodeModel"
+          },
+          "Items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentAvailableUpdateModel"
+            },
+            "description": "Pending updates. Empty when none are pending or no scan is cached."
+          }
+        },
+        "additionalProperties": false,
+        "description": "The Windows updates an agent has pending, from its last cached scan."
+      },
+      "AgentAvailableUpdateListModelBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "$ref": "#/components/schemas/AgentAvailableUpdateListModel"
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentAvailableUpdateModel": {
+        "type": "object",
+        "properties": {
+          "UpdateId": {
+            "type": "string",
+            "description": "Windows Update's id for the update.",
+            "nullable": true,
+            "example": "9f3c2b1a-5e4d-4c3b-8a7f-6e5d4c3b2a10"
+          },
+          "Title": {
+            "type": "string",
+            "description": "Update title.",
+            "example": "2026-10 Cumulative Update for Windows 11 Version 24H2 (KB5044284)"
+          },
+          "Category": {
+            "type": "string",
+            "description": "`Security` when the update is a security update, otherwise `General`.",
+            "example": "General"
+          },
+          "FirstSeenOn": {
+            "type": "string",
+            "description": "When the update was first seen pending (UTC).",
+            "format": "date-time",
+            "nullable": true
+          },
+          "IsOutOfDate": {
+            "type": "boolean",
+            "description": "Whether the update has been pending longer than the agent's policy allows."
+          },
+          "IsFailed": {
+            "type": "boolean",
+            "description": "Whether the last attempt to install the update failed."
+          },
+          "FailureMessage": {
+            "type": "string",
+            "description": "The failure message when `IsFailed` is `true`; otherwise `null`.",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "One pending Windows update."
+      },
+      "AgentDiskModel": {
+        "type": "object",
+        "properties": {
+          "Name": {
+            "type": "string",
+            "description": "Disk name.",
+            "nullable": true,
+            "example": "Samsung SSD 980 PRO 1TB"
+          },
+          "Number": {
+            "type": "integer",
+            "description": "Disk number.",
+            "format": "int32",
+            "example": 0
+          },
+          "HealthStatus": {
+            "type": "string",
+            "description": "Disk health: `Healthy`, `Warning`, `Unhealthy` or `Unknown`.",
+            "example": "Healthy"
+          },
+          "IsOnline": {
+            "type": "boolean",
+            "description": "`true` when the disk reports itself online; `false` when offline, not ready, without\r\n            media, stopped or failed; `null` when it reported no status.",
+            "nullable": true
+          },
+          "TotalSpaceBytes": {
+            "type": "integer",
+            "description": "Total size in bytes.",
+            "format": "int64"
+          },
+          "FreeSpaceBytes": {
+            "type": "integer",
+            "description": "Free space in bytes.",
+            "format": "int64"
+          },
+          "UsedSpaceBytes": {
+            "type": "integer",
+            "description": "Used space in bytes: total minus free.",
+            "format": "int64"
+          },
+          "Partitions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentPartitionModel"
+            },
+            "description": "The disk's partitions."
+          }
+        },
+        "additionalProperties": false,
+        "description": "One physical disk."
+      },
+      "AgentHardwareModel": {
+        "type": "object",
+        "properties": {
+          "LastScannedOn": {
+            "type": "string",
+            "description": "When the agent last reported its disks or processors (UTC); `null` when it never has.",
+            "format": "date-time",
+            "nullable": true
+          },
+          "HardwareType": {
+            "type": "string",
+            "description": "The agent's hardware type: the service provider's custom hardware type when one is set,\r\notherwise the type the device reports. The same value as `HardwareType` on\r\n`GET /v1/assets/agents/{agentAssetId}`.",
+            "nullable": true,
+            "example": "Laptop"
+          },
+          "Processors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentProcessorModel"
+            },
+            "description": "The agent's processors. Empty when the agent has reported none."
+          },
+          "TotalMemoryBytes": {
+            "type": "integer",
+            "description": "Total installed memory in bytes; `null` when not reported or not readable.",
+            "format": "int64",
+            "nullable": true,
+            "example": 17179869184
+          },
+          "Disks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentDiskModel"
+            },
+            "description": "The agent's physical disks."
+          }
+        },
+        "additionalProperties": false,
+        "description": "An agent's processors, memory and disks."
+      },
+      "AgentHardwareModelBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "$ref": "#/components/schemas/AgentHardwareModel"
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentPartitionModel": {
+        "type": "object",
+        "properties": {
+          "DriveLetter": {
+            "type": "string",
+            "description": "Drive letter; `null` when the partition has none.",
+            "nullable": true,
+            "example": "C"
+          },
+          "Label": {
+            "type": "string",
+            "description": "Volume label.",
+            "nullable": true,
+            "example": "Windows"
+          },
+          "FileSystem": {
+            "type": "string",
+            "description": "File system.",
+            "nullable": true,
+            "example": "NTFS"
+          },
+          "TotalSpaceBytes": {
+            "type": "integer",
+            "description": "Total size in bytes.",
+            "format": "int64"
+          },
+          "FreeSpaceBytes": {
+            "type": "integer",
+            "description": "Free space in bytes.",
+            "format": "int64"
+          },
+          "UsedSpaceBytes": {
+            "type": "integer",
+            "description": "Used space in bytes: total minus free.",
+            "format": "int64"
+          },
+          "HealthStatus": {
+            "type": "string",
+            "description": "Partition health: `Healthy`, `Warning`, `Unhealthy` or `Unknown`.",
+            "example": "Healthy"
+          },
+          "IsBoot": {
+            "type": "boolean",
+            "description": "Whether this is the boot partition."
+          },
+          "IsBitLockerProtected": {
+            "type": "boolean",
+            "description": "`true` when BitLocker protection is on, `false` when it is off, `null` when\r\n            unknown or not reported.",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "One partition of a disk."
+      },
+      "AgentPatchListModel": {
+        "type": "object",
+        "properties": {
+          "LastScannedOn": {
+            "type": "string",
+            "description": "When the agent last reported its patches (UTC); `null` when it never has.",
+            "format": "date-time",
+            "nullable": true
+          },
+          "Items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentPatchModel"
+            },
+            "description": "Installed patches, newest install first. Empty when the agent never reported any."
+          }
+        },
+        "additionalProperties": false,
+        "description": "The patches installed on an agent, from its last stored scan."
+      },
+      "AgentPatchListModelBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "$ref": "#/components/schemas/AgentPatchListModel"
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentPatchModel": {
+        "type": "object",
+        "properties": {
+          "KbArticleId": {
+            "type": "string",
+            "description": "The patch's KB article id; `null` when it has none, as for a macOS update.",
+            "nullable": true,
+            "example": "KB5044284"
+          },
+          "Name": {
+            "type": "string",
+            "description": "Patch name.",
+            "example": "2026-10 Cumulative Update for Windows 11 Version 24H2 for x64-based Systems"
+          },
+          "InstalledOn": {
+            "type": "string",
+            "description": "The date the patch was installed; `null` when the agent reported none it could be read from.",
+            "format": "date",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "One installed patch."
+      },
+      "AgentProcessorModel": {
+        "type": "object",
+        "properties": {
+          "Model": {
+            "type": "string",
+            "description": "Processor model.",
+            "example": "Intel(R) Core(TM) i5-7200U CPU @ 2.50GHz"
+          },
+          "Manufacturer": {
+            "type": "string",
+            "description": "Manufacturer as the processor reports it; `null` when not reported.",
+            "nullable": true,
+            "example": "GenuineIntel"
+          }
+        },
+        "additionalProperties": false,
+        "description": "One processor."
+      },
+      "AgentTagConditionModel": {
+        "type": "object",
+        "properties": {
+          "Join": {
+            "type": "string",
+            "description": "How this condition joins the one before it: `And` or `Or`. `null` on the first\r\ncondition.",
+            "nullable": true,
+            "example": "And"
+          },
+          "Property": {
+            "type": "string",
+            "description": "What is tested: `InstalledApp`, `InstalledService`, `RegistryKey` (uses\r\n`Path`), `WindowsFeature`, `AssetName` or `MacPreference` (uses\r\n`Domain` and `Key`). `null` for a value outside this set.",
+            "nullable": true,
+            "example": "InstalledApp"
+          },
+          "Operator": {
+            "type": "string",
+            "description": "The comparison: `Contains`, `Equals`, `NotEquals`, `Exists` or\r\n`NotExists`. `null` for a value outside this set.",
+            "nullable": true,
+            "example": "Contains"
+          },
+          "Value": {
+            "type": "string",
+            "description": "The value compared against.",
+            "nullable": true,
+            "example": "Chrome"
+          },
+          "Path": {
+            "type": "string",
+            "description": "Registry path, for a `RegistryKey` condition; otherwise `null`.",
+            "nullable": true
+          },
+          "Domain": {
+            "type": "string",
+            "description": "Preference domain, for a `MacPreference` condition; otherwise `null`.",
+            "nullable": true
+          },
+          "Key": {
+            "type": "string",
+            "description": "Preference key, for a `MacPreference` condition; otherwise `null`.",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "One condition of a tag."
+      },
+      "AgentTagConditionsModel": {
+        "type": "object",
+        "properties": {
+          "Windows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentTagConditionModel"
+            },
+            "description": "Conditions evaluated on Windows agents, in order."
+          },
+          "Mac": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentTagConditionModel"
+            },
+            "description": "Conditions evaluated on macOS agents, in order."
+          }
+        },
+        "additionalProperties": false,
+        "description": "A tag's conditions, per platform. Each list is empty when the platform has none."
+      },
+      "AgentTagModel": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "integer",
+            "description": "Tag identifier.",
+            "format": "int64",
+            "example": 6118
+          },
+          "Name": {
+            "type": "string",
+            "description": "Tag name. For a default tag it is the name the app shows: `New`, `All`, the client's\r\nname, `Client (Location)` for a location, or the device type (`Windows Workstation`,\r\n`Windows Server`, `MacOS Workstation`).",
+            "example": "Has Chrome"
+          },
+          "Type": {
+            "$ref": "#/components/schemas/CodeModel"
+          },
+          "Conditions": {
+            "$ref": "#/components/schemas/AgentTagConditionsModel"
+          }
+        },
+        "additionalProperties": false,
+        "description": "A tag applied to an agent."
+      },
+      "AgentTagModelListBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentTagModel"
+            },
+            "nullable": true
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "AlertListItemModel": {
         "type": "object",
@@ -15700,22 +17637,42 @@
             "format": "int64",
             "nullable": true
           },
+          "AgentAssetId": {
+            "type": "string",
+            "description": "Identifier of the agent asset the alert relates to - the id `GET /v1/assets/agents/{agentAssetId}`\r\ntakes. Null when there is none, and on an alert about a custom asset or an uptime.",
+            "format": "uuid",
+            "nullable": true
+          },
           "DeviceId": {
             "type": "string",
-            "description": "Identifier of the device the alert relates to. Null when there is none.",
+            "description": "Identifier of the agent asset the alert relates to. <b>Deprecated:</b> use `AgentAssetId`,\r\nwhich has the same value.",
+            "format": "uuid",
+            "nullable": true,
+            "deprecated": true
+          },
+          "CustomAssetId": {
+            "type": "string",
+            "description": "Identifier of the custom asset the alert relates to - the id `GET /v1/assets/custom/{customAssetId}`\r\ntakes. Set on a `Warranty Expiration` alert about a custom asset and on an `API` alert posted with a\r\n`CustomAssetId`; null on every other alert.",
             "format": "uuid",
             "nullable": true
           },
           "CheckId": {
             "type": "string",
-            "description": "The check that raised this alert - a reusable check definition applied to devices\r\nthrough a policy, not a per-device record. Null on alerts not raised by one, including\r\nuptime alerts, which carry `UptimeCheckId` instead.",
+            "description": "The check that raised this alert - a reusable check definition applied to devices\r\nthrough a policy, not a per-device record. Null on alerts not raised by one, including\r\nuptime alerts, which carry `UptimeId` instead.",
+            "nullable": true
+          },
+          "UptimeId": {
+            "type": "string",
+            "description": "The uptime that raised this alert, for `Uptime` alerts only - the same\r\nidentifier `GET /v1/uptime/{uptimeId}` takes. At most one of this and\r\n`CheckId` is set.",
+            "format": "uuid",
             "nullable": true
           },
           "UptimeCheckId": {
             "type": "string",
-            "description": "The uptime check that raised this alert, for `Uptime` alerts only - the same\r\nidentifier `GET /v1/uptime/{checkId}` takes. At most one of this and\r\n`CheckId` is set.",
+            "description": "The uptime that raised this alert. <b>Deprecated:</b> use `UptimeId`, which has the same value.",
             "format": "uuid",
-            "nullable": true
+            "nullable": true,
+            "deprecated": true
           },
           "TicketId": {
             "type": "string",
@@ -16133,6 +18090,14 @@
               "$ref": "#/components/schemas/ClientWebDomainResponse"
             },
             "description": "Web domains associated with the client."
+          },
+          "GroupIds": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Ids of the groups the client is subscribed to (Client > Quick Links > Groups in Gorelo web),\r\nascending. Names are on `GET /v1/organization/groups`. Empty when the client has none."
           }
         },
         "additionalProperties": false,
@@ -16180,12 +18145,12 @@
           },
           "PhoneCountryCode": {
             "type": "string",
-            "description": "Phone country calling code (e.g. +1). Maximum 25 characters.",
+            "description": "Phone ISO 3166-1 alpha-2 region code (e.g. US). Maximum 25 characters.",
             "nullable": true
           },
           "Phone": {
             "type": "string",
-            "description": "Phone number (without country code). Maximum 15 characters.",
+            "description": "Phone number, as dialled within its country, e.g. 021 123 4567 for NZ; an international +64 21 123 4567 is accepted too. A number sent without its leading 0 (21 123 4567) is stored with it. Maximum 15 characters.",
             "nullable": true
           },
           "PhoneExt": {
@@ -16269,11 +18234,11 @@
           },
           "PhoneCountryCode": {
             "type": "string",
-            "description": "Phone country calling code (e.g. +1)."
+            "description": "Phone ISO 3166-1 alpha-2 region code (e.g. US)."
           },
           "Phone": {
             "type": "string",
-            "description": "Phone number (without country code)."
+            "description": "Phone number, as dialled within its country, e.g. 021 123 4567 for NZ."
           },
           "PhoneExt": {
             "type": "string",
@@ -16421,6 +18386,14 @@
               "$ref": "#/components/schemas/ClientWebDomainResponse"
             },
             "description": "Web domains associated with the client."
+          },
+          "GroupIds": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Ids of the groups the client is subscribed to (Client > Quick Links > Groups in Gorelo web),\r\nascending. Names are on `GET /v1/organization/groups`. Empty when the client has none."
           }
         },
         "additionalProperties": false,
@@ -16510,6 +18483,37 @@
         },
         "additionalProperties": false,
         "description": "A coded value, such as a status, priority, type or source, as an id and a display name."
+      },
+      "CodeModelListBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodeModel"
+            },
+            "nullable": true
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "CommentAttachmentInput": {
         "type": "object",
@@ -16876,19 +18880,19 @@
           },
           "MobilePhone": {
             "type": "string",
-            "description": "Mobile phone number (without country code)."
+            "description": "Mobile phone number, as dialled within its country, e.g. 021 123 4567 for NZ."
           },
           "MobilePhoneCountryCode": {
             "type": "string",
-            "description": "Mobile phone country calling code (e.g. +1)."
+            "description": "Mobile phone ISO 3166-1 alpha-2 region code (e.g. US)."
           },
           "OfficePhone": {
             "type": "string",
-            "description": "Office phone number (without country code)."
+            "description": "Office phone number, as dialled within its country, e.g. 021 123 4567 for NZ."
           },
           "OfficePhoneCountryCode": {
             "type": "string",
-            "description": "Office phone country calling code (e.g. +1)."
+            "description": "Office phone ISO 3166-1 alpha-2 region code (e.g. US)."
           },
           "JobTitle": {
             "type": "string",
@@ -17740,7 +19744,7 @@
           "Body": {
             "minLength": 1,
             "type": "string",
-            "description": "Comment body as HTML. Mentions go inside the HTML."
+            "description": "Comment body as HTML. Mentions go inside the HTML. A literal < or > in the text must be sent as\r\n`&lt;` / `&gt;`."
           },
           "CreatedByName": {
             "type": "string",
@@ -17849,19 +19853,19 @@
           },
           "MobilePhone": {
             "type": "string",
-            "description": "Mobile phone number (without country code). Maximum 20 characters."
+            "description": "Mobile phone number, as dialled within its country, e.g. 021 123 4567 for NZ; an international +64 21 123 4567 is accepted too. A number sent without its leading 0 (21 123 4567) is stored with it. Maximum 20 characters."
           },
           "MobilePhoneCountryCode": {
             "type": "string",
-            "description": "Mobile phone country calling code (e.g. +1). Maximum 100 characters."
+            "description": "Mobile phone ISO 3166-1 alpha-2 region code (e.g. US). Maximum 100 characters."
           },
           "OfficePhone": {
             "type": "string",
-            "description": "Office phone number (without country code). Maximum 20 characters."
+            "description": "Office phone number, as dialled within its country, e.g. 021 123 4567 for NZ; an international +64 21 123 4567 is accepted too. A number sent without its leading 0 (21 123 4567) is stored with it. Maximum 20 characters."
           },
           "OfficePhoneCountryCode": {
             "type": "string",
-            "description": "Office phone country calling code (e.g. +1). Maximum 25 characters."
+            "description": "Office phone ISO 3166-1 alpha-2 region code (e.g. US). Maximum 25 characters."
           },
           "JobTitle": {
             "type": "string",
@@ -17929,17 +19933,43 @@
             "nullable": true,
             "example": "2027-03-31"
           },
-          "IpAddress": {
+          "LocalIPAddress": {
             "type": "string",
-            "description": "IPv4 address of the asset, such as 192.168.1.20. Optional.",
+            "description": "IPv4 address of the asset, such as 192.168.1.20. Optional. The same name an agent asset publishes.",
             "nullable": true,
             "example": "192.168.1.20"
+          },
+          "IpAddress": {
+            "type": "string",
+            "description": "IPv4 address of the asset. Optional. <b>Deprecated:</b> use `LocalIPAddress`. Still accepted;\r\nsending both with different values is a 400.",
+            "nullable": true,
+            "example": "192.168.1.20",
+            "deprecated": true
           },
           "SerialNumber": {
             "type": "string",
             "description": "Hardware serial number. Optional, max 250 characters.",
             "nullable": true,
             "example": "CNB1K23456"
+          },
+          "WarrantyStartDate": {
+            "type": "string",
+            "description": "Date the warranty starts, a calendar date in the form yyyy-MM-dd. A value with a time or a time zone is rejected. Optional. Not shown in the Gorelo app.",
+            "format": "date",
+            "nullable": true,
+            "example": "2024-03-31"
+          },
+          "Manufacturer": {
+            "type": "string",
+            "description": "Manufacturer. Optional, max 300 characters. Not shown in the Gorelo app.",
+            "nullable": true,
+            "example": "Ubiquiti"
+          },
+          "Model": {
+            "type": "string",
+            "description": "Model. Optional, max 300 characters. Not shown in the Gorelo app.",
+            "nullable": true,
+            "example": "UniFi Dream Machine Pro"
           }
         },
         "additionalProperties": false,
@@ -19215,7 +21245,7 @@
           },
           "ContactId": {
             "type": "integer",
-            "description": "Identifier of the primary contact for the ticket. With a ClientId it must be a contact of\r\nthat client; without one it must be a temporary contact (IsTemporaryContact true).",
+            "description": "Identifier of the primary contact for the ticket. With a ClientId it may be a contact of any\r\nclient; without one it must be a temporary contact (IsTemporaryContact true).",
             "format": "int64",
             "nullable": true
           },
@@ -19225,7 +21255,7 @@
               "type": "integer",
               "format": "int64"
             },
-            "description": "Identifiers of additional (CC) contacts. At most 100. Same rule as ContactId: contacts of\r\nthe ticket's client, or temporary contacts when the ticket has no client.",
+            "description": "Identifiers of additional (CC) contacts. At most 100. Same rule as ContactId: contacts of\r\nany client, or temporary contacts when the ticket has no client.",
             "nullable": true
           },
           "StatusId": {
@@ -19242,7 +21272,7 @@
           },
           "Description": {
             "type": "string",
-            "description": "Free-text ticket description / body.",
+            "description": "Ticket description / body, as HTML. Text without markup is wrapped in a paragraph. A literal < or >\r\nin the text must be sent as `&lt;` / `&gt;`.",
             "nullable": true
           },
           "PriorityId": {
@@ -19506,7 +21536,7 @@
         },
         "additionalProperties": false
       },
-      "CreateUptimeCheckCommand": {
+      "CreateUptimeCommand": {
         "type": "object",
         "properties": {
           "TypeId": {
@@ -19576,7 +21606,7 @@
         "additionalProperties": false,
         "description": "Request body for creating an uptime check. The owning service provider is resolved from the\r\nrequest context, not from the body."
       },
-      "CreateUptimeCheckResult": {
+      "CreateUptimeResult": {
         "type": "object",
         "properties": {
           "Id": {
@@ -19587,7 +21617,7 @@
         "additionalProperties": false,
         "description": "The identifier of the created uptime check."
       },
-      "CreateUptimeCheckResultBaseResponse": {
+      "CreateUptimeResultBaseResponse": {
         "type": "object",
         "properties": {
           "StatusCode": {
@@ -19597,7 +21627,7 @@
             "type": "boolean"
           },
           "Data": {
-            "$ref": "#/components/schemas/CreateUptimeCheckResult"
+            "$ref": "#/components/schemas/CreateUptimeResult"
           },
           "DataContext": {
             "type": "object",
@@ -19624,7 +21654,11 @@
           },
           "Name": {
             "type": "string",
-            "description": "Asset display name."
+            "description": "Asset name."
+          },
+          "DisplayName": {
+            "type": "string",
+            "description": "Display name. Read-only and always equal to `Name`, so a caller can read it the same way as an agent asset's."
           },
           "ClientId": {
             "type": "integer",
@@ -19656,19 +21690,25 @@
           },
           "Banner": {
             "type": "string",
-            "description": "Banner / label text."
+            "description": "Banner / label text. Null when the asset has none.",
+            "nullable": true
+          },
+          "Type": {
+            "$ref": "#/components/schemas/CodeModel"
           },
           "HardwareType": {
             "type": "string",
-            "description": "Hardware type name. Null when the type no longer exists.",
+            "description": "Hardware type name. Null when the type no longer exists. <b>Deprecated:</b> use `Type.Name`.",
             "nullable": true,
-            "example": "Printer"
+            "example": "Printer",
+            "deprecated": true
           },
           "HardwareTypeId": {
             "type": "integer",
-            "description": "Identifier of the hardware type: the value `POST`/`PATCH /v1/assets/custom` take as\r\n`HardwareTypeId`. `GET /v1/assets/custom/hardware-types` lists the ids a write accepts.",
+            "description": "Identifier of the hardware type: the value `POST`/`PATCH /v1/assets/custom` take as\r\n`HardwareTypeId`. <b>Deprecated:</b> use `Type.Id`, which has the same value.",
             "format": "int64",
-            "example": 118
+            "example": 118,
+            "deprecated": true
           },
           "ContactId": {
             "type": "integer",
@@ -19688,10 +21728,34 @@
             "format": "date",
             "nullable": true
           },
+          "WarrantyStartDate": {
+            "type": "string",
+            "description": "Date the warranty starts, a calendar date (yyyy-MM-dd). Null when not set. Set through the\r\nAPI; not shown in the Gorelo app.",
+            "format": "date",
+            "nullable": true
+          },
+          "Manufacturer": {
+            "type": "string",
+            "description": "Manufacturer. Null when not set. Set through the API; not shown in the Gorelo app.",
+            "nullable": true
+          },
+          "Model": {
+            "type": "string",
+            "description": "Model. Null when not set. Set through the API; not shown in the Gorelo app.",
+            "nullable": true
+          },
+          "LocalIPAddress": {
+            "type": "string",
+            "description": "IP address. Null when the asset has none. The same name and value as an agent asset's `LocalIPAddress`.",
+            "nullable": true,
+            "example": "192.168.1.20"
+          },
           "IpAddress": {
             "type": "string",
-            "description": "IP address. Null when the asset has none.",
-            "nullable": true
+            "description": "IP address. Null when the asset has none. <b>Deprecated:</b> use `LocalIPAddress`, which has the same value.",
+            "nullable": true,
+            "example": "192.168.1.20",
+            "deprecated": true
           }
         },
         "additionalProperties": false,
@@ -20469,7 +22533,7 @@
         },
         "additionalProperties": false
       },
-      "DeleteUptimeCheckResult": {
+      "DeleteUptimeResult": {
         "type": "object",
         "properties": {
           "Id": {
@@ -20479,7 +22543,7 @@
         },
         "additionalProperties": false
       },
-      "DeleteUptimeCheckResultBaseResponse": {
+      "DeleteUptimeResultBaseResponse": {
         "type": "object",
         "properties": {
           "StatusCode": {
@@ -20489,7 +22553,7 @@
             "type": "boolean"
           },
           "Data": {
-            "$ref": "#/components/schemas/DeleteUptimeCheckResult"
+            "$ref": "#/components/schemas/DeleteUptimeResult"
           },
           "DataContext": {
             "type": "object",
@@ -20544,410 +22608,6 @@
           },
           "DataContext": {
             "$ref": "#/components/schemas/PaginationDataContext"
-          },
-          "Notifications": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        },
-        "additionalProperties": false
-      },
-      "DeviceListItemResponse": {
-        "type": "object",
-        "properties": {
-          "Id": {
-            "type": "string",
-            "description": "Device identifier.",
-            "format": "uuid"
-          },
-          "Name": {
-            "type": "string",
-            "description": "Device name."
-          },
-          "Status": {
-            "$ref": "#/components/schemas/CodeModel"
-          },
-          "ClientId": {
-            "type": "integer",
-            "description": "Identifier of the client the device belongs to.",
-            "format": "int64",
-            "nullable": true
-          },
-          "LocationId": {
-            "type": "integer",
-            "description": "Identifier of the client location the device belongs to.",
-            "format": "int64",
-            "nullable": true
-          },
-          "CreatedOn": {
-            "type": "string",
-            "description": "Creation timestamp (UTC). Default sort key (ascending) for the agents list endpoint.",
-            "format": "date-time"
-          },
-          "UpdatedOn": {
-            "type": "string",
-            "description": "Last-updated timestamp (UTC).",
-            "format": "date-time",
-            "nullable": true
-          },
-          "DisplayName": {
-            "type": "string",
-            "description": "Friendly display name."
-          },
-          "Description": {
-            "type": "string",
-            "description": "Free-text description."
-          },
-          "TimeZone": {
-            "type": "string",
-            "description": "IANA time zone identifier for the device."
-          },
-          "LastBootUpTime": {
-            "type": "string",
-            "description": "Last boot-up time (UTC).",
-            "format": "date-time",
-            "nullable": true
-          },
-          "LastDisconnectDateTime": {
-            "type": "string",
-            "description": "Last disconnect time (UTC).",
-            "format": "date-time",
-            "nullable": true
-          },
-          "LastLoggedOnUser": {
-            "type": "string",
-            "description": "Last logged-on user (display name)."
-          },
-          "LastLoggedOnUserUpn": {
-            "type": "string",
-            "description": "Last logged-on user principal name (UPN)."
-          },
-          "LastLoggedOnUserDatetime": {
-            "type": "string",
-            "description": "Timestamp of the last user logon (UTC).",
-            "format": "date-time",
-            "nullable": true
-          },
-          "Os": {
-            "type": "string",
-            "description": "Operating system (full string)."
-          },
-          "OsType": {
-            "type": "string",
-            "description": "Operating system type."
-          },
-          "OsName": {
-            "type": "string",
-            "description": "Operating system name."
-          },
-          "OsVersion": {
-            "type": "string",
-            "description": "Operating system version."
-          },
-          "OsArchitecture": {
-            "type": "string",
-            "description": "Operating system architecture."
-          },
-          "HardwareArchitecture": {
-            "type": "string",
-            "description": "Hardware architecture."
-          },
-          "HardwareType": {
-            "type": "string",
-            "description": "Hardware type."
-          },
-          "Manufacturer": {
-            "type": "string",
-            "description": "Hardware manufacturer."
-          },
-          "Model": {
-            "type": "string",
-            "description": "Hardware model."
-          },
-          "SerialNo": {
-            "type": "string",
-            "description": "Hardware serial number."
-          },
-          "WarrantyStartDate": {
-            "type": "string",
-            "description": "Warranty start date (UTC). Sourced from the device's warranty record.",
-            "format": "date-time",
-            "nullable": true
-          },
-          "WarrantyEndDate": {
-            "type": "string",
-            "description": "Warranty end date (UTC). Sourced from the device's warranty record.",
-            "format": "date-time",
-            "nullable": true
-          },
-          "Cpu": {
-            "type": "string",
-            "description": "CPU description."
-          },
-          "Memory": {
-            "type": "string",
-            "description": "Total memory."
-          },
-          "Disk": {
-            "type": "string",
-            "description": "Disk description."
-          },
-          "LocalIPAddress": {
-            "type": "string",
-            "description": "Local IP address."
-          },
-          "PublicIPAddress": {
-            "type": "string",
-            "description": "Public IP address."
-          },
-          "Uuid": {
-            "type": "string",
-            "description": "Device UUID."
-          },
-          "ShellVersion": {
-            "type": "string",
-            "description": "Agent shell version."
-          },
-          "RmmVersion": {
-            "type": "string",
-            "description": "RMM agent version."
-          },
-          "InstallerVersion": {
-            "type": "string",
-            "description": "Installer version."
-          },
-          "SecurityPosture": {
-            "$ref": "#/components/schemas/SecurityPostureModel"
-          }
-        },
-        "additionalProperties": false,
-        "description": "An agent (managed device) asset as listed by `GET /v1/assets/agents`. Timestamps are UTC."
-      },
-      "DeviceListItemResponseListBaseResponse": {
-        "type": "object",
-        "properties": {
-          "StatusCode": {
-            "$ref": "#/components/schemas/HttpStatusCode"
-          },
-          "IsSuccess": {
-            "type": "boolean"
-          },
-          "Data": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/DeviceListItemResponse"
-            },
-            "nullable": true
-          },
-          "DataContext": {
-            "$ref": "#/components/schemas/PaginationDataContext"
-          },
-          "Notifications": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        },
-        "additionalProperties": false
-      },
-      "DeviceResponse": {
-        "type": "object",
-        "properties": {
-          "CustomProperties": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/CustomPropertyValue"
-            },
-            "description": "Every custom field the service provider has defined for devices, with its effective value\r\non this device (saved, else the field's default, else null) and `IsSet` saying whether\r\na value is saved. Empty only when no custom fields are defined."
-          },
-          "Id": {
-            "type": "string",
-            "description": "Device identifier.",
-            "format": "uuid"
-          },
-          "Name": {
-            "type": "string",
-            "description": "Device name."
-          },
-          "Status": {
-            "$ref": "#/components/schemas/CodeModel"
-          },
-          "ClientId": {
-            "type": "integer",
-            "description": "Identifier of the client the device belongs to.",
-            "format": "int64",
-            "nullable": true
-          },
-          "LocationId": {
-            "type": "integer",
-            "description": "Identifier of the client location the device belongs to.",
-            "format": "int64",
-            "nullable": true
-          },
-          "CreatedOn": {
-            "type": "string",
-            "description": "Creation timestamp (UTC). Default sort key (ascending) for the agents list endpoint.",
-            "format": "date-time"
-          },
-          "UpdatedOn": {
-            "type": "string",
-            "description": "Last-updated timestamp (UTC).",
-            "format": "date-time",
-            "nullable": true
-          },
-          "DisplayName": {
-            "type": "string",
-            "description": "Friendly display name."
-          },
-          "Description": {
-            "type": "string",
-            "description": "Free-text description."
-          },
-          "TimeZone": {
-            "type": "string",
-            "description": "IANA time zone identifier for the device."
-          },
-          "LastBootUpTime": {
-            "type": "string",
-            "description": "Last boot-up time (UTC).",
-            "format": "date-time",
-            "nullable": true
-          },
-          "LastDisconnectDateTime": {
-            "type": "string",
-            "description": "Last disconnect time (UTC).",
-            "format": "date-time",
-            "nullable": true
-          },
-          "LastLoggedOnUser": {
-            "type": "string",
-            "description": "Last logged-on user (display name)."
-          },
-          "LastLoggedOnUserUpn": {
-            "type": "string",
-            "description": "Last logged-on user principal name (UPN)."
-          },
-          "LastLoggedOnUserDatetime": {
-            "type": "string",
-            "description": "Timestamp of the last user logon (UTC).",
-            "format": "date-time",
-            "nullable": true
-          },
-          "Os": {
-            "type": "string",
-            "description": "Operating system (full string)."
-          },
-          "OsType": {
-            "type": "string",
-            "description": "Operating system type."
-          },
-          "OsName": {
-            "type": "string",
-            "description": "Operating system name."
-          },
-          "OsVersion": {
-            "type": "string",
-            "description": "Operating system version."
-          },
-          "OsArchitecture": {
-            "type": "string",
-            "description": "Operating system architecture."
-          },
-          "HardwareArchitecture": {
-            "type": "string",
-            "description": "Hardware architecture."
-          },
-          "HardwareType": {
-            "type": "string",
-            "description": "Hardware type."
-          },
-          "Manufacturer": {
-            "type": "string",
-            "description": "Hardware manufacturer."
-          },
-          "Model": {
-            "type": "string",
-            "description": "Hardware model."
-          },
-          "SerialNo": {
-            "type": "string",
-            "description": "Hardware serial number."
-          },
-          "WarrantyStartDate": {
-            "type": "string",
-            "description": "Warranty start date (UTC). Sourced from the device's warranty record.",
-            "format": "date-time",
-            "nullable": true
-          },
-          "WarrantyEndDate": {
-            "type": "string",
-            "description": "Warranty end date (UTC). Sourced from the device's warranty record.",
-            "format": "date-time",
-            "nullable": true
-          },
-          "Cpu": {
-            "type": "string",
-            "description": "CPU description."
-          },
-          "Memory": {
-            "type": "string",
-            "description": "Total memory."
-          },
-          "Disk": {
-            "type": "string",
-            "description": "Disk description."
-          },
-          "LocalIPAddress": {
-            "type": "string",
-            "description": "Local IP address."
-          },
-          "PublicIPAddress": {
-            "type": "string",
-            "description": "Public IP address."
-          },
-          "Uuid": {
-            "type": "string",
-            "description": "Device UUID."
-          },
-          "ShellVersion": {
-            "type": "string",
-            "description": "Agent shell version."
-          },
-          "RmmVersion": {
-            "type": "string",
-            "description": "RMM agent version."
-          },
-          "InstallerVersion": {
-            "type": "string",
-            "description": "Installer version."
-          },
-          "SecurityPosture": {
-            "$ref": "#/components/schemas/SecurityPostureModel"
-          }
-        },
-        "additionalProperties": false,
-        "description": "A single agent, as returned by `GET /v1/assets/agents/{deviceId}`: the list shape plus its\r\ncustom properties, which the list leaves out. Timestamps are UTC."
-      },
-      "DeviceResponseBaseResponse": {
-        "type": "object",
-        "properties": {
-          "StatusCode": {
-            "$ref": "#/components/schemas/HttpStatusCode"
-          },
-          "IsSuccess": {
-            "type": "boolean"
-          },
-          "Data": {
-            "$ref": "#/components/schemas/DeviceResponse"
-          },
-          "DataContext": {
-            "type": "object",
-            "additionalProperties": false,
-            "nullable": true,
-            "example": null
           },
           "Notifications": {
             "type": "array",
@@ -21085,13 +22745,13 @@
           },
           "UpdatedOn": {
             "type": "string",
-            "description": "When the document was last changed (UTC); null if it never has been.",
+            "description": "When the document was last changed (UTC); its creation time if it has not been changed since.",
             "format": "date-time",
             "nullable": true
           },
           "UpdatedById": {
             "type": "integer",
-            "description": "Technician who last changed the document; 0 when that change came through the API.",
+            "description": "Technician who last changed the document, or who created it if it has not been changed since; 0 when that came through the API.",
             "format": "int64",
             "nullable": true
           }
@@ -21202,13 +22862,13 @@
           },
           "UpdatedOn": {
             "type": "string",
-            "description": "When the document was last changed (UTC); null if it never has been.",
+            "description": "When the document was last changed (UTC); its creation time if it has not been changed since.",
             "format": "date-time",
             "nullable": true
           },
           "UpdatedById": {
             "type": "integer",
-            "description": "Technician who last changed the document; 0 when that change came through the API.",
+            "description": "Technician who last changed the document, or who created it if it has not been changed since; 0 when that came through the API.",
             "format": "int64",
             "nullable": true
           }
@@ -21254,7 +22914,7 @@
           },
           "ItemId": {
             "type": "string",
-            "description": "Identifier of the linked record, as text: a Guid for documents, custom assets and devices, a number for contacts."
+            "description": "Identifier of the linked record, as text: a Guid for documents, custom assets and agent assets, a number for contacts."
           },
           "ItemType": {
             "$ref": "#/components/schemas/CodeModel"
@@ -22873,6 +24533,24 @@
           "Description": {
             "type": "string",
             "description": "Free-text alert description."
+          },
+          "AgentAssetId": {
+            "type": "string",
+            "description": "The agent asset the alert is about - an id from `GET /v1/assets/agents`. Optional; at most\r\none of `AgentAssetId`, `CustomAssetId` and `UptimeId` may be sent. It must belong\r\nto `ClientId`. `Resource` stays free text.",
+            "format": "uuid",
+            "nullable": true
+          },
+          "CustomAssetId": {
+            "type": "string",
+            "description": "The custom asset the alert is about - an id from `GET /v1/assets/custom`. Optional; see\r\n`AgentAssetId`.",
+            "format": "uuid",
+            "nullable": true
+          },
+          "UptimeId": {
+            "type": "string",
+            "description": "The uptime the alert is about - an id from `GET /v1/uptime`. Optional; see\r\n`AgentAssetId`.",
+            "format": "uuid",
+            "nullable": true
           }
         },
         "additionalProperties": false,
@@ -23676,6 +25354,171 @@
             "additionalProperties": false,
             "nullable": true,
             "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ScriptDetailModel": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "string",
+            "description": "Script identifier.",
+            "format": "uuid"
+          },
+          "Title": {
+            "type": "string",
+            "description": "Script title.",
+            "example": "Clear Teams cache"
+          },
+          "Type": {
+            "$ref": "#/components/schemas/CodeModel"
+          },
+          "ParentScriptId": {
+            "type": "string",
+            "description": "The script this one sits under in the library's tree; `null` at the top level.",
+            "format": "uuid",
+            "nullable": true
+          },
+          "IsFavorite": {
+            "type": "boolean",
+            "description": "Whether the script is marked as a favorite. Shared across the service provider."
+          },
+          "Version": {
+            "type": "integer",
+            "description": "Version number; it goes up each time the script's content or settings are saved.",
+            "format": "int32",
+            "example": 4
+          },
+          "TimeoutSeconds": {
+            "type": "integer",
+            "description": "How long the script may run, in seconds; `null` means the product default.",
+            "format": "int32",
+            "nullable": true,
+            "example": 300
+          },
+          "RunAsUser": {
+            "type": "boolean",
+            "description": "Whether the script runs as the logged-on user rather than as the system."
+          },
+          "Content": {
+            "type": "string",
+            "description": "The script's content, as plain text.",
+            "example": "Stop-Process -Name ms-teams -Force"
+          },
+          "CreatedOn": {
+            "type": "string",
+            "description": "Creation timestamp (UTC).",
+            "format": "date-time"
+          },
+          "UpdatedOn": {
+            "type": "string",
+            "description": "Last-updated timestamp (UTC); `null` when never updated.",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "A script with its content and run settings. Timestamps are UTC."
+      },
+      "ScriptDetailModelBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "$ref": "#/components/schemas/ScriptDetailModel"
+          },
+          "DataContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "nullable": true,
+            "example": null
+          },
+          "Notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ScriptListItemModel": {
+        "type": "object",
+        "properties": {
+          "Id": {
+            "type": "string",
+            "description": "Script identifier.",
+            "format": "uuid"
+          },
+          "Title": {
+            "type": "string",
+            "description": "Script title.",
+            "example": "Clear Teams cache"
+          },
+          "Type": {
+            "$ref": "#/components/schemas/CodeModel"
+          },
+          "ParentScriptId": {
+            "type": "string",
+            "description": "The script this one sits under in the library's tree; `null` at the top level.",
+            "format": "uuid",
+            "nullable": true
+          },
+          "IsFavorite": {
+            "type": "boolean",
+            "description": "Whether the script is marked as a favorite. Shared across the service provider."
+          },
+          "Version": {
+            "type": "integer",
+            "description": "Version number; it goes up each time the script's content or settings are saved.",
+            "format": "int32",
+            "example": 4
+          },
+          "CreatedOn": {
+            "type": "string",
+            "description": "Creation timestamp (UTC).",
+            "format": "date-time"
+          },
+          "UpdatedOn": {
+            "type": "string",
+            "description": "Last-updated timestamp (UTC); `null` when never updated.",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "A script in the service provider's script library. Timestamps are UTC."
+      },
+      "ScriptListItemModelListBaseResponse": {
+        "type": "object",
+        "properties": {
+          "StatusCode": {
+            "$ref": "#/components/schemas/HttpStatusCode"
+          },
+          "IsSuccess": {
+            "type": "boolean"
+          },
+          "Data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScriptListItemModel"
+            },
+            "nullable": true
+          },
+          "DataContext": {
+            "$ref": "#/components/schemas/PaginationDataContext"
           },
           "Notifications": {
             "type": "array",
@@ -25760,12 +27603,12 @@
           },
           "BillingName": {
             "type": "string",
-            "description": "New billing name. Leave null to keep the current value. Maximum 150 characters.",
+            "description": "New billing name. Leave null or empty to keep the current value. Maximum 150 characters.",
             "nullable": true
           },
           "AlternateName": {
             "type": "string",
-            "description": "New alternate / trading name. Leave null to keep the current value. Maximum 500 characters.",
+            "description": "New alternate / trading name. Leave null to keep the current value; send an empty string to clear it. Maximum 500 characters.",
             "nullable": true
           },
           "CustomProperties": {
@@ -25774,6 +27617,15 @@
               "$ref": "#/components/schemas/CustomPropertyUpdate"
             },
             "description": "Custom field values to upsert. Identified by `Id`\r\n(the custom field id) only - an entry present updates that field's value, one absent from the array\r\nis left untouched, and omitting `CustomProperties` entirely leaves all custom properties\r\nuntouched. A `null``Value` clears the saved value so the field falls back to its\r\ndefault; an empty string saves an empty value. On a required field, either is rejected when it\r\nwould leave the field with no value. Each custom field id may appear once; a repeated id is a 400.",
+            "nullable": true
+          },
+          "GroupIds": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Group ids (from `GET /v1/organization/groups`) the client is subscribed to. Replaces the list;\r\n[] clears it; omit to leave unchanged. At most 100; every id must be an active group. Changing an\r\nexisting client's groups changes which technicians can see it, so open Gorelo web sessions reload.",
             "nullable": true
           }
         },
@@ -25808,7 +27660,7 @@
           },
           "LocationId": {
             "type": "integer",
-            "description": "Identifier of the client location the contact belongs to.",
+            "description": "Identifier of the client location the contact belongs to. Omit to keep the current location.",
             "format": "int64",
             "nullable": true
           },
@@ -25823,24 +27675,24 @@
             "items": {
               "type": "string"
             },
-            "description": "Additional (secondary) email addresses. Maximum 200 characters each.",
+            "description": "Additional (secondary) email addresses, replacing the current set. Omit to keep the current secondary\r\nemails; send an empty array to clear them. Maximum 200 characters each.",
             "nullable": true
           },
           "MobilePhone": {
             "type": "string",
-            "description": "Mobile phone number (without country code). Maximum 20 characters."
+            "description": "Mobile phone number, as dialled within its country, e.g. 021 123 4567 for NZ; an international +64 21 123 4567 is accepted too. A number sent without its leading 0 (21 123 4567) is stored with it. Maximum 20 characters."
           },
           "MobilePhoneCountryCode": {
             "type": "string",
-            "description": "Mobile phone country calling code (e.g. +1). Maximum 100 characters."
+            "description": "Mobile phone ISO 3166-1 alpha-2 region code (e.g. US). Maximum 100 characters."
           },
           "OfficePhone": {
             "type": "string",
-            "description": "Office phone number (without country code). Maximum 20 characters."
+            "description": "Office phone number, as dialled within its country, e.g. 021 123 4567 for NZ; an international +64 21 123 4567 is accepted too. A number sent without its leading 0 (21 123 4567) is stored with it. Maximum 20 characters."
           },
           "OfficePhoneCountryCode": {
             "type": "string",
-            "description": "Office phone country calling code (e.g. +1). Maximum 25 characters."
+            "description": "Office phone ISO 3166-1 alpha-2 region code (e.g. US). Maximum 25 characters."
           },
           "JobTitle": {
             "type": "string",
@@ -25860,7 +27712,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "Request body for updating an existing contact. `ContactId`, bound from the route,\r\nidentifies the contact."
+        "description": "Request body for updating an existing contact. `ContactId`, bound from the route,\r\nidentifies the contact. MobilePhone, MobilePhoneCountryCode, OfficePhone, OfficePhoneCountryCode,\r\nJobTitle, Department, TimeZone and Description are replaced as sent: a field left out is cleared.\r\nLocationId and SecondaryEmail left out keep their current values."
       },
       "UpdateCustomAssetCommand": {
         "type": "object",
@@ -25912,17 +27764,43 @@
             "nullable": true,
             "example": "2027-03-31"
           },
-          "IpAddress": {
+          "LocalIPAddress": {
             "type": "string",
-            "description": "IPv4 address of the asset, such as 192.168.1.20. Send null to clear it.",
+            "description": "IPv4 address of the asset, such as 192.168.1.20. Send null to clear it. The same name an agent asset publishes.",
             "nullable": true,
             "example": "192.168.1.20"
+          },
+          "IpAddress": {
+            "type": "string",
+            "description": "IPv4 address of the asset. Send null to clear it. <b>Deprecated:</b> use `LocalIPAddress`.\r\nStill accepted; sending both with different values is a 400.",
+            "nullable": true,
+            "example": "192.168.1.20",
+            "deprecated": true
           },
           "SerialNumber": {
             "type": "string",
             "description": "Hardware serial number, max 250 characters. Send null to clear it.",
             "nullable": true,
             "example": "CNB1K23456"
+          },
+          "WarrantyStartDate": {
+            "type": "string",
+            "description": "Date the warranty starts, a calendar date in the form yyyy-MM-dd. A value with a time or a time zone is rejected. Send null to clear it.",
+            "format": "date",
+            "nullable": true,
+            "example": "2024-03-31"
+          },
+          "Manufacturer": {
+            "type": "string",
+            "description": "Manufacturer, max 300 characters. Send null to clear it.",
+            "nullable": true,
+            "example": "Ubiquiti"
+          },
+          "Model": {
+            "type": "string",
+            "description": "Model, max 300 characters. Send null to clear it.",
+            "nullable": true,
+            "example": "UniFi Dream Machine Pro"
           }
         },
         "additionalProperties": false,
@@ -26001,7 +27879,7 @@
           },
           "StatusId": {
             "type": "integer",
-            "description": "2 archives the document and the documents directly under it; 1 restores an archived\r\ndocument to the top level.",
+            "description": "2 archives the document and every document below it, at any depth; 1 restores an archived\r\ndocument to the top level, and the documents below it stay archived.",
             "format": "int64",
             "nullable": true
           },
@@ -26624,7 +28502,7 @@
           },
           "ContactId": {
             "type": "integer",
-            "description": "Primary contact on the ticket. Must be a contact of the ticket's client (the ClientId sent,\r\notherwise the one the ticket has); a ticket with no client takes a temporary contact\r\n(IsTemporaryContact true).",
+            "description": "Primary contact on the ticket. A ticket with a client (the ClientId sent, otherwise the one\r\nthe ticket has) takes a contact of any client; a ticket with no client takes a temporary\r\ncontact (IsTemporaryContact true).",
             "format": "int64",
             "nullable": true
           },
@@ -26634,7 +28512,7 @@
               "type": "integer",
               "format": "int64"
             },
-            "description": "Cc contacts on the ticket. At most 100. Same rule as ContactId: contacts of the ticket's\r\nclient, or temporary contacts when the ticket has no client.",
+            "description": "Cc contacts on the ticket. At most 100. Same rule as ContactId: contacts of any client, or\r\ntemporary contacts when the ticket has no client. Replaces the list; [] clears\r\nit; omit to leave unchanged.",
             "nullable": true
           },
           "StatusId": {
@@ -26649,7 +28527,7 @@
               "type": "integer",
               "format": "int64"
             },
-            "description": "Technician groups subscribed to the ticket.",
+            "description": "Technician groups subscribed to the ticket. Replaces the list; [] clears it; omit to leave unchanged.",
             "nullable": true
           },
           "PriorityId": {
@@ -26663,7 +28541,7 @@
           },
           "LeadAssigneeId": {
             "type": "integer",
-            "description": "Lead assignee technician id.",
+            "description": "Lead assignee technician id. Send 0 to unassign; omit to leave unchanged.",
             "format": "int64",
             "nullable": true
           },
@@ -26673,7 +28551,7 @@
               "type": "integer",
               "format": "int64"
             },
-            "description": "Assisting assignee technician ids.",
+            "description": "Assisting assignee technician ids. Replaces the list; [] clears it; omit to leave unchanged.",
             "nullable": true
           },
           "WatcherIds": {
@@ -26682,7 +28560,7 @@
               "type": "integer",
               "format": "int64"
             },
-            "description": "Watcher technician ids.",
+            "description": "Watcher technician ids. Replaces the list; [] clears it; omit to leave unchanged.",
             "nullable": true
           },
           "TagIds": {
@@ -26691,7 +28569,7 @@
               "type": "integer",
               "format": "int64"
             },
-            "description": "Tag ids on the ticket.",
+            "description": "Tag ids on the ticket. Replaces the list; [] clears it; omit to leave unchanged.",
             "nullable": true
           },
           "AgentAssetIds": {
@@ -26843,7 +28721,7 @@
         "additionalProperties": false,
         "description": "Partial update of a time entry. Every field is optional and only the fields present in the body\r\nare applied; a field left out keeps its current value. The ticket an entry is logged against and\r\nits attachments cannot be changed here, so neither is a member: a body carrying either is\r\nrejected as malformed, the same way every other endpoint treats a field it does not know."
       },
-      "UpdateUptimeCheckCommand": {
+      "UpdateUptimeCommand": {
         "type": "object",
         "properties": {
           "TypeId": {
@@ -26916,7 +28794,7 @@
         "additionalProperties": false,
         "description": "Request body for updating an uptime check. Every field is optional - send only what should\r\nchange. An omitted field keeps the value the check already holds."
       },
-      "UpdateUptimeCheckResult": {
+      "UpdateUptimeResult": {
         "type": "object",
         "properties": {
           "Id": {
@@ -26927,7 +28805,7 @@
         "additionalProperties": false,
         "description": "The identifier of the updated uptime check."
       },
-      "UpdateUptimeCheckResultBaseResponse": {
+      "UpdateUptimeResultBaseResponse": {
         "type": "object",
         "properties": {
           "StatusCode": {
@@ -26937,7 +28815,7 @@
             "type": "boolean"
           },
           "Data": {
-            "$ref": "#/components/schemas/UpdateUptimeCheckResult"
+            "$ref": "#/components/schemas/UpdateUptimeResult"
           },
           "DataContext": {
             "type": "object",
@@ -26963,19 +28841,19 @@
           },
           "StartDateTime": {
             "type": "string",
-            "description": "When the maintenance window starts (UTC).",
+            "description": "When the maintenance window starts (UTC). Null when Enabled is false. On update,\r\nrequired when Enabled is true; omit it when Enabled is false.",
             "format": "date-time",
             "nullable": true
           },
           "DurationInMinutes": {
             "type": "integer",
-            "description": "How long the window lasts, in minutes. Zero means the window does not expire on its own.",
+            "description": "How long the window lasts, in minutes. Zero means the window does not expire on its own.\r\nNull when Enabled is false. On update, required when Enabled is true; omit it when Enabled is false.",
             "format": "int32",
             "nullable": true
           },
           "Reason": {
             "type": "string",
-            "description": "Why the check was put into maintenance. Max 500 characters.",
+            "description": "Why the check was put into maintenance. Max 500 characters. Null when Enabled is\r\nfalse. On update, required when Enabled is true; omit it when Enabled is false.",
             "nullable": true
           }
         },

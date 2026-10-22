@@ -90,8 +90,15 @@ class ReadFake:
         on("/v1/contacts/{contactId}", lambda q: envelope(row(int(last(q, 3)))))
         on("/v1/organization/groups", Items([row(7201)]))
         on("/v1/organization/users", Pages([row(9700), row(9202)]))
-        on("/v1/assets/agents", Pages([row(uid(31))]))
-        on("/v1/assets/agents/{deviceId}", self.get_agent)
+        on("/v1/assets/agents", Pages([row(uid(31), Os="macOS 15.1"), row(uid(36), Os="Microsoft Windows 11 Pro")]))
+        on("/v1/assets/agents/{agentAssetId}", self.get_agent)
+        for leaf in ("apps", "patches", "patches/available"):
+            on("/v1/assets/agents/{agentAssetId}/" + leaf, lambda q: envelope({"LastScannedOn": None, "Items": [row(1)]}))
+        on("/v1/assets/agents/{agentAssetId}/hardware", lambda q: envelope({"LastScannedOn": None, "Processors": [], "Disks": []}))
+        on("/v1/assets/agents/{agentAssetId}/tags", Items([row(5)]))
+        on("/v1/assets/types", Items([row(3)]))
+        on("/v1/scripts", Pages([row(uid(34))]))
+        on("/v1/scripts/{scriptId}", lambda q: envelope(row(last(q, 3), Content=SECRET)))
         on("/v1/assets/custom", Pages([row(uid(32))]))
         on("/v1/assets/custom/hardware-types", Items([row(42)]))
         on("/v1/assets/custom/{customAssetId}", lambda q: envelope(row(last(q, 4))))
@@ -128,7 +135,7 @@ class ReadFake:
         on("/v1/items/categories", Items([row(71)]))
         on("/v1/taxes", Items([row(81)]))
         on("/v1/uptime", Pages([row(uid(43))]))
-        on("/v1/uptime/{checkId}", lambda q: envelope(row(last(q, 3))))
+        on("/v1/uptime/{uptimeId}", lambda q: envelope(row(last(q, 3))))
         on("/v1/projects", Pages([row(PROJECT_ID)]), scope="Project")
         on("/v1/projects/{projectId}", lambda q: envelope(row(last(q, 3))), scope="Project")
         on("/v1/projects/tags", Items([row(uid(51))]), scope="Project")
@@ -246,7 +253,7 @@ def outcomes(report) -> dict[str, smoke.Row]:
 
 def test_the_plan_covers_exactly_the_registered_read_tools_once_get_ticket_three_times_and_get_client_twice():
     reads = smoke.read_tools()
-    assert len(reads) == 60 and "export_invoice_pdf" not in reads
+    assert len(reads) == 68 and "export_invoice_pdf" not in reads
     assert {"list_alerts", "get_invoice", "get_custom_asset", "list_deletions", "export_document_pdf"} <= set(reads)
     assert {name for name, toolset in reads.items() if toolset == "documents"} == {
         "list_documents", "get_document", "export_document_pdf", "list_document_versions", "get_document_version",
@@ -257,7 +264,7 @@ def test_the_plan_covers_exactly_the_registered_read_tools_once_get_ticket_three
     tools = [case.tool for case in smoke.CASES]
     assert {name: count for name, count in collections.Counter(tools).items() if count > 1} == {"get_ticket": 3, "get_client": 2}
     labels = [case.row for case in smoke.CASES]
-    assert len(labels) == len(set(labels)) == 63
+    assert len(labels) == len(set(labels)) == 71
     assert [case.row for case in smoke.CASES if case.tool == "get_ticket"] == [
         "get_ticket (guid)", "get_ticket (number)", "get_ticket (display number)",
     ]
@@ -284,15 +291,15 @@ async def test_a_full_run_calls_every_read_tool_once_sends_only_gets_and_passes(
     fake = ReadFake()
     report = await run(fake)
     assert report.ok, "\n".join(lines)
-    assert len(report.rows) == 63 and all(r.outcome == smoke.OK for r in report.rows), [
+    assert len(report.rows) == 71 and all(r.outcome == smoke.OK for r in report.rows), [
         (r.label, r.outcome, r.note) for r in report.rows if r.outcome != smoke.OK
     ]
     assert {r.method for r in fake.mock.requests} == {"GET"}
-    # 60 calls with HTTP (two local tables make none) plus the search behind get_ticket by number and by display number, and
+    # 68 calls with HTTP (two local tables make none) plus the search behind get_ticket by number and by display number, and
     # the second get_client (the test client)
-    assert report.requests == len(fake.mock.requests) == 63 and report.refused == 0
-    assert report.counts() == {smoke.OK: 63, smoke.SCOPE_MISSING: 0, smoke.SKIPPED: 0, smoke.FAILED: 0}
-    assert lines[-1] == "result: PASSED" and "63 checks: 63 ok, 0 scope missing, 0 skipped, 0 FAILED; 63 requests sent" in lines[-2]
+    assert report.requests == len(fake.mock.requests) == 71 and report.refused == 0
+    assert report.counts() == {smoke.OK: 71, smoke.SCOPE_MISSING: 0, smoke.SKIPPED: 0, smoke.FAILED: 0}
+    assert lines[-1] == "result: PASSED" and "71 checks: 71 ok, 0 scope missing, 0 skipped, 0 FAILED; 71 requests sent" in lines[-2]
     assert not fake.mock.unmatched
 
 
@@ -308,8 +315,8 @@ async def test_the_rows_are_printed_as_they_complete_and_make_up_the_rendered_ta
     }
     assert by_start["tool"] == 0  # the header is out before the first request
     assert by_start["health_check"] == 1 and by_start["list_clients"] == 2  # each row appears when its call is done
-    assert by_start["list_form_responses"] == 57  # the forms are not the last any more: 6 document requests follow
-    assert by_start["list_document_related_items"] == 63  # the last row only after the last request
+    assert by_start["list_form_responses"] == 65  # the forms are not the last any more: 6 document requests follow
+    assert by_start["list_document_related_items"] == 71  # the last row only after the last request
 
 
 async def test_get_ticket_is_called_with_the_guid_the_number_and_the_display_number_of_a_listed_ticket(run):
@@ -333,7 +340,7 @@ async def test_ids_are_discovered_from_the_lists_and_used_by_the_gets(run):
     sent = {r.path for r in fake.mock.requests}
     for path in (
         f"/v1/clients/{CLIENT_ID}", f"/v1/clients/{CLIENT_ID}/locations", f"/v1/clients/{TEST_CLIENT_ID}", "/v1/contacts/201",
-        f"/v1/assets/agents/{uid(31)}",
+        f"/v1/assets/agents/{uid(31)}", f"/v1/assets/agents/{uid(36)}/patches/available",
         f"/v1/tickets/{TICKET_COMMENTED}/comments/{COMMENT_ID}", f"/v1/tickets/{TICKET_COMMENTED}/approvals/{APPROVAL_ID}",
         "/v1/time-entries/5001", "/v1/contracts/61", f"/v1/invoices/{uid(41)}", f"/v1/items/{uid(42)}", f"/v1/uptime/{uid(43)}",
         f"/v1/projects/{PROJECT_ID}", f"/v1/projects/{PROJECT_ID}/tasks/{TASK_ID}",
@@ -473,7 +480,7 @@ async def test_a_list_row_that_carries_custom_properties_is_a_note_never_a_failu
         "count=2 total_count=2; note: 2 of 2 rows carry CustomProperties, which the spec leaves out of the list rows"
     )
     assert found["list_agents"].note == (
-        "count=1 total_count=1; note: 1 of 1 rows carry CustomProperties, which the spec leaves out of the list rows"
+        "count=2 total_count=2; note: 2 of 2 rows carry CustomProperties, which the spec leaves out of the list rows"
     )
     assert found["list_contacts"].note == "count=2 total_count=5 (more pages)"  # a list that never had the key is untouched
 
@@ -482,7 +489,7 @@ async def test_list_rows_without_custom_properties_keep_their_plain_notes(run):
     report = await run(ReadFake())
     found = outcomes(report)
     assert found["list_clients"].note == "count=2 total_count=2"
-    assert found["list_agents"].note == "count=1 total_count=1"
+    assert found["list_agents"].note == "count=2 total_count=2"
 
 
 def test_the_shape_check_returns_the_fields_and_names_the_first_problem():
@@ -758,8 +765,8 @@ async def test_the_requests_are_paced_one_second_apart(run, monkeypatch):
     monkeypatch.setattr(smoke, "Pacer", lambda interval: _env.Pacer(interval, clock=time.clock, sleep=time.sleep))
     assert smoke.PACE_SECONDS == 1.0
     report = await run(ReadFake(), pace=smoke.PACE_SECONDS)
-    assert report.ok and report.requests == 63
-    assert time.sleeps == [1.0] * 62  # one second between two requests, none before the first
+    assert report.ok and report.requests == 71
+    assert time.sleeps == [1.0] * 70  # one second between two requests, none before the first
 
 
 # --------------------------------------------------------------------------
@@ -1134,7 +1141,7 @@ async def test_an_active_test_client_gets_an_ok_row_before_the_cases(run, lines)
     assert report.test_client.outcome == smoke.OK and report.test_client.note == "Active (status 1): the write matrix may start"
     assert lines[1].startswith("tool") and lines[2].startswith("test client status") and lines[3].startswith("health_check")
     assert report.render()[:2] == lines[1:3] and "write matrix: BLOCKED" not in "\n".join(lines)
-    assert len(report.rows) == 63  # the status row is not one of the cases: counts and the summary line keep their shape
+    assert len(report.rows) == 71  # the status row is not one of the cases: counts and the summary line keep their shape
 
 
 # --------------------------------------------------------------------------
@@ -1231,3 +1238,38 @@ def test_the_probes_script_refuses_to_run_before_any_request_or_read(monkeypatch
         "probes_20261001.py is a historical record of the 2026-10-01 probes and does not run any more; "
         "use scripts/live/smoke.py or scripts/live/write_matrix.py\n"
     )
+
+
+async def test_the_available_updates_read_uses_the_first_windows_agent_and_never_the_macos_one(run):
+    fake = ReadFake()
+    report = await run(fake)
+    assert outcomes(report)["list_agent_available_updates"].outcome == smoke.OK
+    paths = {r.path for r in fake.mock.requests}
+    assert f"/v1/assets/agents/{uid(31)}/patches" in paths  # the other per-agent reads use the first listed agent
+    assert f"/v1/assets/agents/{uid(31)}/patches/available" not in paths
+
+
+async def test_without_a_windows_agent_the_available_updates_row_is_skipped_with_a_reason(run):
+    fake = ReadFake()
+    fake.list_row_extra["/v1/assets/agents"] = {"Os": "macOS 15.1"}
+    report = await run(fake)
+    found = outcomes(report)
+    assert report.ok
+    assert found["list_agent_available_updates"].outcome == smoke.SKIPPED
+    assert found["list_agent_available_updates"].note.startswith("needs a Windows agent: no list_agents row reports Windows")
+    assert not any(r.path.endswith("/patches/available") for r in fake.mock.requests)
+
+
+async def test_a_400_naming_deviceid_on_the_available_updates_read_is_skipped_not_failed(run):
+    template = "/v1/assets/agents/{agentAssetId}/patches/available"
+    fake = ReadFake(fail={template: error_envelope(400, [("070400", "DeviceId: the agent is not a Windows device")])})
+    report = await run(fake)
+    row_ = outcomes(report)["list_agent_available_updates"]
+    assert report.ok and row_.outcome == smoke.SKIPPED and "naming DeviceId" in row_.note
+
+
+async def test_another_400_on_the_available_updates_read_still_fails(run):
+    template = "/v1/assets/agents/{agentAssetId}/patches/available"
+    fake = ReadFake(fail={template: error_envelope(400, [("070400", "something else is wrong")])})
+    report = await run(fake)
+    assert not report.ok and outcomes(report)["list_agent_available_updates"].outcome == smoke.FAILED

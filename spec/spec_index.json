@@ -1,6 +1,6 @@
 {
- "contract_sha256": "a7954b24844b94cdd6f1a4227b99dd15bb962a0de2a60cbd81f477368fb0269c",
- "op_count": 117,
+ "contract_sha256": "05200951c89e15f3b04b987f83d39a577717813df39a64098d0c99de466b9157",
+ "op_count": 125,
  "openapi": "3.0.4",
  "ops": {
   "DELETE /v1/api-keys/{apiKeyId}": {
@@ -29,15 +29,15 @@
     "500"
    ]
   },
-  "DELETE /v1/assets/agents/{deviceId}": {
+  "DELETE /v1/assets/agents/{agentAssetId}": {
    "body": null,
    "method": "DELETE",
-   "operation_id": "delete_v1_assets_agents_deviceId",
+   "operation_id": "delete_v1_assets_agents_agentAssetId",
    "page_size_rule": null,
    "paged": false,
-   "path": "/v1/assets/agents/{deviceId}",
+   "path": "/v1/assets/agents/{agentAssetId}",
    "path_params": {
-    "deviceId": {
+    "agentAssetId": {
      "format": "uuid",
      "type": "string"
     }
@@ -515,24 +515,24 @@
     "500"
    ]
   },
-  "DELETE /v1/uptime/{checkId}": {
+  "DELETE /v1/uptime/{uptimeId}": {
    "body": null,
    "method": "DELETE",
-   "operation_id": "delete_v1_uptime_checkId",
+   "operation_id": "delete_v1_uptime_uptimeId",
    "page_size_rule": null,
    "paged": false,
-   "path": "/v1/uptime/{checkId}",
+   "path": "/v1/uptime/{uptimeId}",
    "path_params": {
-    "checkId": {
+    "uptimeId": {
      "format": "uuid",
      "type": "string"
     }
    },
    "query_params": {},
    "response": {
-    "data": "DeleteUptimeCheckResult",
+    "data": "DeleteUptimeResult",
     "kind": "envelope",
-    "schema": "DeleteUptimeCheckResultBaseResponse"
+    "schema": "DeleteUptimeResultBaseResponse"
    },
    "status_codes": [
     "200",
@@ -550,6 +550,10 @@
    "path": "/v1/alerts",
    "path_params": {},
    "query_params": {
+    "AgentAssetIds": {
+     "required": false,
+     "type": "string"
+    },
     "ClientIds": {
      "required": false,
      "type": "string"
@@ -565,6 +569,10 @@
      "type": "string"
     },
     "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "CustomAssetIds": {
      "required": false,
      "type": "string"
     },
@@ -588,6 +596,10 @@
      "type": "string"
     },
     "TypeIds": {
+     "required": false,
+     "type": "string"
+    },
+    "UptimeIds": {
      "required": false,
      "type": "string"
     }
@@ -640,7 +652,7 @@
    "body": null,
    "method": "GET",
    "operation_id": "get_v1_assets_agents",
-   "page_size_rule": "clamp",
+   "page_size_rule": "reject",
    "paged": true,
    "path": "/v1/assets/agents",
    "path_params": {},
@@ -689,9 +701,9 @@
     }
    },
    "response": {
-    "data": "[DeviceListItemResponse]",
+    "data": "[AgentAssetListItemResponse]",
     "kind": "envelope",
-    "schema": "DeviceListItemResponseListBaseResponse"
+    "schema": "AgentAssetListItemResponseListBaseResponse"
    },
    "status_codes": [
     "200",
@@ -700,24 +712,24 @@
     "500"
    ]
   },
-  "GET /v1/assets/agents/{deviceId}": {
+  "GET /v1/assets/agents/{agentAssetId}": {
    "body": null,
    "method": "GET",
-   "operation_id": "get_v1_assets_agents_deviceId",
+   "operation_id": "get_v1_assets_agents_agentAssetId",
    "page_size_rule": null,
    "paged": false,
-   "path": "/v1/assets/agents/{deviceId}",
+   "path": "/v1/assets/agents/{agentAssetId}",
    "path_params": {
-    "deviceId": {
+    "agentAssetId": {
      "format": "uuid",
      "type": "string"
     }
    },
    "query_params": {},
    "response": {
-    "data": "DeviceResponse",
+    "data": "AgentAssetResponse",
     "kind": "envelope",
-    "schema": "DeviceResponseBaseResponse"
+    "schema": "AgentAssetResponseBaseResponse"
    },
    "status_codes": [
     "200",
@@ -727,11 +739,142 @@
     "500"
    ]
   },
+  "GET /v1/assets/agents/{agentAssetId}/apps": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_assets_agents_agentAssetId_apps",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/agents/{agentAssetId}/apps",
+   "path_params": {
+    "agentAssetId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "AgentAppListModel",
+    "kind": "envelope",
+    "schema": "AgentAppListModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/assets/agents/{agentAssetId}/hardware": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_assets_agents_agentAssetId_hardware",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/agents/{agentAssetId}/hardware",
+   "path_params": {
+    "agentAssetId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "AgentHardwareModel",
+    "kind": "envelope",
+    "schema": "AgentHardwareModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/assets/agents/{agentAssetId}/patches": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_assets_agents_agentAssetId_patches",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/agents/{agentAssetId}/patches",
+   "path_params": {
+    "agentAssetId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "AgentPatchListModel",
+    "kind": "envelope",
+    "schema": "AgentPatchListModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/assets/agents/{agentAssetId}/patches/available": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_assets_agents_agentAssetId_patches_available",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/agents/{agentAssetId}/patches/available",
+   "path_params": {
+    "agentAssetId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "AgentAvailableUpdateListModel",
+    "kind": "envelope",
+    "schema": "AgentAvailableUpdateListModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/assets/agents/{agentAssetId}/tags": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_assets_agents_agentAssetId_tags",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/agents/{agentAssetId}/tags",
+   "path_params": {
+    "agentAssetId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "[AgentTagModel]",
+    "kind": "envelope",
+    "schema": "AgentTagModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
   "GET /v1/assets/custom": {
    "body": null,
    "method": "GET",
    "operation_id": "get_v1_assets_custom",
-   "page_size_rule": "clamp",
+   "page_size_rule": "reject",
    "paged": true,
    "path": "/v1/assets/custom",
    "path_params": {},
@@ -789,6 +932,7 @@
   },
   "GET /v1/assets/custom/hardware-types": {
    "body": null,
+   "deprecated": true,
    "method": "GET",
    "operation_id": "get_v1_assets_custom_hardware-types",
    "page_size_rule": null,
@@ -833,6 +977,26 @@
     "500"
    ]
   },
+  "GET /v1/assets/types": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_assets_types",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/types",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "[CodeModel]",
+    "kind": "envelope",
+    "schema": "CodeModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "500"
+   ]
+  },
   "GET /v1/billing-roles": {
    "body": null,
    "method": "GET",
@@ -857,7 +1021,7 @@
    "body": null,
    "method": "GET",
    "operation_id": "get_v1_clients",
-   "page_size_rule": "clamp",
+   "page_size_rule": "reject",
    "paged": true,
    "path": "/v1/clients",
    "path_params": {},
@@ -873,6 +1037,10 @@
      "type": "string"
     },
     "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "GroupIds": {
      "required": false,
      "type": "string"
     },
@@ -971,7 +1139,7 @@
    "body": null,
    "method": "GET",
    "operation_id": "get_v1_contacts",
-   "page_size_rule": "clamp",
+   "page_size_rule": "reject",
    "paged": true,
    "path": "/v1/contacts",
    "path_params": {},
@@ -1067,7 +1235,7 @@
    "body": null,
    "method": "GET",
    "operation_id": "get_v1_contracts",
-   "page_size_rule": "clamp",
+   "page_size_rule": "reject",
    "paged": true,
    "path": "/v1/contracts",
    "path_params": {},
@@ -1828,7 +1996,7 @@
    "body": null,
    "method": "GET",
    "operation_id": "get_v1_organization_users",
-   "page_size_rule": "clamp",
+   "page_size_rule": "reject",
    "paged": true,
    "path": "/v1/organization/users",
    "path_params": {},
@@ -2399,6 +2567,91 @@
     "500"
    ]
   },
+  "GET /v1/scripts": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_scripts",
+   "page_size_rule": "unknown",
+   "paged": true,
+   "path": "/v1/scripts",
+   "path_params": {},
+   "query_params": {
+    "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "IsFavorite": {
+     "required": false,
+     "type": "boolean"
+    },
+    "PageSize": {
+     "default": 50,
+     "format": "int32",
+     "required": false,
+     "type": "integer"
+    },
+    "ParentScriptId": {
+     "format": "uuid",
+     "required": false,
+     "type": "string"
+    },
+    "Query": {
+     "required": false,
+     "type": "string"
+    },
+    "SortBy": {
+     "default": "createdOn",
+     "required": false,
+     "type": "string"
+    },
+    "SortOrder": {
+     "default": "desc",
+     "required": false,
+     "type": "string"
+    },
+    "TypeIds": {
+     "required": false,
+     "type": "string"
+    }
+   },
+   "response": {
+    "data": "[ScriptListItemModel]",
+    "kind": "envelope",
+    "schema": "ScriptListItemModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/scripts/{scriptId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_scripts_scriptId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/scripts/{scriptId}",
+   "path_params": {
+    "scriptId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "ScriptDetailModel",
+    "kind": "envelope",
+    "schema": "ScriptDetailModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
   "GET /v1/taxes": {
    "body": null,
    "method": "GET",
@@ -2423,7 +2676,7 @@
    "body": null,
    "method": "GET",
    "operation_id": "get_v1_tickets",
-   "page_size_rule": "clamp",
+   "page_size_rule": "reject",
    "paged": true,
    "path": "/v1/tickets",
    "path_params": {},
@@ -2447,6 +2700,10 @@
      "type": "string"
     },
     "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "DeviceIds": {
      "required": false,
      "type": "string"
     },
@@ -2639,7 +2896,7 @@
    "body": null,
    "method": "GET",
    "operation_id": "get_v1_tickets_ticketId_comments",
-   "page_size_rule": "clamp",
+   "page_size_rule": "reject",
    "paged": true,
    "path": "/v1/tickets/{ticketId}/comments",
    "path_params": {
@@ -2751,7 +3008,7 @@
    "body": null,
    "method": "GET",
    "operation_id": "get_v1_time-entries",
-   "page_size_rule": "clamp",
+   "page_size_rule": "reject",
    "paged": true,
    "path": "/v1/time-entries",
    "path_params": {},
@@ -2907,15 +3164,15 @@
     "500"
    ]
   },
-  "GET /v1/uptime/{checkId}": {
+  "GET /v1/uptime/{uptimeId}": {
    "body": null,
    "method": "GET",
-   "operation_id": "get_v1_uptime_checkId",
+   "operation_id": "get_v1_uptime_uptimeId",
    "page_size_rule": null,
    "paged": false,
-   "path": "/v1/uptime/{checkId}",
+   "path": "/v1/uptime/{uptimeId}",
    "path_params": {
-    "checkId": {
+    "uptimeId": {
      "format": "uuid",
      "type": "string"
     }
@@ -2978,6 +3235,11 @@
       "type": "integer"
      },
      "IpAddress": {
+      "deprecated": true,
+      "nullable": true,
+      "type": "string"
+     },
+     "LocalIPAddress": {
       "nullable": true,
       "type": "string"
      },
@@ -2985,6 +3247,14 @@
       "format": "int64",
       "nullable": true,
       "type": "integer"
+     },
+     "Manufacturer": {
+      "nullable": true,
+      "type": "string"
+     },
+     "Model": {
+      "nullable": true,
+      "type": "string"
      },
      "Name": {
       "nullable": true,
@@ -2995,6 +3265,11 @@
       "type": "string"
      },
      "WarrantyEndDate": {
+      "format": "date",
+      "nullable": true,
+      "type": "string"
+     },
+     "WarrantyStartDate": {
       "format": "date",
       "nullable": true,
       "type": "string"
@@ -3044,6 +3319,14 @@
       "items": {
        "ref": "CustomPropertyUpdate",
        "type": null
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "GroupIds": {
+      "items": {
+       "format": "int64",
+       "type": "integer"
       },
       "nullable": true,
       "type": "array"
@@ -3934,7 +4217,7 @@
     "500"
    ]
   },
-  "PATCH /v1/uptime/{checkId}": {
+  "PATCH /v1/uptime/{uptimeId}": {
    "body": {
     "content_type": "application/json-patch+json",
     "fields": {
@@ -4000,24 +4283,24 @@
      }
     },
     "required": [],
-    "schema": "UpdateUptimeCheckCommand"
+    "schema": "UpdateUptimeCommand"
    },
    "method": "PATCH",
-   "operation_id": "patch_v1_uptime_checkId",
+   "operation_id": "patch_v1_uptime_uptimeId",
    "page_size_rule": null,
    "paged": false,
-   "path": "/v1/uptime/{checkId}",
+   "path": "/v1/uptime/{uptimeId}",
    "path_params": {
-    "checkId": {
+    "uptimeId": {
      "format": "uuid",
      "type": "string"
     }
    },
    "query_params": {},
    "response": {
-    "data": "UpdateUptimeCheckResult",
+    "data": "UpdateUptimeResult",
     "kind": "envelope",
-    "schema": "UpdateUptimeCheckResultBaseResponse"
+    "schema": "UpdateUptimeResultBaseResponse"
    },
    "status_codes": [
     "200",
@@ -4031,10 +4314,20 @@
    "body": {
     "content_type": "application/json-patch+json",
     "fields": {
+     "AgentAssetId": {
+      "format": "uuid",
+      "nullable": true,
+      "type": "string"
+     },
      "ClientId": {
       "format": "int64",
       "nullable": false,
       "type": "integer"
+     },
+     "CustomAssetId": {
+      "format": "uuid",
+      "nullable": true,
+      "type": "string"
      },
      "Description": {
       "nullable": false,
@@ -4054,6 +4347,11 @@
       "nullable": false,
       "ref": "AlertSeverity",
       "type": null
+     },
+     "UptimeId": {
+      "format": "uuid",
+      "nullable": true,
+      "type": "string"
      }
     },
     "required": [
@@ -4148,6 +4446,11 @@
       "type": "integer"
      },
      "IpAddress": {
+      "deprecated": true,
+      "nullable": true,
+      "type": "string"
+     },
+     "LocalIPAddress": {
       "nullable": true,
       "type": "string"
      },
@@ -4155,6 +4458,14 @@
       "format": "int64",
       "nullable": false,
       "type": "integer"
+     },
+     "Manufacturer": {
+      "nullable": true,
+      "type": "string"
+     },
+     "Model": {
+      "nullable": true,
+      "type": "string"
      },
      "Name": {
       "nullable": false,
@@ -4165,6 +4476,11 @@
       "type": "string"
      },
      "WarrantyEndDate": {
+      "format": "date",
+      "nullable": true,
+      "type": "string"
+     },
+     "WarrantyStartDate": {
       "format": "date",
       "nullable": true,
       "type": "string"
@@ -5812,7 +6128,7 @@
      }
     },
     "required": [],
-    "schema": "CreateUptimeCheckCommand"
+    "schema": "CreateUptimeCommand"
    },
    "method": "POST",
    "operation_id": "post_v1_uptime",
@@ -5822,9 +6138,9 @@
    "path_params": {},
    "query_params": {},
    "response": {
-    "data": "CreateUptimeCheckResult",
+    "data": "CreateUptimeResult",
     "kind": "envelope",
-    "schema": "CreateUptimeCheckResultBaseResponse"
+    "schema": "CreateUptimeResultBaseResponse"
    },
    "status_codes": [
     "200",
@@ -5866,9 +6182,1026 @@
    "required": [],
    "type": "object"
   },
+  "AgentAppListModel": {
+   "additional_properties": false,
+   "fields": {
+    "Items": {
+     "items": {
+      "ref": "AgentAppModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "LastScannedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentAppListModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "AgentAppListModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentAppModel": {
+   "additional_properties": false,
+   "fields": {
+    "AppId": {
+     "nullable": true,
+     "type": "string"
+    },
+    "AvailableVersion": {
+     "nullable": true,
+     "type": "string"
+    },
+    "InstalledOn": {
+     "format": "date",
+     "nullable": true,
+     "type": "string"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Publisher": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Source": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Version": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentAssetListItemResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Banner": {
+     "nullable": true,
+     "type": "string"
+    },
+    "ClientId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "ContactId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Cpu": {
+     "nullable": false,
+     "type": "string"
+    },
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Description": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Disk": {
+     "nullable": false,
+     "type": "string"
+    },
+    "DisplayName": {
+     "nullable": false,
+     "type": "string"
+    },
+    "HardwareArchitecture": {
+     "nullable": false,
+     "type": "string"
+    },
+    "HardwareType": {
+     "deprecated": true,
+     "nullable": false,
+     "type": "string"
+    },
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "InstallerVersion": {
+     "nullable": false,
+     "type": "string"
+    },
+    "LastBootUpTime": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "LastDisconnectDateTime": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "LastLoggedOnUser": {
+     "nullable": false,
+     "type": "string"
+    },
+    "LastLoggedOnUserDatetime": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "LastLoggedOnUserUpn": {
+     "nullable": false,
+     "type": "string"
+    },
+    "LocalIPAddress": {
+     "nullable": false,
+     "type": "string"
+    },
+    "LocationId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Manufacturer": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Memory": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Model": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Os": {
+     "nullable": false,
+     "type": "string"
+    },
+    "OsArchitecture": {
+     "nullable": false,
+     "type": "string"
+    },
+    "OsName": {
+     "nullable": false,
+     "type": "string"
+    },
+    "OsType": {
+     "nullable": false,
+     "type": "string"
+    },
+    "OsVersion": {
+     "nullable": false,
+     "type": "string"
+    },
+    "PublicIPAddress": {
+     "nullable": false,
+     "type": "string"
+    },
+    "RmmVersion": {
+     "nullable": false,
+     "type": "string"
+    },
+    "SecurityPosture": {
+     "nullable": false,
+     "ref": "SecurityPostureModel",
+     "type": null
+    },
+    "SerialNo": {
+     "deprecated": true,
+     "nullable": false,
+     "type": "string"
+    },
+    "SerialNumber": {
+     "nullable": false,
+     "type": "string"
+    },
+    "ShellVersion": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Status": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "TimeZone": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Type": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "Uuid": {
+     "nullable": false,
+     "type": "string"
+    },
+    "WarrantyEndDate": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "WarrantyStartDate": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentAssetListItemResponseListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "AgentAssetListItemResponse",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "nullable": false,
+     "ref": "PaginationDataContext",
+     "type": null
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentAssetResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Banner": {
+     "nullable": true,
+     "type": "string"
+    },
+    "ClientId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "ContactId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Cpu": {
+     "nullable": false,
+     "type": "string"
+    },
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "CustomProperties": {
+     "items": {
+      "ref": "CustomPropertyValue",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "Description": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Disk": {
+     "nullable": false,
+     "type": "string"
+    },
+    "DisplayName": {
+     "nullable": false,
+     "type": "string"
+    },
+    "HardwareArchitecture": {
+     "nullable": false,
+     "type": "string"
+    },
+    "HardwareType": {
+     "deprecated": true,
+     "nullable": false,
+     "type": "string"
+    },
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "InstallerVersion": {
+     "nullable": false,
+     "type": "string"
+    },
+    "LastBootUpTime": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "LastDisconnectDateTime": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "LastLoggedOnUser": {
+     "nullable": false,
+     "type": "string"
+    },
+    "LastLoggedOnUserDatetime": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "LastLoggedOnUserUpn": {
+     "nullable": false,
+     "type": "string"
+    },
+    "LocalIPAddress": {
+     "nullable": false,
+     "type": "string"
+    },
+    "LocationId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Manufacturer": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Memory": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Model": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Os": {
+     "nullable": false,
+     "type": "string"
+    },
+    "OsArchitecture": {
+     "nullable": false,
+     "type": "string"
+    },
+    "OsName": {
+     "nullable": false,
+     "type": "string"
+    },
+    "OsType": {
+     "nullable": false,
+     "type": "string"
+    },
+    "OsVersion": {
+     "nullable": false,
+     "type": "string"
+    },
+    "PublicIPAddress": {
+     "nullable": false,
+     "type": "string"
+    },
+    "RmmVersion": {
+     "nullable": false,
+     "type": "string"
+    },
+    "SecurityPosture": {
+     "nullable": false,
+     "ref": "SecurityPostureModel",
+     "type": null
+    },
+    "SerialNo": {
+     "deprecated": true,
+     "nullable": false,
+     "type": "string"
+    },
+    "SerialNumber": {
+     "nullable": false,
+     "type": "string"
+    },
+    "ShellVersion": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Status": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "TimeZone": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Type": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "Uuid": {
+     "nullable": false,
+     "type": "string"
+    },
+    "WarrantyEndDate": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "WarrantyStartDate": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentAssetResponseBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "AgentAssetResponse",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentAvailableUpdateListModel": {
+   "additional_properties": false,
+   "fields": {
+    "Items": {
+     "items": {
+      "ref": "AgentAvailableUpdateModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "LastScannedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "WindowsUpdateStatus": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentAvailableUpdateListModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "AgentAvailableUpdateListModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentAvailableUpdateModel": {
+   "additional_properties": false,
+   "fields": {
+    "Category": {
+     "nullable": false,
+     "type": "string"
+    },
+    "FailureMessage": {
+     "nullable": true,
+     "type": "string"
+    },
+    "FirstSeenOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "IsFailed": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "IsOutOfDate": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Title": {
+     "nullable": false,
+     "type": "string"
+    },
+    "UpdateId": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentDiskModel": {
+   "additional_properties": false,
+   "fields": {
+    "FreeSpaceBytes": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "HealthStatus": {
+     "nullable": false,
+     "type": "string"
+    },
+    "IsOnline": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "Name": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Number": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Partitions": {
+     "items": {
+      "ref": "AgentPartitionModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "TotalSpaceBytes": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "UsedSpaceBytes": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentHardwareModel": {
+   "additional_properties": false,
+   "fields": {
+    "Disks": {
+     "items": {
+      "ref": "AgentDiskModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "HardwareType": {
+     "nullable": true,
+     "type": "string"
+    },
+    "LastScannedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "Processors": {
+     "items": {
+      "ref": "AgentProcessorModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "TotalMemoryBytes": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentHardwareModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "AgentHardwareModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentPartitionModel": {
+   "additional_properties": false,
+   "fields": {
+    "DriveLetter": {
+     "nullable": true,
+     "type": "string"
+    },
+    "FileSystem": {
+     "nullable": true,
+     "type": "string"
+    },
+    "FreeSpaceBytes": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "HealthStatus": {
+     "nullable": false,
+     "type": "string"
+    },
+    "IsBitLockerProtected": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "IsBoot": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Label": {
+     "nullable": true,
+     "type": "string"
+    },
+    "TotalSpaceBytes": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "UsedSpaceBytes": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentPatchListModel": {
+   "additional_properties": false,
+   "fields": {
+    "Items": {
+     "items": {
+      "ref": "AgentPatchModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "LastScannedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentPatchListModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "AgentPatchListModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentPatchModel": {
+   "additional_properties": false,
+   "fields": {
+    "InstalledOn": {
+     "format": "date",
+     "nullable": true,
+     "type": "string"
+    },
+    "KbArticleId": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentProcessorModel": {
+   "additional_properties": false,
+   "fields": {
+    "Manufacturer": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Model": {
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentTagConditionModel": {
+   "additional_properties": false,
+   "fields": {
+    "Domain": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Join": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Key": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Operator": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Path": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Property": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Value": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentTagConditionsModel": {
+   "additional_properties": false,
+   "fields": {
+    "Mac": {
+     "items": {
+      "ref": "AgentTagConditionModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "Windows": {
+     "items": {
+      "ref": "AgentTagConditionModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentTagModel": {
+   "additional_properties": false,
+   "fields": {
+    "Conditions": {
+     "nullable": false,
+     "ref": "AgentTagConditionsModel",
+     "type": null
+    },
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Type": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AgentTagModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "AgentTagModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "AlertListItemModel": {
    "additional_properties": false,
    "fields": {
+    "AgentAssetId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
     "CheckId": {
      "nullable": true,
      "type": "string"
@@ -5888,7 +7221,13 @@
      "nullable": false,
      "type": "string"
     },
+    "CustomAssetId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
     "DeviceId": {
+     "deprecated": true,
      "format": "uuid",
      "nullable": true,
      "type": "string"
@@ -5947,6 +7286,12 @@
      "type": "string"
     },
     "UptimeCheckId": {
+     "deprecated": true,
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "UptimeId": {
      "format": "uuid",
      "nullable": true,
      "type": "string"
@@ -6340,6 +7685,14 @@
      "nullable": false,
      "type": "array"
     },
+    "GroupIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": false,
+     "type": "array"
+    },
     "Id": {
      "format": "int64",
      "nullable": false,
@@ -6625,6 +7978,14 @@
      "nullable": false,
      "type": "array"
     },
+    "GroupIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": false,
+     "type": "array"
+    },
     "Id": {
      "format": "int64",
      "nullable": false,
@@ -6737,6 +8098,43 @@
     "Name": {
      "nullable": false,
      "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "CodeModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "CodeModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
     }
    },
    "required": [],
@@ -8181,6 +9579,11 @@
      "type": "integer"
     },
     "IpAddress": {
+     "deprecated": true,
+     "nullable": true,
+     "type": "string"
+    },
+    "LocalIPAddress": {
      "nullable": true,
      "type": "string"
     },
@@ -8188,6 +9591,14 @@
      "format": "int64",
      "nullable": false,
      "type": "integer"
+    },
+    "Manufacturer": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Model": {
+     "nullable": true,
+     "type": "string"
     },
     "Name": {
      "nullable": false,
@@ -8198,6 +9609,11 @@
      "type": "string"
     },
     "WarrantyEndDate": {
+     "format": "date",
+     "nullable": true,
+     "type": "string"
+    },
+    "WarrantyStartDate": {
      "format": "date",
      "nullable": true,
      "type": "string"
@@ -9742,7 +11158,7 @@
    "required": [],
    "type": "object"
   },
-  "CreateUptimeCheckCommand": {
+  "CreateUptimeCommand": {
    "additional_properties": false,
    "fields": {
     "AdoptClientAssets": {
@@ -9804,7 +11220,7 @@
    "required": [],
    "type": "object"
   },
-  "CreateUptimeCheckResult": {
+  "CreateUptimeResult": {
    "additional_properties": false,
    "fields": {
     "Id": {
@@ -9816,12 +11232,12 @@
    "required": [],
    "type": "object"
   },
-  "CreateUptimeCheckResultBaseResponse": {
+  "CreateUptimeResultBaseResponse": {
    "additional_properties": false,
    "fields": {
     "Data": {
      "nullable": false,
-     "ref": "CreateUptimeCheckResult",
+     "ref": "CreateUptimeResult",
      "type": null
     },
     "DataContext": {
@@ -9854,7 +11270,7 @@
    "additional_properties": false,
    "fields": {
     "Banner": {
-     "nullable": false,
+     "nullable": true,
      "type": "string"
     },
     "ClientId": {
@@ -9876,11 +11292,17 @@
      "nullable": true,
      "type": "string"
     },
+    "DisplayName": {
+     "nullable": false,
+     "type": "string"
+    },
     "HardwareType": {
+     "deprecated": true,
      "nullable": true,
      "type": "string"
     },
     "HardwareTypeId": {
+     "deprecated": true,
      "format": "int64",
      "nullable": false,
      "type": "integer"
@@ -9891,6 +11313,11 @@
      "type": "string"
     },
     "IpAddress": {
+     "deprecated": true,
+     "nullable": true,
+     "type": "string"
+    },
+    "LocalIPAddress": {
      "nullable": true,
      "type": "string"
     },
@@ -9898,6 +11325,14 @@
      "format": "int64",
      "nullable": true,
      "type": "integer"
+    },
+    "Manufacturer": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Model": {
+     "nullable": true,
+     "type": "string"
     },
     "Name": {
      "nullable": false,
@@ -9907,12 +11342,22 @@
      "nullable": true,
      "type": "string"
     },
+    "Type": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
     "UpdatedOn": {
      "format": "date-time",
      "nullable": true,
      "type": "string"
     },
     "WarrantyEndDate": {
+     "format": "date",
+     "nullable": true,
+     "type": "string"
+    },
+    "WarrantyStartDate": {
      "format": "date",
      "nullable": true,
      "type": "string"
@@ -10846,7 +12291,7 @@
    "required": [],
    "type": "object"
   },
-  "DeleteUptimeCheckResult": {
+  "DeleteUptimeResult": {
    "additional_properties": false,
    "fields": {
     "Id": {
@@ -10858,12 +12303,12 @@
    "required": [],
    "type": "object"
   },
-  "DeleteUptimeCheckResultBaseResponse": {
+  "DeleteUptimeResultBaseResponse": {
    "additional_properties": false,
    "fields": {
     "Data": {
      "nullable": false,
-     "ref": "DeleteUptimeCheckResult",
+     "ref": "DeleteUptimeResult",
      "type": null
     },
     "DataContext": {
@@ -10928,419 +12373,6 @@
      "nullable": false,
      "ref": "PaginationDataContext",
      "type": null
-    },
-    "IsSuccess": {
-     "nullable": false,
-     "type": "boolean"
-    },
-    "Notifications": {
-     "items": {
-      "ref": "Error",
-      "type": null
-     },
-     "nullable": false,
-     "type": "array"
-    },
-    "StatusCode": {
-     "nullable": false,
-     "ref": "HttpStatusCode",
-     "type": null
-    }
-   },
-   "required": [],
-   "type": "object"
-  },
-  "DeviceListItemResponse": {
-   "additional_properties": false,
-   "fields": {
-    "ClientId": {
-     "format": "int64",
-     "nullable": true,
-     "type": "integer"
-    },
-    "Cpu": {
-     "nullable": false,
-     "type": "string"
-    },
-    "CreatedOn": {
-     "format": "date-time",
-     "nullable": false,
-     "type": "string"
-    },
-    "Description": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Disk": {
-     "nullable": false,
-     "type": "string"
-    },
-    "DisplayName": {
-     "nullable": false,
-     "type": "string"
-    },
-    "HardwareArchitecture": {
-     "nullable": false,
-     "type": "string"
-    },
-    "HardwareType": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Id": {
-     "format": "uuid",
-     "nullable": false,
-     "type": "string"
-    },
-    "InstallerVersion": {
-     "nullable": false,
-     "type": "string"
-    },
-    "LastBootUpTime": {
-     "format": "date-time",
-     "nullable": true,
-     "type": "string"
-    },
-    "LastDisconnectDateTime": {
-     "format": "date-time",
-     "nullable": true,
-     "type": "string"
-    },
-    "LastLoggedOnUser": {
-     "nullable": false,
-     "type": "string"
-    },
-    "LastLoggedOnUserDatetime": {
-     "format": "date-time",
-     "nullable": true,
-     "type": "string"
-    },
-    "LastLoggedOnUserUpn": {
-     "nullable": false,
-     "type": "string"
-    },
-    "LocalIPAddress": {
-     "nullable": false,
-     "type": "string"
-    },
-    "LocationId": {
-     "format": "int64",
-     "nullable": true,
-     "type": "integer"
-    },
-    "Manufacturer": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Memory": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Model": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Name": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Os": {
-     "nullable": false,
-     "type": "string"
-    },
-    "OsArchitecture": {
-     "nullable": false,
-     "type": "string"
-    },
-    "OsName": {
-     "nullable": false,
-     "type": "string"
-    },
-    "OsType": {
-     "nullable": false,
-     "type": "string"
-    },
-    "OsVersion": {
-     "nullable": false,
-     "type": "string"
-    },
-    "PublicIPAddress": {
-     "nullable": false,
-     "type": "string"
-    },
-    "RmmVersion": {
-     "nullable": false,
-     "type": "string"
-    },
-    "SecurityPosture": {
-     "nullable": false,
-     "ref": "SecurityPostureModel",
-     "type": null
-    },
-    "SerialNo": {
-     "nullable": false,
-     "type": "string"
-    },
-    "ShellVersion": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Status": {
-     "nullable": false,
-     "ref": "CodeModel",
-     "type": null
-    },
-    "TimeZone": {
-     "nullable": false,
-     "type": "string"
-    },
-    "UpdatedOn": {
-     "format": "date-time",
-     "nullable": true,
-     "type": "string"
-    },
-    "Uuid": {
-     "nullable": false,
-     "type": "string"
-    },
-    "WarrantyEndDate": {
-     "format": "date-time",
-     "nullable": true,
-     "type": "string"
-    },
-    "WarrantyStartDate": {
-     "format": "date-time",
-     "nullable": true,
-     "type": "string"
-    }
-   },
-   "required": [],
-   "type": "object"
-  },
-  "DeviceListItemResponseListBaseResponse": {
-   "additional_properties": false,
-   "fields": {
-    "Data": {
-     "items": {
-      "ref": "DeviceListItemResponse",
-      "type": null
-     },
-     "nullable": true,
-     "type": "array"
-    },
-    "DataContext": {
-     "nullable": false,
-     "ref": "PaginationDataContext",
-     "type": null
-    },
-    "IsSuccess": {
-     "nullable": false,
-     "type": "boolean"
-    },
-    "Notifications": {
-     "items": {
-      "ref": "Error",
-      "type": null
-     },
-     "nullable": false,
-     "type": "array"
-    },
-    "StatusCode": {
-     "nullable": false,
-     "ref": "HttpStatusCode",
-     "type": null
-    }
-   },
-   "required": [],
-   "type": "object"
-  },
-  "DeviceResponse": {
-   "additional_properties": false,
-   "fields": {
-    "ClientId": {
-     "format": "int64",
-     "nullable": true,
-     "type": "integer"
-    },
-    "Cpu": {
-     "nullable": false,
-     "type": "string"
-    },
-    "CreatedOn": {
-     "format": "date-time",
-     "nullable": false,
-     "type": "string"
-    },
-    "CustomProperties": {
-     "items": {
-      "ref": "CustomPropertyValue",
-      "type": null
-     },
-     "nullable": false,
-     "type": "array"
-    },
-    "Description": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Disk": {
-     "nullable": false,
-     "type": "string"
-    },
-    "DisplayName": {
-     "nullable": false,
-     "type": "string"
-    },
-    "HardwareArchitecture": {
-     "nullable": false,
-     "type": "string"
-    },
-    "HardwareType": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Id": {
-     "format": "uuid",
-     "nullable": false,
-     "type": "string"
-    },
-    "InstallerVersion": {
-     "nullable": false,
-     "type": "string"
-    },
-    "LastBootUpTime": {
-     "format": "date-time",
-     "nullable": true,
-     "type": "string"
-    },
-    "LastDisconnectDateTime": {
-     "format": "date-time",
-     "nullable": true,
-     "type": "string"
-    },
-    "LastLoggedOnUser": {
-     "nullable": false,
-     "type": "string"
-    },
-    "LastLoggedOnUserDatetime": {
-     "format": "date-time",
-     "nullable": true,
-     "type": "string"
-    },
-    "LastLoggedOnUserUpn": {
-     "nullable": false,
-     "type": "string"
-    },
-    "LocalIPAddress": {
-     "nullable": false,
-     "type": "string"
-    },
-    "LocationId": {
-     "format": "int64",
-     "nullable": true,
-     "type": "integer"
-    },
-    "Manufacturer": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Memory": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Model": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Name": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Os": {
-     "nullable": false,
-     "type": "string"
-    },
-    "OsArchitecture": {
-     "nullable": false,
-     "type": "string"
-    },
-    "OsName": {
-     "nullable": false,
-     "type": "string"
-    },
-    "OsType": {
-     "nullable": false,
-     "type": "string"
-    },
-    "OsVersion": {
-     "nullable": false,
-     "type": "string"
-    },
-    "PublicIPAddress": {
-     "nullable": false,
-     "type": "string"
-    },
-    "RmmVersion": {
-     "nullable": false,
-     "type": "string"
-    },
-    "SecurityPosture": {
-     "nullable": false,
-     "ref": "SecurityPostureModel",
-     "type": null
-    },
-    "SerialNo": {
-     "nullable": false,
-     "type": "string"
-    },
-    "ShellVersion": {
-     "nullable": false,
-     "type": "string"
-    },
-    "Status": {
-     "nullable": false,
-     "ref": "CodeModel",
-     "type": null
-    },
-    "TimeZone": {
-     "nullable": false,
-     "type": "string"
-    },
-    "UpdatedOn": {
-     "format": "date-time",
-     "nullable": true,
-     "type": "string"
-    },
-    "Uuid": {
-     "nullable": false,
-     "type": "string"
-    },
-    "WarrantyEndDate": {
-     "format": "date-time",
-     "nullable": true,
-     "type": "string"
-    },
-    "WarrantyStartDate": {
-     "format": "date-time",
-     "nullable": true,
-     "type": "string"
-    }
-   },
-   "required": [],
-   "type": "object"
-  },
-  "DeviceResponseBaseResponse": {
-   "additional_properties": false,
-   "fields": {
-    "Data": {
-     "nullable": false,
-     "ref": "DeviceResponse",
-     "type": null
-    },
-    "DataContext": {
-     "additional_properties": false,
-     "nullable": true,
-     "type": "object"
     },
     "IsSuccess": {
      "nullable": false,
@@ -13275,10 +14307,20 @@
   "PostAlertRequest": {
    "additional_properties": false,
    "fields": {
+    "AgentAssetId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
     "ClientId": {
      "format": "int64",
      "nullable": false,
      "type": "integer"
+    },
+    "CustomAssetId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
     },
     "Description": {
      "nullable": false,
@@ -13298,6 +14340,11 @@
      "nullable": false,
      "ref": "AlertSeverity",
      "type": null
+    },
+    "UptimeId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
     }
    },
    "required": [
@@ -14143,6 +15190,180 @@
      "additional_properties": false,
      "nullable": true,
      "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ScriptDetailModel": {
+   "additional_properties": false,
+   "fields": {
+    "Content": {
+     "nullable": false,
+     "type": "string"
+    },
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "IsFavorite": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "ParentScriptId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "RunAsUser": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "TimeoutSeconds": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Title": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Type": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "Version": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ScriptDetailModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "ScriptDetailModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ScriptListItemModel": {
+   "additional_properties": false,
+   "fields": {
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "IsFavorite": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "ParentScriptId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "Title": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Type": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "Version": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ScriptListItemModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "ScriptListItemModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "nullable": false,
+     "ref": "PaginationDataContext",
+     "type": null
     },
     "IsSuccess": {
      "nullable": false,
@@ -16398,6 +17619,14 @@
      "nullable": true,
      "type": "array"
     },
+    "GroupIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": true,
+     "type": "array"
+    },
     "Name": {
      "nullable": true,
      "type": "string"
@@ -16510,6 +17739,11 @@
      "type": "integer"
     },
     "IpAddress": {
+     "deprecated": true,
+     "nullable": true,
+     "type": "string"
+    },
+    "LocalIPAddress": {
      "nullable": true,
      "type": "string"
     },
@@ -16517,6 +17751,14 @@
      "format": "int64",
      "nullable": true,
      "type": "integer"
+    },
+    "Manufacturer": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Model": {
+     "nullable": true,
+     "type": "string"
     },
     "Name": {
      "nullable": true,
@@ -16527,6 +17769,11 @@
      "type": "string"
     },
     "WarrantyEndDate": {
+     "format": "date",
+     "nullable": true,
+     "type": "string"
+    },
+    "WarrantyStartDate": {
      "format": "date",
      "nullable": true,
      "type": "string"
@@ -17400,7 +18647,7 @@
    "required": [],
    "type": "object"
   },
-  "UpdateUptimeCheckCommand": {
+  "UpdateUptimeCommand": {
    "additional_properties": false,
    "fields": {
     "AdoptClientAssets": {
@@ -17467,7 +18714,7 @@
    "required": [],
    "type": "object"
   },
-  "UpdateUptimeCheckResult": {
+  "UpdateUptimeResult": {
    "additional_properties": false,
    "fields": {
     "Id": {
@@ -17479,12 +18726,12 @@
    "required": [],
    "type": "object"
   },
-  "UpdateUptimeCheckResultBaseResponse": {
+  "UpdateUptimeResultBaseResponse": {
    "additional_properties": false,
    "fields": {
     "Data": {
      "nullable": false,
-     "ref": "UpdateUptimeCheckResult",
+     "ref": "UpdateUptimeResult",
      "type": null
     },
     "DataContext": {
@@ -17895,6 +19142,6 @@
    "type": "apiKey"
   }
  },
- "sha256": "a62b4785226ebe0133e4ea3f5b8ec8a83de61bdbe008f5ed259a36c8f9890b63",
+ "sha256": "d68dd3e1bfe2c144f1e12af6af0ac012052366992fc62ade998e24b93987ea05",
  "source": "https://api.usw.gorelo.io/swagger/v1/swagger.json"
 }

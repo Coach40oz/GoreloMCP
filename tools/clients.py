@@ -26,6 +26,12 @@ GET /v1/clients/{clientId} answers 404 for a deleted client like an unknown id a
 update_client and list_clients check the status against that scale before any request (CLIENT_STATUS_LABELS).
 DELETE /v1/clients/{clientId}, which the spec names for deleting, stays in FORBIDDEN_OPS.
 
+Groups (contract 05200951c89e, 2026-10-22): GET /v1/clients takes GroupIds (comma separated, up to 100, from
+GET /v1/organization/groups; keeps clients subscribed to any of them) and UpdateClientCommand.GroupIds replaces the client's
+group list (the spec text: "Replaces the list; [] clears it; omit to leave unchanged. At most 100; every id must be an
+active group"). Changing the groups changes which technicians can see the client. The tool sends the list only as the
+client's full group list and refuses [] (owner's decision: clearing is not offered in this release).
+
 The client id travels in the PATH only. The published UpdateClientCommand (contract e15cb5a18ec2, 2026-10-02) has
 no Id field, so update_client sends none. The update used to be published with the id in the body and no id in
 the path; that form answered 405 live on 2026-10-02 and a live override swapped the path form in until Gorelo
@@ -174,6 +180,7 @@ UPDATE_OP = "PATCH /v1/clients/{clientId}"
 CLIENT_STATUS_LABELS = {1: "Active", 3: "Credit hold", 4: "Archived"}
 CLIENT_STATUS_SCALE = ", ".join(f"{status} {label}" for status, label in CLIENT_STATUS_LABELS.items())
 STATUS_IDS_MAX = 100  # "Up to 100 values" (the StatusIds text)
+GROUP_IDS_MAX = 100  # "Up to 100 values" (the GroupIds query text); "At most 100" (the UpdateClientCommand.GroupIds text)
 
 SINCE_HELP = "ISO 8601 with UTC offset, e.g. 2026-10-01T00:00:00Z."
 
@@ -182,6 +189,7 @@ SINCE_HELP = "ISO 8601 with UTC offset, e.g. 2026-10-01T00:00:00Z."
 LIST_FIELD_MAP = {
     "query": "Query",
     "status_ids": "StatusIds",
+    "group_ids": "GroupIds",
     "created_since": "CreatedSince",
     "created_before": "CreatedBefore",
     "updated_since": "UpdatedSince",
@@ -219,6 +227,7 @@ UPDATE_FIELD_MAP = {
     "billing_name": "BillingName",
     "alternate_name": "AlternateName",
     "custom_properties": "CustomProperties",
+    "group_ids": "GroupIds",
 }
 
 UPDATE_TEXT_PARAMS = ("name", "billing_name", "alternate_name")
@@ -261,6 +270,14 @@ def _statuses(param: str, values: Any) -> list[int] | None:
     return positive_ids(param, values)
 
 
+def _groups(param: str, values: Any) -> list[int] | None:
+    """group_ids (the query filter and the update body): at most GROUP_IDS_MAX positive ids, a bad one named by its
+    index. None, an empty list and a value that is not a list keep the messages of positive_ids."""
+    if isinstance(values, (list, tuple)) and len(values) > GROUP_IDS_MAX:
+        raise ValueError(f"{param}: at most {GROUP_IDS_MAX} values, got {len(values)}")
+    return positive_ids(param, values)
+
+
 class CustomPropertySet(BaseModel):
     # One custom field to save on a client: an entry of UpdateClientCommand.CustomProperties (CustomPropertyUpdate) in
     # snake_case. value is typed `str | None` and defaults to None only so that a missing or null value reaches
@@ -287,6 +304,10 @@ async def list_clients(
             "give it and only those are returned."
         ),
     ] = None,
+    group_ids: Annotated[
+        list[StrictId] | None,
+        Field(description="Group ids from list_org_groups, up to 100; keeps clients subscribed to any of them."),
+    ] = None,
     created_since: Annotated[str | None, Field(description=f"Created at or after; {SINCE_HELP}")] = None,
     created_before: Annotated[str | None, Field(description="Created before.")] = None,
     updated_since: Annotated[str | None, Field(description="Updated at or after.")] = None,
@@ -295,10 +316,11 @@ async def list_clients(
     cursor: Annotated[str | None, Field(description="next_cursor from the previous call.")] = None,
 ) -> dict:
     """List clients one page per call; returns {items, has_more, next_cursor, total_count, ...}.
-    Archived clients are left out unless status_ids asks for status 4; deleted clients are never listed. Rows leave out CustomProperties: get_client has them. Paging: pass next_cursor as cursor, same filters, until has_more is false.
+    Archived clients are left out unless status_ids asks for status 4; deleted clients are never listed. Rows carry GroupIds but leave out CustomProperties: get_client has them. Paging: pass next_cursor as cursor, same filters, until has_more is false.
     """
     keyword = non_empty("query", query)
     ids = csv_ids("status_ids", _statuses("status_ids", status_ids))
+    groups = _groups("group_ids", group_ids)
     created_after = utc_iso("created_since", created_since)
     created_until = utc_iso("created_before", created_before)
     updated_after = utc_iso("updated_since", updated_since)
@@ -310,6 +332,7 @@ async def list_clients(
         query={
             "Query": keyword,
             "StatusIds": ids,
+            "GroupIds": csv_ids("group_ids", groups),
             "CreatedSince": created_after,
             "CreatedBefore": created_until,
             "UpdatedSince": updated_after,
@@ -324,6 +347,7 @@ async def list_clients(
         {
             "query": keyword,
             "status_ids": status_ids,
+            "group_ids": groups,
             "created_since": created_after,
             "created_before": created_until,
             "updated_since": updated_after,
@@ -338,7 +362,7 @@ async def get_client(
     client_id: Annotated[StrictId, Field(description="Client id (list_clients).")],
 ) -> dict:
     """Get one client by id; returns Gorelo's client record.
-    The record includes CustomProperties (each client custom field: Id, Name, Type, Value, IsSet true when a value is saved, IsHidden true when the Value is hidden from the API and always null). A deleted client is a 404 like an unknown id; an Archived client is returned.
+    The record includes GroupIds (the groups the client is subscribed to) and CustomProperties (each client custom field: Id, Name, Type, Value, IsSet true when a value is saved, IsHidden true when the Value is hidden from the API and always null). A deleted client is a 404 like an unknown id; an Archived client is returned.
     """
     cid = positive_id("client_id", client_id)
     record = await client_of(ctx).get_one(GET_OP, path_params={"clientId": cid}, tool="get_client")
@@ -1214,9 +1238,15 @@ async def update_client(
             "A required field cannot be cleared to nothing."
         ),
     ] = None,
+    group_ids: Annotated[
+        list[StrictId] | None,
+        Field(
+            description="The client's FULL group list (list_org_groups ids, 1-100); replaces the current one: start from get_client's GroupIds ([9] alone drops the rest). [] is refused."
+        ),
+    ] = None,
 ) -> dict:
     """Update a client's name, status, billing name, alternate name or custom fields; returns the updated client record.
-    Only the fields you pass change (at least one); only custom fields can be cleared. Custom fields: ids from get_client's CustomProperties, values are text whatever the Type. Compare each returned CustomProperties Value with what you sent; tell the user if one differs. A hidden field (IsHidden) shows no Value: only IsSet is checked (see warning). It reads the client first: ids must be listed there, and other custom fields must come back unchanged. Side effects: overwrites current values (old values are not kept); status_id 4 (Archived) hides the client from default lists.
+    Pass at least one field; only custom fields can be cleared. group_ids REPLACES the whole group list: start from get_client's GroupIds ([9] alone drops the rest). Custom fields: ids from get_client's CustomProperties, values are text whatever the Type. Compare each returned CustomProperties Value with what you sent; tell the user if one differs. A hidden field (IsHidden) shows no Value: only IsSet is checked (see warning). It reads the client first: ids must be listed there, and other custom fields must come back unchanged. Side effects: overwrites current values; status_id 4 (Archived) hides the client from default lists; group_ids changes which technicians see the client.
     """
     cid = positive_id("client_id", client_id)
     sid = None if status_id is None else _status("status_id", status_id)
@@ -1228,17 +1258,20 @@ async def update_client(
                 f"{param}: must not be empty. Gorelo cannot clear client fields through the API (an empty "
                 f"string or null leaves the value unchanged), so omit {param} to keep the current value"
             )
+    groups = _groups("group_ids", group_ids)
     saved, cleared = _custom_property_changes(custom_properties, clear_custom_property_ids)
-    if sid is None and not saved and not cleared and all(value is None for value in texts.values()):
+    if sid is None and groups is None and not saved and not cleared and all(value is None for value in texts.values()):
         raise ValueError(
-            "nothing to update: pass at least one of name, status_id, billing_name, alternate_name, custom_properties "
-            "or clear_custom_property_ids (only the fields you pass are changed)"
+            "nothing to update: pass at least one of name, status_id, billing_name, alternate_name, group_ids, "
+            "custom_properties or clear_custom_property_ids (only the fields you pass are changed)"
         )
     # the saved entries first, then the cleared ones with a real JSON null (build_body leaves what is inside the list
     # alone); the client id is in the path, never in the body
     entries = [{"Id": identifier, "Value": text} for identifier, text in saved]
     entries += [{"Id": identifier, "Value": None} for identifier in cleared]
-    body = build_body({"status_id": sid, **texts, "custom_properties": entries or None}, UPDATE_FIELD_MAP)
+    body = build_body(
+        {"status_id": sid, **texts, "group_ids": groups, "custom_properties": entries or None}, UPDATE_FIELD_MAP
+    )
     saved_ids = [identifier for identifier, _ in saved]
     before: dict[int, _CustomField] = {}
     if entries:  # a plain update sends no GET; a custom field is only written after the client was read

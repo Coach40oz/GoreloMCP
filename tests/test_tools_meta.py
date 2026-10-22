@@ -51,6 +51,8 @@ CORE_TOOLS = {
     "list_org_groups", "list_org_users",
     "list_agents", "get_agent", "list_custom_assets",
     "post_alert", "list_alerts",
+    "list_agent_apps", "get_agent_hardware", "list_agent_patches", "list_agent_available_updates", "list_agent_tags",
+    "list_asset_types", "list_scripts", "get_script",  # 1.4.0 (contract 05200951c89e)
 }
 
 
@@ -124,7 +126,7 @@ def core_specs():
 
 def test_every_core_tool_is_registered_once_in_the_core_toolset():
     specs = core_specs()
-    assert sorted(spec.name for spec in specs) == sorted(CORE_TOOLS) and len(CORE_TOOLS) == 17  # 16 until list_alerts joined
+    assert sorted(spec.name for spec in specs) == sorted(CORE_TOOLS) and len(CORE_TOOLS) == 25  # 16 until list_alerts joined, 17 until 1.4.0 added eight
     assert {spec.toolset for spec in specs} == {"core"}
 
 
@@ -196,9 +198,9 @@ def test_the_core_modules_use_the_shared_helpers_for_ids_and_write_answers():
 
 # Every core tool with its id parameters, so that StrictId is checked on all of them in one place.
 ID_PARAMS = {
-    "list_clients": ["status_ids"],
+    "list_clients": ["status_ids", "group_ids"],
     "get_client": ["client_id"],
-    "update_client": ["client_id", "status_id", "clear_custom_property_ids"],
+    "update_client": ["client_id", "status_id", "clear_custom_property_ids", "group_ids"],
     "list_client_locations": ["client_id"],
     "list_contacts": ["client_id", "client_ids", "status_ids"],
     "get_contact": ["contact_id"],
@@ -209,6 +211,7 @@ ID_PARAMS = {
     "list_custom_assets": ["client_ids"],
     "post_alert": ["client_id"],
     "list_alerts": ["client_ids", "type_ids"],
+    "list_scripts": ["type_ids"],
 }
 
 
@@ -226,6 +229,7 @@ BASE_ARGS = {
     "list_custom_assets": {},
     "post_alert": {"name": "n", "client_id": 1, "resource": "r", "severity": 1},
     "list_alerts": {},
+    "list_scripts": {},
 }
 
 
@@ -275,6 +279,8 @@ MAX_PARAMETER = 220  # and never more than 220 per parameter
 # core module group so that a later edit cannot quietly grow the tool list again.
 TYPICAL_DESCRIPTION = 700
 TYPICAL_PARAMETER = 160
+# update_client carries the 1.4.0 group_ids guidance (read GroupIds first, [9] drops the rest, who sees the client): 795 measured
+DESCRIPTION_OVERRIDES = {"update_client": 810}
 
 
 async def core_tools(server):
@@ -286,7 +292,7 @@ async def test_every_core_tool_and_parameter_description_stays_within_the_size_l
     assert len(tools) == len(CORE_TOOLS)
     for tool in tools:
         assert 40 < len(tool.description) <= MAX_DESCRIPTION, tool.name
-        assert len(tool.description) <= TYPICAL_DESCRIPTION, tool.name
+        assert len(tool.description) <= DESCRIPTION_OVERRIDES.get(tool.name, TYPICAL_DESCRIPTION), tool.name
         for pname, prop in tool.inputSchema.get("properties", {}).items():
             assert 0 < len(prop["description"]) <= TYPICAL_PARAMETER, f"{tool.name}.{pname}"
             assert len(prop["description"]) <= MAX_PARAMETER, f"{tool.name}.{pname}"
@@ -295,8 +301,10 @@ async def test_every_core_tool_and_parameter_description_stays_within_the_size_l
 # The size budget of the core module group: measured as (json.dumps of each tool
 # as the client sees it, exclude_none) with every toolset on and destructive tools on. The advertised schemas are
 # compacted centrally (server.compact_input_schema), so what the modules still control is their descriptions.
-# Measured 24_910 bytes for 1.3.0; the limit is 25_300, which leaves 390 bytes.
-CORE_BUDGET_BYTES = 25_300
+# Measured 24_910 bytes for 1.3.0; the limit was 25_300, which left 390 bytes. The eight 1.4.0 tools (contract 05200951c89e: six
+# agent and asset type reads, list_scripts, get_script) add 6_301 bytes and the new 1.4.0 parameters of list_clients, update_client,
+# list_alerts and post_alert 1_630 more: 32_841 measured, the limit is that plus about 1 percent rounded up to the next 100.
+CORE_BUDGET_BYTES = 33_200
 
 
 async def test_the_core_tool_list_stays_within_its_size_budget(server_factory):

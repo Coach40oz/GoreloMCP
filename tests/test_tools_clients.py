@@ -39,7 +39,7 @@ TOOLS = {
     # name: (kind, ops, destructive_hint, parameters in order, required parameters)
     "list_clients": (
         "read", ["GET /v1/clients"], False,
-        ["query", "status_ids", "created_since", "created_before", "updated_since", "updated_before", "page_size", "cursor"],
+        ["query", "status_ids", "group_ids", "created_since", "created_before", "updated_since", "updated_before", "page_size", "cursor"],
         [],
     ),
     "get_client": ("read", ["GET /v1/clients/{clientId}"], False, ["client_id"], ["client_id"]),
@@ -54,7 +54,7 @@ TOOLS = {
     ),
     "update_client": (
         "write", ["GET /v1/clients/{clientId}", "PATCH /v1/clients/{clientId}"], True,
-        ["client_id", "name", "status_id", "billing_name", "alternate_name", "custom_properties", "clear_custom_property_ids"],
+        ["client_id", "name", "status_id", "billing_name", "alternate_name", "custom_properties", "clear_custom_property_ids", "group_ids"],
         ["client_id"],
     ),
     "list_client_locations": (
@@ -258,10 +258,11 @@ def test_the_docstrings_carry_the_documented_facts():
     assert "A hidden field (IsHidden) shows no Value: only IsSet is checked (see warning)" in update
     assert "status_id 4 (Archived) hides the client from default lists" in update
     assert "Update a client's name, status, billing name, alternate name or custom fields" in update
+    assert "group_ids REPLACES the whole group list" in update
     # contract 1b1c0cec0e9a: the single record has the custom fields, the list rows leave them out
-    assert "Rows leave out CustomProperties: get_client has them" in listing
+    assert "Rows carry GroupIds but leave out CustomProperties: get_client has them" in listing
     record = flat(clients_module.get_client.__doc__)
-    assert "The record includes CustomProperties (each client custom field: Id, Name, Type, Value, IsSet" in record
+    assert "The record includes GroupIds (the groups the client is subscribed to) and CustomProperties (each client custom field: Id, Name, Type, Value, IsSet" in record
     assert "IsHidden true when the Value is hidden from the API and always null" in record
     assert "A deleted client is a 404 like an unknown id; an Archived client is returned" in record
 
@@ -338,8 +339,8 @@ async def test_the_custom_property_texts_say_where_ids_come_from_how_to_clear_an
     assert "each id once" in saving and "Gorelo checks Number, Checkbox, Dropdown values" in saving
     assert "the saved value goes and the field shows its default again" in clearing
     assert "A required field cannot be cleared to nothing" in clearing
-    # core tool texts stay short (tests/test_tools_meta.py caps a parameter at 160 and a tool at 700 characters)
-    assert len(saving) <= 160 and len(clearing) <= 160 and len(flat(tool.description)) <= 700
+    # core tool texts stay short (tests/test_tools_meta.py caps a parameter at 160 and a tool at 700, update_client 810)
+    assert len(saving) <= 160 and len(clearing) <= 160 and len(flat(tool.description)) <= 810
 
 
 def test_only_the_array_is_in_the_field_map_because_the_tool_relabels_its_own_custom_property_errors():
@@ -550,6 +551,32 @@ async def test_list_clients_refuses_a_status_off_the_scale_or_too_many_before_an
     assert mock_gorelo.requests == []
 
 
+async def test_list_clients_sends_group_ids_comma_joined_and_echoes_them(server, mock_gorelo):
+    mock_gorelo.on("GET", CLIENTS, paged_envelope([client_record(GroupIds=[4, 9])]))
+    result = await call_tool(server, "list_clients", {"group_ids": [9, 4], "status_ids": [1]})
+    request = mock_gorelo.last
+    assert (request.method, request.path) == ("GET", CLIENTS)
+    assert request.query == {"StatusIds": "1", "GroupIds": "9,4", "PageSize": "200"}
+    assert result["filters"] == {"status_ids": [1], "group_ids": [9, 4]}
+    assert result["items"][0]["GroupIds"] == [4, 9]
+    await call_tool(server, "list_clients", {})
+    assert "GroupIds" not in mock_gorelo.last.query
+
+
+@pytest.mark.parametrize(
+    "groups, fragment",
+    [
+        ([], "group_ids: expected at least one id, got an empty list"),
+        ([0], "group_ids[0]: expected a positive whole number"),
+        ([4, -1], "group_ids[1]: expected a positive whole number"),
+        ([4] * 101, "group_ids: at most 100 values, got 101"),
+    ],
+)
+async def test_list_clients_refuses_bad_group_ids_before_any_http(server, mock_gorelo, groups, fragment):
+    assert fragment in await call_tool_error(server, "list_clients", {"group_ids": groups})
+    assert mock_gorelo.requests == []
+
+
 async def test_list_clients_accepts_exactly_100_status_values(server, mock_gorelo):
     mock_gorelo.on("GET", CLIENTS, paged_envelope([client_record()]))
     await call_tool(server, "list_clients", {"status_ids": [1] * 100})
@@ -578,7 +605,7 @@ async def test_list_clients_local_errors_name_the_parameter_and_send_nothing(ser
 
 @pytest.mark.parametrize(
     "property_name, param",
-    [("StatusIds", "status_ids"), ("PageSize", "page_size"), ("CreatedSince", "created_since"), ("Query", "query"), ("cursor", "cursor")],
+    [("StatusIds", "status_ids"), ("GroupIds", "group_ids"), ("PageSize", "page_size"), ("CreatedSince", "created_since"), ("Query", "query"), ("cursor", "cursor")],
 )
 async def test_list_clients_maps_a_gorelo_error_to_the_snake_case_parameter(server, mock_gorelo, property_name, param):
     mock_gorelo.on("GET", CLIENTS, error_envelope(400, [("070101", "Rejected value.", property_name)]))
@@ -892,7 +919,8 @@ def test_update_client_declares_the_published_operation_and_no_override_is_invol
     assert "PATCH /v1/clients" not in spec_index.ops  # the collection form is gone from the published spec
     op = spec_index.op("PATCH /v1/clients/{clientId}")
     assert op.path_params == {"clientId": {"type": "integer", "format": "int64"}}
-    assert set(op.body["fields"]) == {"Name", "StatusId", "BillingName", "AlternateName", "CustomProperties"}
+    # GroupIds is new in contract 05200951c89e
+    assert set(op.body["fields"]) == {"Name", "StatusId", "BillingName", "AlternateName", "CustomProperties", "GroupIds"}
     assert op.body["required"] == []
     assert "Id" not in op.body["fields"]
     custom = op.body["fields"]["CustomProperties"]  # contract 1b1c0cec0e9a: an upsert by Id, null Value clears
@@ -913,6 +941,52 @@ async def test_update_client_makes_no_read_before_the_write(server, mock_gorelo)
     mock_gorelo.on("PATCH", CLIENT_9101, envelope(client_record()))
     await call_tool(server, "update_client", {"client_id": 9101, "billing_name": "Example Co Billing"})
     assert [(r.method, r.path) for r in mock_gorelo.requests] == [("PATCH", CLIENT_9101)]
+
+
+async def test_update_client_sends_group_ids_as_the_full_list_with_a_single_patch(server, mock_gorelo):
+    mock_gorelo.on("PATCH", CLIENT_9101, envelope(client_record(GroupIds=[4, 9])))
+    result = await call_tool(server, "update_client", {"client_id": 9101, "group_ids": [4, 9]})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("PATCH", CLIENT_9101)]  # no read: no custom field sent
+    assert mock_gorelo.last.json == {"GroupIds": [4, 9]}
+    assert result["GroupIds"] == [4, 9]
+    await call_tool(server, "update_client", {"client_id": 9101, "name": "N"})
+    assert mock_gorelo.last.json == {"Name": "N"}  # omitted means unchanged, never sent
+
+
+async def test_update_client_group_ids_with_a_custom_field_keeps_the_read_write_read_flow(server, mock_gorelo):
+    answer = client_with_custom_properties(saved=[5], GroupIds=[4])
+    arguments = {"custom_properties": [{"id": 5, "value": "Gold"}]}
+    route_update(mock_gorelo, arguments, envelope(answer))
+    await call_tool(server, "update_client", {"client_id": 9101, "group_ids": [4], **arguments})
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH", "GET"]
+    assert mock_gorelo.calls("PATCH")[-1].json == {"GroupIds": [4], "CustomProperties": [{"Id": 5, "Value": "Gold"}]}
+
+
+@pytest.mark.parametrize(
+    "groups, fragment",
+    [
+        ([], "group_ids: expected at least one id, got an empty list"),
+        ([0], "group_ids[0]: expected a positive whole number"),
+        ([4, -2], "group_ids[1]: expected a positive whole number"),
+        ([4] * 101, "group_ids: at most 100 values, got 101"),
+    ],
+)
+async def test_update_client_refuses_bad_group_ids_before_any_request(server, mock_gorelo, groups, fragment):
+    assert fragment in await call_tool_error(server, "update_client", {"client_id": 9101, "group_ids": groups})
+    assert mock_gorelo.requests == []
+
+
+async def test_update_client_names_group_ids_when_gorelo_rejects_the_groups(server, mock_gorelo):
+    mock_gorelo.on("PATCH", CLIENT_9101, error_envelope(400, [("070101", "Group 77 is not active.", "GroupIds")]))
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, "group_ids": [77]})
+    assert text == trace("Gorelo rejected update_client (HTTP 400, code 070101): group_ids: Group 77 is not active.")
+
+
+async def test_update_client_group_ids_text_says_it_replaces_the_list_and_empty_is_refused(server):
+    tool = next(t for t in await list_tools(server) if t.name == "update_client")
+    text = flat(tool.inputSchema["properties"]["group_ids"]["description"])
+    assert "FULL group list" in text and "replaces the current one" in text and "get_client's GroupIds" in text and "[] is refused" in text
+    assert "list_org_groups" in text and len(text) <= 160
 
 
 async def test_update_client_sends_all_four_changes_under_their_pascal_names(server, mock_gorelo):
@@ -942,8 +1016,8 @@ async def test_update_client_never_sends_a_field_that_was_not_given(server, mock
 async def test_update_client_with_nothing_to_change_is_a_local_error(server, mock_gorelo):
     text = await call_tool_error(server, "update_client", {"client_id": 9101})
     assert text == (
-        "nothing to update: pass at least one of name, status_id, billing_name, alternate_name, custom_properties "
-        "or clear_custom_property_ids (only the fields you pass are changed)"
+        "nothing to update: pass at least one of name, status_id, billing_name, alternate_name, group_ids, "
+        "custom_properties or clear_custom_property_ids (only the fields you pass are changed)"
     )
     assert mock_gorelo.requests == []
 
@@ -3131,7 +3205,7 @@ async def test_the_description_says_the_client_is_read_first(server):
     tool = next(t for t in await list_tools(server) if t.name == "update_client")
     text = flat(tool.description)
     assert "It reads the client first: ids must be listed there, and other custom fields must come back unchanged." in text
-    assert len(text) <= 700  # the cap for a core tool (tests/test_tools_meta.py)
+    assert len(text) <= 810  # update_client's override of the 700 core cap (tests/test_tools_meta.py)
     assert "GET" not in text  # the operation is declared, not explained to the model
 
 
@@ -3162,7 +3236,7 @@ def test_the_module_text_names_the_hidden_rules_and_the_status_scale():
 async def test_the_update_description_stays_within_the_core_cap_and_names_the_hidden_rule(server):
     tool = next(t for t in await list_tools(server) if t.name == "update_client")
     text = flat(tool.description)
-    assert len(text) <= 700
+    assert len(text) <= 810  # update_client override, see tests/test_tools_meta.py
     assert "A hidden field (IsHidden) shows no Value: only IsSet is checked (see warning)." in text
     assert "GET" not in text
 

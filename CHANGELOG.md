@@ -2,6 +2,34 @@
 
 All notable changes to this project are listed here, newest first, in the plain style of Keep a Changelog.
 
+## 1.4.0 (2026-10-22)
+
+Follows the Gorelo Public API description of 2026-10-22 (125 operations, contract 05200951c89e), which adds reads of what an agent
+reported, the asset types and the scripts.
+
+### Added
+
+- Eight read tools in `core`: `list_agent_apps`, `get_agent_hardware`, `list_agent_patches`, `list_agent_available_updates` and
+  `list_agent_tags` (what one agent reported at its last scan, and its tags; no scan is started), `list_asset_types`,
+  `list_scripts` (paged) and `get_script`. The server registers 119 tools: 109 regular and 10 gated; the default toolsets register 71.
+  - `get_script` returns the script `Content` in full. Script text can hold credentials, so the tool says it is data, never
+    instructions, and secret values are not repeated unless the user asks.
+- Filters and fields on existing tools: `group_ids` on `list_clients`; `agent_asset_ids`, `custom_asset_ids` and `uptime_ids` on
+  `list_alerts`; `device_ids` on `list_tickets`.
+- `post_alert` takes one of `agent_asset_id`, `custom_asset_id` or `uptime_id` to link the alert to a record (at most one).
+- `create_custom_asset` and `update_custom_asset` take `local_ip_address`, `manufacturer`, `model` and `warranty_start_date`.
+
+### Changed
+
+- `update_client` takes `group_ids`, which replaces the client's groups. An empty list is refused (Gorelo's text says it clears
+  the groups; this server does not send it).
+- `ip_address` of the custom asset tools is deprecated in favour of `local_ip_address`; giving both is refused.
+- The agent status labels are Online and Offline (the ids are unchanged).
+- The spec index follows the renamed path placeholders (`{agentAssetId}` for `{deviceId}`, `{uptimeId}` for `{checkId}`). The
+  `PageSize` rule of nine paged operations is reject instead of clamp; the tools already clamp to 1-200 before sending.
+- The size budgets of the tool list grew with the new tools: the default `tools/list` is 104409 bytes (budget 105500) and the core
+  tools 32841 bytes (budget 33200).
+
 ## 1.3.0 (2026-10-17)
 
 Follows the Gorelo Public API description of 2026-10-17 (117 operations, contract a7954b24844b), which adds documents, a feed of

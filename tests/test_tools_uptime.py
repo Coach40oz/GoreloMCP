@@ -119,11 +119,11 @@ def route_update(mock, record=None):
 
 EXPECTED_TOOLS = {
     "list_uptime_checks": ("read", ["GET /v1/uptime"]),
-    "get_uptime_check": ("read", ["GET /v1/uptime/{checkId}"]),
-    "create_uptime_check": ("write", ["POST /v1/uptime", "GET /v1/uptime/{checkId}"]),
-    "update_uptime_check": ("write", ["PATCH /v1/uptime/{checkId}", "GET /v1/uptime/{checkId}"]),
-    "set_uptime_maintenance": ("write", ["PATCH /v1/uptime/{checkId}", "GET /v1/uptime/{checkId}"]),
-    "delete_uptime_check": ("destructive", ["DELETE /v1/uptime/{checkId}"]),
+    "get_uptime_check": ("read", ["GET /v1/uptime/{uptimeId}"]),
+    "create_uptime_check": ("write", ["POST /v1/uptime", "GET /v1/uptime/{uptimeId}"]),
+    "update_uptime_check": ("write", ["PATCH /v1/uptime/{uptimeId}", "GET /v1/uptime/{uptimeId}"]),
+    "set_uptime_maintenance": ("write", ["PATCH /v1/uptime/{uptimeId}", "GET /v1/uptime/{uptimeId}"]),
+    "delete_uptime_check": ("destructive", ["DELETE /v1/uptime/{uptimeId}"]),
 }
 
 
@@ -143,7 +143,7 @@ def test_the_fixtures_are_shaped_like_the_spec(spec_index):
     assert set(record["Target"]) == fields("UptimeTarget")
     assert set(record["MaintenanceMode"]) == fields("UptimeMaintenanceMode")
     assert set(record["Type"]) == set(record["Status"]) == fields("CodeModel")
-    assert fields("CreateUptimeCheckResult") == fields("UpdateUptimeCheckResult") == fields("DeleteUptimeCheckResult") == {"Id"}
+    assert fields("CreateUptimeResult") == fields("UpdateUptimeResult") == fields("DeleteUptimeResult") == {"Id"}
 
 
 def test_the_module_docstring_names_every_op_the_tools_use():
@@ -182,7 +182,7 @@ def test_every_field_map_entry_is_a_name_the_spec_knows(spec_index):
 
 def test_the_body_maps_cover_exactly_the_documented_fields(spec_index):
     create = set(spec_index.op("POST /v1/uptime").body["fields"])
-    update = set(spec_index.op("PATCH /v1/uptime/{checkId}").body["fields"])
+    update = set(spec_index.op("PATCH /v1/uptime/{uptimeId}").body["fields"])
     top = {path.split(".")[0] for path in uptime.CHECK_BODY.values()}
     assert top == create and top | {"MaintenanceMode"} == update
     assert {path.split(".")[0] for path in uptime.MAINTENANCE_BODY.values()} == {"MaintenanceMode"}
@@ -442,7 +442,7 @@ async def test_get_uptime_check_returns_the_record_unchanged(server, mock_gorelo
 
 
 async def test_get_uptime_check_404_names_check_id(server, mock_gorelo):
-    mock_gorelo.on("GET", CHECK_PATH, error_envelope(404, [("070401", "Uptime check not found.", "checkId")]))
+    mock_gorelo.on("GET", CHECK_PATH, error_envelope(404, [("070401", "Uptime check not found.", "uptimeId")]))
     text = await call_tool_error(server, "get_uptime_check", {"check_id": CHECK_ID})
     assert text == f"Gorelo rejected get_uptime_check (HTTP 404, code 070401): check_id: Uptime check not found. [trace {TEST_TRACE_ID}]"
 
@@ -456,7 +456,7 @@ async def test_get_uptime_check_refuses_a_success_without_data(server, mock_gore
 async def test_get_uptime_check_refuses_an_answer_that_is_not_an_object_record(server, mock_gorelo, data):
     mock_gorelo.on("GET", CHECK_PATH, envelope(data))
     text = await call_tool_error(server, "get_uptime_check", {"check_id": CHECK_ID})
-    assert text.startswith("Gorelo returned an unexpected response for get_uptime_check: GET /v1/uptime/{checkId}: expected Data to be a non-empty object but got ")
+    assert text.startswith("Gorelo returned an unexpected response for get_uptime_check: GET /v1/uptime/{uptimeId}: expected Data to be a non-empty object but got ")
     assert text.endswith("refusing to guess")  # a read: nothing was written
 
 
@@ -832,7 +832,7 @@ async def test_a_failed_reread_after_a_successful_create_returns_the_id_and_a_wa
     mock_gorelo.on("GET", CHECK_PATH, error_envelope(404, [("070401", "Uptime check not found.")]))
     result = await call_tool(server, "create_uptime_check", {**BASE, "check_type": "icmp", "ip": "10.0.0.1"})
     assert set(result) == {"Id", "warning"} and result["Id"] == CHECK_ID
-    assert result["warning"].startswith("the write succeeded; re-reading it failed: GET /v1/uptime/{checkId} answered HTTP 404")
+    assert result["warning"].startswith("the write succeeded; re-reading it failed: GET /v1/uptime/{uptimeId} answered HTTP 404")
     assert "Do not repeat the write" in result["warning"]
     assert len(mock_gorelo.calls("POST")) == 1 and len(mock_gorelo.calls("GET")) == 1
 
@@ -1008,7 +1008,7 @@ async def test_a_stored_target_that_cannot_complete_the_change_is_not_guessed(se
     "failure, expected",
     [
         pytest.param(
-            error_envelope(404, [("070401", "Uptime check not found.", "checkId")]),
+            error_envelope(404, [("070401", "Uptime check not found.", "uptimeId")]),
             "Gorelo rejected update_uptime_check (HTTP 404, code 070401): check_id: Uptime check not found.",
             id="404",
         ),
@@ -1049,7 +1049,7 @@ async def test_a_stored_type_that_cannot_be_read_stops_the_update_before_the_pat
     mock_gorelo.on("GET", CHECK_PATH, envelope(record))
     text = await call_tool_error(server, "update_uptime_check", {"check_id": CHECK_ID, "ip": "10.0.0.2"})
     assert text.startswith(
-        "Gorelo returned an unexpected response for update_uptime_check: GET /v1/uptime/{checkId}: the check has no "
+        "Gorelo returned an unexpected response for update_uptime_check: GET /v1/uptime/{uptimeId}: the check has no "
         "readable Type.Id, so its target cannot be completed; refusing to guess. Nothing was changed"
     )
     assert [r.method for r in mock_gorelo.requests] == ["GET"]
@@ -1060,7 +1060,7 @@ async def test_a_read_that_is_not_an_object_stops_the_update_before_the_patch(se
     mock_gorelo.on("GET", CHECK_PATH, envelope(data))
     text = await call_tool_error(server, "update_uptime_check", {"check_id": CHECK_ID, "ip": "10.0.0.2"})
     assert text.startswith(
-        "Gorelo returned an unexpected response for update_uptime_check: GET /v1/uptime/{checkId}: "
+        "Gorelo returned an unexpected response for update_uptime_check: GET /v1/uptime/{uptimeId}: "
         "expected Data to be a non-empty object but got "
     )
     assert text.endswith("refusing to guess")  # a read: it says nothing about a write
@@ -1239,7 +1239,7 @@ async def test_calling_update_directly_with_an_unknown_type_is_refused(client_fa
 @pytest.mark.parametrize(
     "property_name, param",
     [("Ip", "ip"), ("Url", "url"), ("Port", "port"), ("Frequency", "frequency_minutes"), ("RegionId", "region"), ("TypeId", "check_type"),
-     ("TagIds", "tag_ids"), ("LocationId", "location_id"), ("ClientId", "client_id"), ("checkId", "check_id"), ("CheckId", "check_id"), ("MaintenanceMode", "MaintenanceMode")],
+     ("TagIds", "tag_ids"), ("LocationId", "location_id"), ("ClientId", "client_id"), ("uptimeId", "check_id"), ("UptimeId", "check_id"), ("MaintenanceMode", "MaintenanceMode")],
 )
 async def test_a_gorelo_error_on_update_names_the_snake_case_param(server, mock_gorelo, property_name, param):
     # MaintenanceMode is not a parameter of update_uptime_check: Gorelo's own name stays
@@ -1262,7 +1262,7 @@ async def test_an_update_answer_that_is_not_an_object_is_not_taken_for_a_clean_s
     mock_gorelo.on("PATCH", CHECK_PATH, envelope(data))
     text = await call_tool_error(server, "update_uptime_check", {"check_id": CHECK_ID, "frequency_minutes": 5})
     assert text.startswith(
-        "Gorelo returned an unexpected response for update_uptime_check: PATCH /v1/uptime/{checkId}: "
+        "Gorelo returned an unexpected response for update_uptime_check: PATCH /v1/uptime/{uptimeId}: "
         "expected Data to be a non-empty object but got "
     )
     assert "the write may have been applied, so verify it with a read before repeating it" in text
@@ -1274,7 +1274,7 @@ async def test_a_failed_reread_after_a_successful_update_returns_a_warning(serve
     mock_gorelo.on("GET", CHECK_PATH, httpx.ReadTimeout("slow"))
     result = await call_tool(server, "update_uptime_check", {"check_id": CHECK_ID, "frequency_minutes": 5})
     assert set(result) == {"Id", "warning"} and result["Id"] == CHECK_ID
-    assert "the write succeeded; re-reading it failed: GET /v1/uptime/{checkId} timed out" in result["warning"]
+    assert "the write succeeded; re-reading it failed: GET /v1/uptime/{uptimeId} timed out" in result["warning"]
     assert len(mock_gorelo.calls("PATCH")) == 1 and len(mock_gorelo.calls("GET")) == 1
 
 
@@ -1502,7 +1502,7 @@ async def test_calling_maintenance_directly_without_a_real_boolean_is_refused(cl
 @pytest.mark.parametrize(
     "property_name, param",
     [("Enabled", "enabled"), ("StartDateTime", "start"), ("DurationInMinutes", "duration_minutes"), ("Reason", "reason"),
-     ("MaintenanceMode.Reason", "reason"), ("checkId", "check_id")],
+     ("MaintenanceMode.Reason", "reason"), ("uptimeId", "check_id")],
 )
 async def test_a_gorelo_error_on_maintenance_names_the_snake_case_param(server, mock_gorelo, property_name, param):
     mock_gorelo.on("PATCH", CHECK_PATH, error_envelope(400, [("070101", "Rejected by Gorelo.", property_name)]))
@@ -1518,7 +1518,7 @@ async def test_a_maintenance_answer_that_is_not_an_object_is_not_taken_for_a_cle
     mock_gorelo.on("PATCH", CHECK_PATH, envelope(data))
     text = await call_tool_error(server, "set_uptime_maintenance", {"check_id": CHECK_ID, "enabled": False})
     assert text.startswith(
-        "Gorelo returned an unexpected response for set_uptime_maintenance: PATCH /v1/uptime/{checkId}: "
+        "Gorelo returned an unexpected response for set_uptime_maintenance: PATCH /v1/uptime/{uptimeId}: "
         "expected Data to be a non-empty object but got "
     )
     assert "the write may have been applied, so verify it with a read before repeating it" in text
@@ -1584,7 +1584,7 @@ async def test_a_delete_answer_that_is_not_an_object_raises_instead_of_reporting
     mock_gorelo.on("DELETE", CHECK_PATH, envelope(data))
     text = await call_tool_error(server, "delete_uptime_check", {"check_id": CHECK_ID, "confirm": True})
     assert text.startswith(
-        "Gorelo returned an unexpected response for delete_uptime_check: DELETE /v1/uptime/{checkId}: "
+        "Gorelo returned an unexpected response for delete_uptime_check: DELETE /v1/uptime/{uptimeId}: "
         "expected Data to be a non-empty object but got "
     )
     assert "the write may have been applied, so verify it with a read before repeating it" in text
@@ -1592,7 +1592,7 @@ async def test_a_delete_answer_that_is_not_an_object_raises_instead_of_reporting
 
 
 async def test_delete_404_names_check_id(server, mock_gorelo):
-    mock_gorelo.on("DELETE", CHECK_PATH, error_envelope(404, [("070401", "Uptime check not found.", "checkId")]))
+    mock_gorelo.on("DELETE", CHECK_PATH, error_envelope(404, [("070401", "Uptime check not found.", "uptimeId")]))
     text = await call_tool_error(server, "delete_uptime_check", {"check_id": CHECK_ID, "confirm": True})
     assert text == f"Gorelo rejected delete_uptime_check (HTTP 404, code 070401): check_id: Uptime check not found. [trace {TEST_TRACE_ID}]"
 
