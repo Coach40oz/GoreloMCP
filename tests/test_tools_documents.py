@@ -229,6 +229,22 @@ async def test_every_filter_goes_out_under_its_spec_name(server, mock_gorelo):
     assert result["page_size"] == 25
 
 
+async def test_list_documents_sends_document_order_as_sort_by(server, mock_gorelo):
+    mock_gorelo.on("GET", DOCS, paged_envelope([]))
+    result = await call_tool(server, "list_documents", {"parent_document_id": PARENT, "sort_by": "documentOrder", "sort_order": "asc"})
+    assert mock_gorelo.last.query["SortBy"] == "documentOrder" and mock_gorelo.last.query["SortOrder"] == "asc"
+    assert result["filters"]["sort_by"] == "documentOrder"
+    await call_tool(server, "list_documents", {"sort_by": "documentOrder"})  # not refused without a parent, only documented
+    assert mock_gorelo.last.query["SortBy"] == "documentOrder"
+
+
+async def test_list_documents_still_refuses_an_unknown_sort_by(server, mock_gorelo):
+    mock_gorelo.on("GET", DOCS, paged_envelope([]))
+    text = await call_tool_error(server, "list_documents", {"sort_by": "documentorder"})
+    assert "sort_by" in text
+    assert mock_gorelo.requests == []
+
+
 async def test_the_echoed_filters_can_be_sent_back_unchanged_for_the_next_page(server, mock_gorelo):
     mock_gorelo.on("GET", DOCS, paged_envelope([]))
     first = await call_tool(server, "list_documents", {"status_ids": [2], "created_since": "2026-09-01T08:00:00+02:00"})
@@ -2073,6 +2089,27 @@ async def test_list_document_related_items_maps_a_404_to_document_id(server, moc
     assert text == f"Gorelo rejected list_document_related_items (HTTP 404, code 070401): document_id: Document not found. [trace {TEST_TRACE_ID}]"
 
 
+@pytest.mark.parametrize("name", ["agent_asset", "device"])
+async def test_add_related_items_sends_item_type_4_for_agent_asset_and_its_older_name_device(server, mock_gorelo, name):
+    asset = uid(52)
+    answer = linked((4, "Agent asset", asset))
+    mock_gorelo.on("POST", RELATED_PATH, envelope(answer))
+    mock_gorelo.on("GET", RELATED_PATH, envelope(answer))
+    result = await call_tool(
+        server, "add_document_related_items",
+        {"document_id": DOC, "related_items": [{"item_type": name, "item_id": asset.replace("-", "").upper()}]},
+    )
+    assert mock_gorelo.requests[0].json == {"RelatedItems": [{"ItemId": asset, "ItemTypeId": 4}]}
+    assert result["items"] == answer and result["count"] == 1
+
+
+@pytest.mark.parametrize("name", ["agent_asset", "device"])
+async def test_add_related_items_checks_that_an_agent_asset_id_is_a_guid(server, mock_gorelo, name):
+    text = await call_tool_error(server, "add_document_related_items", {"document_id": DOC, "related_items": [{"item_type": name, "item_id": "abc"}]})
+    assert "related_items[0].item_id: expected a GUID such as" in text
+    assert mock_gorelo.requests == []
+
+
 async def test_add_related_items_sends_each_type_in_its_wire_form(server, mock_gorelo):
     asset, device, contact = uid(51), uid(52), "4711"
     answer = linked((1, "Document", PARENT), (2, "Custom asset", asset), (3, "Contact", contact), (4, "Device", device),
@@ -2555,8 +2592,9 @@ async def test_a_tool_text_that_names_a_gated_tool_gives_its_condition_phrase(se
 async def test_the_sort_by_enum_has_the_member_order_the_other_list_tools_pin(server):
     # typing caches `Literal[...] | None` by its members whatever their order, so the module that is imported first fixes the
     # enum order of every later tool that declares the same members: tools/projects.py and tools/tickets.py pin
-    # ["updatedOn", "createdOn"], and tools/documents.py (imported before both) must declare them in that order
+    # ["updatedOn", "createdOn"]; list_documents has its own Literal that adds documentOrder (the app's sibling order)
     tools = {t.name: t for t in await list_tools(server)}
-    for name in ("list_documents", "list_projects", "list_tickets"):
+    for name in ("list_projects", "list_tickets"):
         assert tools[name].inputSchema["properties"]["sort_by"]["enum"] == ["updatedOn", "createdOn"], name
+    assert tools["list_documents"].inputSchema["properties"]["sort_by"]["enum"] == ["updatedOn", "createdOn", "documentOrder"]
     assert tools["list_documents"].inputSchema["properties"]["sort_order"]["enum"] == ["asc", "desc"]

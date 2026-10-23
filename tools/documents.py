@@ -125,18 +125,19 @@ ACTIVE_STATUS_ID = 1
 ARCHIVED_STATUS_ID = 2
 STATUS_SCALE = ", ".join(f"{key} {name}" for key, name in DOCUMENT_STATUSES.items())
 
-# AddDocumentRelatedItem.ItemTypeId: 1 Document, 2 Custom asset, 3 Contact, 4 Device, 5 Structured document, 6 Password.
+# AddDocumentRelatedItem.ItemTypeId: 1 Document, 2 Custom asset, 3 Contact, 4 Agent asset (was Device; the id is unchanged), 5 Structured document, 6 Password.
 ITEM_TYPE_IDS = {
     "document": 1,
     "custom_asset": 2,
     "contact": 3,
-    "device": 4,
+    "agent_asset": 4,
+    "device": 4,  # the older name of agent_asset, kept so existing calls still work
     "structured_document": 5,
     "password": 6,
 }
 # The ids Gorelo documents as a Guid; a contact id is a number; structured documents and passwords are "linked as given".
-GUID_ITEM_TYPES = ("document", "custom_asset", "device")
-ItemKind = Literal["document", "custom_asset", "contact", "device", "structured_document", "password"]
+GUID_ITEM_TYPES = ("document", "custom_asset", "agent_asset", "device")
+ItemKind = Literal["document", "custom_asset", "contact", "agent_asset", "device", "structured_document", "password"]
 
 # {tool param: Gorelo name}. They build the request, turn a Gorelo PropertyName back into the param to fix, and name the
 # query parameters and path placeholders of the reads.
@@ -614,7 +615,8 @@ async def list_documents(
     ] = None,
     created_before: Annotated[str | None, Field(description="Created strictly before this instant.")] = None,
     sort_by: Annotated[
-        Literal["updatedOn", "createdOn"] | None, Field(description="Default createdOn.")
+        Literal["updatedOn", "createdOn", "documentOrder"] | None,
+        Field(description="Default createdOn. documentOrder is the app's sibling order; meant for use with parent_document_id."),
     ] = None,
     sort_order: Annotated[Literal["asc", "desc"] | None, Field(description="Default desc (newest first).")] = None,
     page_size: Annotated[int, Field(description="Rows per page, 1-200 (clamped).")] = 50,
@@ -623,7 +625,7 @@ async def list_documents(
         Field(description="next_cursor from the previous call; same filters and sort; repeat until has_more is false."),
     ] = None,
 ) -> dict:
-    """List documents (client and internal), one page at a time. Active ones only unless status_ids includes 2; archiving a document archives the documents under it. Rows carry Id, Title, ParentDocumentId, ClientId, Status and the sharing flags, not the body: get_document returns that. To pick up only what changed, make two calls, one with updated_since and one with created_since.
+    """List documents (client and internal), one page at a time. Active ones only unless status_ids includes 2; archiving a document archives the documents under it. Rows carry Id, Title, ParentDocumentId, ClientId, Status and the sharing flags, not the body: get_document returns that. To pick up only what changed, make two calls, one with updated_since and one with created_since. sort_by documentOrder is the order the app shows siblings in; use it with parent_document_id.
     Resolve ids first: client_ids -> list_clients; parent_document_id -> a row Id of this tool.
     Side effects: None (read-only).
     Paging: pass next_cursor back as cursor with the SAME filters until has_more is false.
@@ -743,7 +745,7 @@ async def list_document_related_items(
     ctx: Context,
     document_id: Annotated[str, Field(description=DOCUMENT_ID_TEXT)],
 ) -> dict:
-    """List the records a document is linked to, not paged: Id (the link itself, what remove_document_related_item, when deletes are enabled, takes), ItemId (a GUID, or a number for a contact) and ItemType (1 Document, 2 Custom asset, 3 Contact, 4 Device, 5 Structured document, 6 Password).
+    """List the records a document is linked to, not paged: Id (the link itself, what remove_document_related_item, when deletes are enabled, takes), ItemId (a GUID, or a number for a contact) and ItemType (1 Document, 2 Custom asset, 3 Contact, 4 Agent asset, 5 Structured document, 6 Password).
     Resolve ids first: document_id -> list_documents.
     Side effects: None (read-only).
     """
@@ -773,7 +775,7 @@ async def create_document(
         str | None, Field(description="HTML. No images as data: URLs. Text in angle brackets is read as a tag and lost.")
     ] = None,
 ) -> dict:
-    """Create a document and return it (Gorelo answers with the full record). Give exactly one place: client_id (top level of that client), parent_document_id (under it, taking its client) or internal=true. It goes last among its siblings. Links in the body to documents, devices, custom assets, contacts, passwords or structured documents are added to its related items. To add images or files, create it first, then upload_attachment (item_type document) and update_document.
+    """Create a document and return it (Gorelo answers with the full record). Give exactly one place: client_id (top level of that client), parent_document_id (under it, taking its client) or internal=true. It goes last among its siblings. Links in the body to documents, agent assets, custom assets, contacts, passwords or structured documents are added to its related items. To add images or files, create it first, then upload_attachment (item_type document) and update_document.
     Resolve ids first: client_id -> list_clients, parent_document_id -> list_documents.
     Side effects: creates a real document; none can be deleted through this server (archive_document takes one out of the default list). After a "did not confirm" error check list_documents before creating it again.
     """
@@ -1292,9 +1294,9 @@ async def add_document_related_items(
     related_items: Annotated[
         list[RelatedItem],
         Field(
-            description="1 to 100 records: item_type (document, custom_asset, contact, device, structured_document, "
-            "password) and item_id (GUID; a contact's number as text; structured_document and password ids are linked "
-            "as given, unchecked)."
+            description="1-100 records: item_type (document, custom_asset, contact, agent_asset, structured_document, "
+            "password; agent_asset preferred to device); item_id (GUID; contact: number as text; structured_document, "
+            "password: as given)."
         ),
     ],
 ) -> dict:

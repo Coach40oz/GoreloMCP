@@ -255,7 +255,7 @@ async def list_agents(
     cursor: Annotated[str | None, Field(description="next_cursor from the previous call.")] = None,
 ) -> dict:
     """List agents (managed devices) one page per call; returns {items, has_more, next_cursor, total_count, ...}.
-    Rows carry LocationId, WarrantyStartDate/WarrantyEndDate, SerialNumber, Type ({Id, Name}), ContactId and Banner; SerialNo and HardwareType are deprecated. Rows omit custom fields: get_agent has them. Deleted and client-inactivated devices are never listed. This server cannot delete or uninstall agents. Paging: pass next_cursor as cursor, same filters, until has_more is false.
+    Rows carry LocationId, WarrantyStartDate/WarrantyEndDate, DisplayName, SerialNumber, Type ({Id, Name}), ContactId and Banner; SerialNo and HardwareType are deprecated. Rows omit custom fields: get_agent has them. Deleted and client-inactivated devices are never listed. This server cannot delete or uninstall agents. Paging: pass next_cursor as cursor, same filters, until has_more is false.
     """
     params, shown = _shared_filters(client_ids, query, created_since, created_before, updated_since, updated_before)
     params["StatusIds"] = csv_ids("status_ids", _agent_statuses("status_ids", status_ids))
@@ -274,7 +274,7 @@ async def get_agent(
     agent_id: Annotated[str, Field(description="Agent UUID: the Id of a list_agents row.")],
 ) -> dict:
     """Get one agent (managed device) by UUID; returns Gorelo's full device record, including CustomProperties (a field with IsHidden true has a null Value; IsSet still says whether one is saved).
-    Like list rows it has SerialNumber, Type ({Id, Name}), ContactId and Banner; SerialNo and HardwareType are deprecated.
+    Like list rows it has DisplayName, SerialNumber, Type ({Id, Name}), ContactId and Banner; SerialNo and HardwareType are deprecated.
     """
     aid = guid("agent_id", agent_id)
     record = await client_of(ctx).get_one(GET_AGENT_OP, path_params={"agentAssetId": aid}, tool="get_agent")

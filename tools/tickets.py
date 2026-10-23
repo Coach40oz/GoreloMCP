@@ -871,8 +871,14 @@ async def create_ticket(
     priority_id: Annotated[StrictId, Field(description="0 None, 1 Urgent, 2 High, 3 Normal, 4 Low")],
     source_id: Annotated[StrictId, Field(description="1 Web, 2 Email, 3 Phone, 4 Chat, 5 Alert, 6 Api")],
     group_id: Annotated[StrictId, Field(description="Group id (list_org_groups)")],
-    contact_id: Annotated[StrictId | None, Field(description="Primary contact id (list_contacts)")] = None,
-    cc_contact_ids: Annotated[list[StrictId] | None, Field(description="Contact ids to CC (list_contacts)")] = None,
+    contact_id: Annotated[
+        StrictId | None,
+        Field(description="Primary contact id (list_contacts); may be a contact of any client (no client: a temporary contact)"),
+    ] = None,
+    cc_contact_ids: Annotated[
+        list[StrictId] | None,
+        Field(description="Contact ids to CC (list_contacts); may belong to any client (no client: temporary contacts)"),
+    ] = None,
     location_id: Annotated[StrictId | None, Field(description="Location id (list_client_locations)")] = None,
     lead_assignee_id: Annotated[StrictId | None, Field(description="Lead user id (list_org_users)")] = None,
     assisting_assignee_ids: Annotated[
@@ -1052,9 +1058,12 @@ async def update_ticket(
         ),
     ] = None,
     location_id: Annotated[StrictId | None, Field(description="New location id (list_client_locations)")] = None,
-    contact_id: Annotated[StrictId | None, Field(description="New primary contact id (list_contacts)")] = None,
+    contact_id: Annotated[
+        StrictId | None, Field(description="New primary contact id (list_contacts); may be a contact of any client")
+    ] = None,
     cc_contact_ids: Annotated[
-        list[StrictId] | None, Field(description="Complete new CC list (replaces; list_contacts)")
+        list[StrictId] | None,
+        Field(description="Complete new CC list (replaces; list_contacts); contacts of any client"),
     ] = None,
     group_ids: Annotated[
         list[StrictId] | None, Field(description="Complete new group ids (replaces; list_org_groups)")

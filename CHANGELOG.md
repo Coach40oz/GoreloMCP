@@ -2,6 +2,21 @@
 
 All notable changes to this project are listed here, newest first, in the plain style of Keep a Changelog.
 
+## 1.4.1 (2026-10-23)
+
+Follows the changed text of the Gorelo Public API description (contract 05200951c89e, no operation added or removed).
+
+### Changed
+
+- `list_documents` takes `sort_by` `documentOrder` (the order the app shows siblings in; meant for use with `parent_document_id`,
+  not refused without it).
+- Related item type 4 is called Agent asset now (the id is unchanged). The document related item tools take `agent_asset`; `device`
+  still works as the older name.
+- The descriptions of `contact_id` and `cc_contact_ids` of `create_ticket` and `update_ticket` say that a contact of any client is
+  accepted when the ticket has a client (a ticket without a client takes a temporary contact). The server never checked this and
+  still does not.
+- The texts of `list_agents` and `get_agent` name `DisplayName` (agents carry it now, as custom assets do).
+
 ## 1.4.0 (2026-10-22)
 
 Follows the Gorelo Public API description of 2026-10-22 (125 operations, contract 05200951c89e), which adds reads of what an agent
