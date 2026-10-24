@@ -2270,24 +2270,25 @@ async def test_a_create_answer_without_a_usable_id_is_not_taken_for_a_clean_succ
     assert mock_gorelo.calls("GET") == [] and len(mock_gorelo.calls("POST")) == 1  # never repeated
 
 
+# (answer, the reason in the warning, how many times the read is asked): a refused connection is a read's one retry (1.4.2).
 REREAD_FAILURES = [
-    pytest.param(error_envelope(404, [("070401", "Invoice not found.")]), "GET /v1/invoices/{invoiceId} answered HTTP 404", id="404"),
-    pytest.param(error_envelope(500, [("070500", "Read model unavailable.")]), "GET /v1/invoices/{invoiceId} answered HTTP 500", id="500"),
-    pytest.param(error_envelope(403, [("080203", "API key does not have 'Billing' scope")]), "GET /v1/invoices/{invoiceId} answered HTTP 403", id="scope"),
-    pytest.param(httpx.ReadTimeout("slow"), "GET /v1/invoices/{invoiceId} timed out", id="timeout"),
-    pytest.param(httpx.ConnectError("refused"), "the connection to Gorelo failed during GET /v1/invoices/{invoiceId}", id="connection"),
-    pytest.param(envelope([invoice_detail()]), "GET /v1/invoices/{invoiceId} returned a list instead of the record", id="list"),
-    pytest.param(envelope("INV-1042"), "GET /v1/invoices/{invoiceId} returned a string instead of the record", id="text"),
+    pytest.param(error_envelope(404, [("070401", "Invoice not found.")]), "GET /v1/invoices/{invoiceId} answered HTTP 404", 1, id="404"),
+    pytest.param(error_envelope(500, [("070500", "Read model unavailable.")]), "GET /v1/invoices/{invoiceId} answered HTTP 500", 1, id="500"),
+    pytest.param(error_envelope(403, [("080203", "API key does not have 'Billing' scope")]), "GET /v1/invoices/{invoiceId} answered HTTP 403", 1, id="scope"),
+    pytest.param(httpx.ReadTimeout("slow"), "GET /v1/invoices/{invoiceId} timed out", 1, id="timeout"),
+    pytest.param(httpx.ConnectError("refused"), "the connection to Gorelo failed during GET /v1/invoices/{invoiceId}", 2, id="connection"),
+    pytest.param(envelope([invoice_detail()]), "GET /v1/invoices/{invoiceId} returned a list instead of the record", 1, id="list"),
+    pytest.param(envelope("INV-1042"), "GET /v1/invoices/{invoiceId} returned a string instead of the record", 1, id="text"),
     pytest.param(
-        envelope(None), "GET /v1/invoices/{invoiceId}: Gorelo reported success but Data is null; refusing to guess", id="null"
+        envelope(None), "GET /v1/invoices/{invoiceId}: Gorelo reported success but Data is null; refusing to guess", 1, id="null"
     ),
 ]
 
 
 @pytest.mark.parametrize("tool", BOTH)
-@pytest.mark.parametrize("answer, reason", REREAD_FAILURES)
+@pytest.mark.parametrize("answer, reason, reads", REREAD_FAILURES)
 async def test_a_failed_reread_after_a_successful_create_returns_the_id_and_a_warning_never_a_second_post(
-    server, mock_gorelo, tool, answer, reason
+    server, mock_gorelo, tool, answer, reason, reads
 ):
     mock_gorelo.on("POST", INVOICES, envelope({"Id": NEW_ID}))
     mock_gorelo.on("GET", NEW_PATH, answer)
@@ -2295,7 +2296,8 @@ async def test_a_failed_reread_after_a_successful_create_returns_the_id_and_a_wa
     assert set(result) == {"Id", "warning"} and result["Id"] == NEW_ID
     assert result["warning"].startswith(f"the write succeeded; re-reading it failed: {reason}")
     assert result["warning"].endswith("Do not repeat the write; read it again later.")
-    assert len(mock_gorelo.calls("POST")) == 1 and len(mock_gorelo.calls("GET")) == 1  # neither repeated
+    assert len(mock_gorelo.calls("POST")) == 1  # the write is never repeated
+    assert len(mock_gorelo.calls("GET")) == reads  # the read is asked once more only after a refused connection
 
 
 @pytest.mark.parametrize("tool", BOTH)

@@ -27,9 +27,11 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                update_client its alternate name (this is the only update_client call of this area: the test client itself is
                never given a name or a status, and only the custom_properties area, with its flag, may set a custom field),
                read it back
-    contacts   create_contact (mobile phone, region US); update_contact job_title with
-               clear_secondary_email_ok=true, then check by a read that the mobile phone survived (PATCH replaces
-               the contact); update_contact without a secondary-email choice must be refused locally (no request)
+    contacts   create_contact (mobile phone, region US); update_contact job_title WITHOUT secondary_email (Gorelo keeps the
+               secondary emails an update leaves out, live 2026-10-24): it must go through with at least its read and exactly
+               one write (the client may send the read again after a 429, a 502, 503 or 504 or a refused connection, which
+               adds reads and no write), then check by a read that the mobile phone survived (the tool re-sends what a PATCH
+               would clear)
     tickets    status New, type Incident, group Everyone, source Api (6) and priority Normal are resolved by name;
                create_ticket plain; create_ticket backdated and Closed (offsets in the past); get_ticket by GUID,
                number and display number; update_ticket title and the operator user as watcher (WatcherIds must read back [operator user]),
@@ -64,7 +66,8 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                back null or empty; naming the current client moves nothing), and a negative check: update_custom_asset with the
                second client as client_id and NO location_id must be refused LOCALLY by the tool after its read of the asset
                (since contract a7954b24844b a different ClientId MOVES the asset and needs a LocationId of the new client; the
-               check passes only when the one request of that call was that GET, the guard let no write through and the tool's
+               check passes only when every request of that call was a GET (that read, and the client's own retry of it after a
+               429, a 502, 503 or 504 or a refused connection, if any), the guard let no write through and the tool's
                error has no HTTP status and says "location_id: required when client_id moves the asset"; anything else fails
                the area, and a PATCH that carried the second client would be refused by the guard, which stops the run).
                With --with-asset-move the area then MOVES the asset to the second client and back: the second client must be
@@ -113,7 +116,8 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                custom_properties naming CUSTOM_PROPERTY_UNKNOWN_ID (9000000000000, an Id that is not a client custom field) must be
                REFUSED LOCALLY by the tool, after its read of the client and before any PATCH: it passes only when the one
                request of that call was that GET, the guard let no write through and the tool's error has no HTTP status and names
-               the Id; anything else fails the area (a PATCH that carried the Id would be refused by the guard, which stops the run).
+               the Id (a retry of that GET by the client, after a 429, a 502, 503 or 504 or a refused connection, is not another request
+               of the tool and does not fail the check); anything else fails the area (a PATCH that carried the Id would be refused by the guard, which stops the run).
                A last get_client must show every custom field as at the first read. No custom property PATCH error is expected, so
                the run learns nothing of Gorelo's own names for such errors. If the run stops after the set and before
                the clear succeeded, the cleanup clears the field ONLY when the manifest says it was unset before AND its current Value
@@ -129,7 +133,7 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                must start with the star, the public link and the portal off); list_documents (client, run id as query: both are listed);
                upload_attachment (item_type document) and update_document attachments (the tool reads the document first and the answer
                must list the file); the NEGATIVE CHECK: update_document with a list that leaves the current file out must be refused
-               LOCALLY after its read (one GET, no write, no HTTP status, "would be removed"); update_document body only (the file must
+               LOCALLY after its read (GETs only, no write, no HTTP status, "would be removed"); update_document body only (the file must
                still be attached: it probes whether a changed body keeps the attachments); update_document clear_fields attachments
                (the answer lists none); export_document_pdf (a file: it must start with %PDF); list_document_versions, get_document_version
                and restore_document_version of the OLDEST version (the title is the original one again); add_document_related_items (the
@@ -612,8 +616,8 @@ LOOKUP_ATTEMPTS = 3  # get_ticket by number or display number may need a moment 
 LOOKUP_WAIT = 3.0  # (the invoice lists and delete_invoice's lookup by Number get the same patience)
 # NO_SUCH_NUMBER (imported above from the cleanup, which reads the same refusal) is what delete_invoice says, before it
 # sends any DELETE, when its lookup by Number finds nothing.
-CLIENT_PHONE = "2025550142"  # national number of the temporary client's location: a fictional 555-01xx number in a real area code (Gorelo refused area code 555 on 2026-10-12)
-CONTACT_PHONE = CLIENT_PHONE  # accepted with region US by the live run of 2026-10-12
+CLIENT_PHONE = "2025550142"  # national number of the temporary client's location: a fictional 555-01xx number in a real area code (Gorelo refuses area code 555)
+CONTACT_PHONE = CLIENT_PHONE  # accepted with region US
 REGION = "US"
 NO_CHARGE = 2  # billable status id
 APPROVER_HINT = re.compile(r"contact_ids|approvers?|eligible|\btags?\b", re.IGNORECASE)
@@ -1663,22 +1667,39 @@ async def area_contacts(m: Matrix) -> None:
     expect("create_contact MobilePhoneCountryCode", made.get("MobilePhoneCountryCode"), REGION)
 
     title = f"{run} title"
-    updated = await m.tool("update_contact", contact_id=contact, job_title=title, clear_secondary_email_ok=True)
+    requests, writes = m.pacer.requests, m.guard.writes_allowed
+    updated = await m.tool("update_contact", contact_id=contact, job_title=title)  # no secondary_email: nothing to decide
+    used, wrote = m.pacer.requests - requests, m.guard.writes_allowed - writes
+    reads = used - wrote  # the guard counts every request that is not a GET as a write
+    # What matters is the writes and the reads, not the total: the client sends a read again after a 429, a 502, 503 or 504 or a
+    # refused connection (and a write only after a 429), so the number of requests may legitimately be higher than two.
+    check(
+        wrote == 1,
+        f"update_contact without secondary_email let {wrote} write request(s) through to Gorelo, expected exactly one "
+        f"({used} request(s) in all)",
+    )
+    check(
+        reads >= 1,
+        f"update_contact without secondary_email sent {used} request(s) and none of them was a read of the contact, expected "
+        "its read before the write",
+    )
+    m.note(
+        "update_contact without secondary_email went through "
+        + (
+            "(the read and the write)"
+            if used == 2
+            else f"(one write and {reads} read request(s): the client sent a read again after a retryable answer)"
+        )
+        + "; Gorelo keeps the secondary emails that an update leaves out (verified 2026-10-24), which is not read back here: no "
+        "read returns them"
+    )
     expect("update_contact JobTitle", updated.get("JobTitle"), title)
     back = await m.tool("get_contact", contact_id=contact)
     expect("JobTitle read back", back.get("JobTitle"), title)
-    expect("MobilePhone after the update (PATCH replaces the contact)", back.get("MobilePhone"), made.get("MobilePhone"))
+    expect("MobilePhone after the update (a PATCH clears a phone it leaves out)", back.get("MobilePhone"), made.get("MobilePhone"))
     expect("MobilePhoneCountryCode after the update", back.get("MobilePhoneCountryCode"), REGION)
     expect("FirstName after the update", back.get("FirstName"), run)
     expect("LastName after the update", back.get("LastName"), "Contact")
-
-    try:
-        await m.tool("update_contact", contact_id=contact, job_title=f"{run} second title")
-    except ToolFailed as exc:
-        check(not exc.sent, "the refused update_contact still sent a request")
-        check("secondary_email" in exc.text, "update_contact was refused, but not for the missing secondary-email choice")
-    else:
-        raise CheckFailed("update_contact without a secondary-email choice was not refused")
 
 
 async def area_tickets(m: Matrix) -> None:
@@ -1948,12 +1969,21 @@ async def area_items(m: Matrix) -> None:
     m.mark_cleaned("item", item_id, "deleted by the write matrix (delete_item)")
 
 
+def read_only_words(sent: int) -> str:
+    """What a negative check says about the requests of a call the tool refused locally: the guard let no write through, so they
+    were GETs. One is the read; more are that read sent again by the client (a 429, a 502, 503 or 504, a refused connection)."""
+    if sent == 1:
+        return "nothing was sent but that GET"
+    return f"nothing was sent but GETs ({sent} requests: the read and the client's own retries of it)"
+
+
 async def refuse_move_without_location(m: Matrix, asset_id: str, renamed: str) -> None:
     """The local negative check of a move: update_custom_asset with the SECOND client as client_id and no location_id.
 
     Since contract a7954b24844b a different ClientId MOVES the asset, and Gorelo needs a LocationId of the new client; the tool reads
     the asset first and refuses locally, before any PATCH. It passes only on that refusal: a ToolFailed with no HTTP status whose text
-    says "location_id: required when client_id moves the asset", exactly one request (that GET) and no write let through by the guard.
+    says "location_id: required when client_id moves the asset", at least one request, all of them GETs (the read, and the client's own
+    retry of it after a 429, a 502, 503 or 504 or a refused connection), and no write let through by the guard.
     Anything else is a CheckFailed saying what happened. A PATCH that carried the second client would be refused by the guard (the move
     option and the announcement are missing), which stops the run. Nothing moves."""
     requests, writes = m.pacer.requests, m.guard.writes_allowed
@@ -1966,8 +1996,11 @@ async def refuse_move_without_location(m: Matrix, asset_id: str, renamed: str) -
                 f"update_custom_asset with the second client and no location_id let {wrote} write request(s) through to Gorelo; "
                 f"look for the asset in the Gorelo app: it may have moved to client {SITE.second_client}"
             ) from None
-        if exc.status is None and sent == 1 and "location_id" in exc.text and "moves the asset" in exc.text:
-            m.note("update_custom_asset with another client_id and no location_id: refused locally after its read of the asset, nothing was sent but that GET")
+        if exc.status is None and sent >= 1 and "location_id" in exc.text and "moves the asset" in exc.text:
+            m.note(
+                "update_custom_asset with another client_id and no location_id: refused locally after its read of the asset, "
+                + read_only_words(sent)
+            )
             return
         status = f"HTTP {exc.status}" if exc.status is not None else "no HTTP answer"
         raise CheckFailed(
@@ -2256,11 +2289,11 @@ async def refuse_unknown_field(m: Matrix, client: int, text: str) -> str:
     """The negative check: update_client with an Id that is not a client custom field must be refused LOCALLY by the tool.
 
     The tool reads the client first and refuses an Id that client does not list before it sends anything (no PATCH, and no
-    second read), so the one request of the call is that GET and the guard lets no write through (guard.writes_allowed does
-    not move). It passes only on that
-    refusal: a ToolFailed with no HTTP status that names the Id, one request, no write. Anything else is a CheckFailed saying
-    what happened: another error (the read failed, a timeout, an HTTP answer), no request at all, a write that was let
-    through, or a success. A PATCH that carries the Id never reaches Gorelo: the guard refuses it (GuardTripped, which stops
+    second read), so the requests of the call are that GET, sent again by the client after a 429, a 502, 503 or 504 or a refused
+    connection when Gorelo asked for it, and the guard lets no write through (guard.writes_allowed does not move). It passes
+    only on that refusal: a ToolFailed with no HTTP status that names the Id, at least one request (all of them GETs), no write.
+    Anything else is a CheckFailed saying what happened: another error (the read failed, a timeout, an HTTP answer), no request
+    at all, a write that was let through, or a success. A PATCH that carries the Id never reaches Gorelo: the guard refuses it (GuardTripped, which stops
     the run), because the Id is not a field the run recorded. Returns the words for the note."""
     unknown = CUSTOM_PROPERTY_UNKNOWN_ID
     requests, writes = m.pacer.requests, m.guard.writes_allowed
@@ -2273,8 +2306,13 @@ async def refuse_unknown_field(m: Matrix, client: int, text: str) -> str:
                 f"update_client with an Id that is not a client custom field let {wrote} write request(s) through to Gorelo; look at "
                 f"client {client} in the Gorelo app for a custom value of {text!r}"
             ) from None
-        if exc.status is None and sent == 1 and str(unknown) in exc.text:
-            return "the tool refused it itself after reading the client: its one request was that GET, no PATCH was sent"
+        if exc.status is None and sent >= 1 and str(unknown) in exc.text:
+            if sent == 1:
+                return "the tool refused it itself after reading the client: its one request was that GET, no PATCH was sent"
+            return (
+                f"the tool refused it itself after reading the client: its {sent} requests were that GET and the client's own "
+                "retries of it, no PATCH was sent"
+            )
         status = f"HTTP {exc.status}" if exc.status is not None else "no HTTP answer"
         raise CheckFailed(
             "update_client with an Id that is not a client custom field was not refused locally after one GET and before any "
@@ -2412,8 +2450,9 @@ async def refuse_dropping_the_attachment(m: Matrix, document_id: str, other_name
 
     Gorelo replaces the whole attachment list, so the tool reads the document first and refuses a list that would drop a current file
     unless remove_attachment_names names it. It passes only on that refusal: a ToolFailed with no HTTP status whose text says the
-    attachment "would be removed", exactly one request (the read) and no write let through by the guard. Anything else is a
-    CheckFailed saying what happened. The file name is never printed."""
+    attachment "would be removed", at least one request, all of them GETs (the read, and the client's own retry of it after a 429, a
+    502, 503 or 504 or a refused connection), and no write let through by the guard. Anything else is a CheckFailed saying what
+    happened. The file name is never printed."""
     requests, writes = m.pacer.requests, m.guard.writes_allowed
     try:
         await m.tool(
@@ -2428,8 +2467,11 @@ async def refuse_dropping_the_attachment(m: Matrix, document_id: str, other_name
                 f"update_document with a list that leaves the current file out let {wrote} write request(s) through to Gorelo; "
                 f"look at document {document_id} in the Gorelo app: its attachments may have been replaced"
             ) from None
-        if exc.status is None and sent == 1 and "would be removed" in exc.text:
-            m.note("update_document with a list that leaves the current file out: refused locally after its read of the document, nothing was sent but that GET")
+        if exc.status is None and sent >= 1 and "would be removed" in exc.text:
+            m.note(
+                "update_document with a list that leaves the current file out: refused locally after its read of the document, "
+                + read_only_words(sent)
+            )
             return
         status = f"HTTP {exc.status}" if exc.status is not None else "no HTTP answer"
         raise CheckFailed(

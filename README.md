@@ -82,7 +82,7 @@ The full table is in [docs/INSTALL.md](docs/INSTALL.md), step 3. Besides the API
 
 ## Regions
 
-Your Gorelo account is hosted in one region. Set `GORELO_BASE_URL` to the host of that region, in `.env` and, if you use the daily watcher, in its own environment file. After you start the service, read the start line in the journal, `gorelo-mcp settings: api_host=<host>`: the host it names is the one the server calls, and it must be the host of your region. [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) has the steps if a key is rejected or that host is not the host of your region.
+Your Gorelo account is hosted in one region. Set `GORELO_BASE_URL` to the host of that region, in `.env` and, if you use the daily watcher, in its own environment file. After you start the service, read the start line in the journal, `gorelo-mcp settings: api_host=<host>`: the host it names is the one the server calls, and it must be the host of your region. [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) has the steps for a rejected key and for a start line that names another host.
 
 ## Connecting other clients
 

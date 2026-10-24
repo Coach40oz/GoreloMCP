@@ -2651,7 +2651,7 @@ async def test_a_tool_call_for_the_run_contact_goes_through_the_guard(server_fac
     server = server_factory(event_hooks={"request": [guard]}, destructive=True)
     mock_gorelo.on("GET", f"/v1/contacts/{RUN_CONTACT}", envelope(contact_record(RUN_CONTACT)))
     mock_gorelo.on("PATCH", f"/v1/contacts/{RUN_CONTACT}", envelope(contact_record(RUN_CONTACT, JobTitle="Tester")))
-    arguments = {"contact_id": RUN_CONTACT, "job_title": "Tester", "clear_secondary_email_ok": True}
+    arguments = {"contact_id": RUN_CONTACT, "job_title": "Tester"}
     result = await call_tool(server, "update_contact", arguments)
     assert result["JobTitle"] == "Tester"
     assert [(r.method, r.path) for r in mock_gorelo.requests] == [
@@ -2668,7 +2668,7 @@ async def test_a_tool_call_that_would_change_the_operator_contact_is_stopped_bef
     server = server_factory(event_hooks={"request": [guard]}, destructive=True)
     mock_gorelo.on("GET", f"/v1/contacts/{OPERATOR_CONTACT}", envelope(contact_record(OPERATOR_CONTACT, ClientId=SECOND)))
     mock_gorelo.on("PATCH", f"/v1/contacts/{OPERATOR_CONTACT}", envelope(contact_record(OPERATOR_CONTACT)))
-    arguments = {"contact_id": OPERATOR_CONTACT, "job_title": "Boss", "clear_secondary_email_ok": True}
+    arguments = {"contact_id": OPERATOR_CONTACT, "job_title": "Boss"}
     text = await call_tool_error(server, "update_contact", arguments)
     assert "blocked PATCH /contacts/9600: path contactId 9600 is not a contact created by this run" in text
     assert [r.method for r in mock_gorelo.requests] == ["GET"]  # the read is allowed, the write never left

@@ -30,8 +30,9 @@ WHAT
       setting, not something this repository can enforce.
     - The log holds Gorelo request paths with their record ids and the names of the query parameters and body
       fields, never their values. A failed tool call is logged with its error text, which can quote what the call
-      was given and Gorelo's own message. The authorize and register lines hold the visitor's address (`ip=`), and so
-      does a refused request body on /authorize, /token, /register or /revoke (`body outcome=`); sign-in lines hold a
+      was given and Gorelo's own message. The authorize lines of the consent page and the register lines hold the
+      visitor's address (`ip=`), and so does a refused request body on /authorize, /token, /register or /revoke
+      (`body outcome=`); sign-in lines hold a
       client id's first 8 characters; a valid request also names the client as it registered
       (`name=`), and a registration refused for a redirect address or a blocked redirect holds that address's host
       (`redirect=`). The web server adds one access line per HTTP request: the visitor's address, the path and the

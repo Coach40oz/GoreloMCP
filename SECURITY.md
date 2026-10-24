@@ -34,8 +34,8 @@ What the Gorelo key can do. Every tool call uses the one Gorelo API key in `.env
 on what a signed-in client can do are the scopes of that key, the toolsets you enable
 (`GORELO_TOOLSETS`; projects, forms and documents are off by default) and whether you enabled the
 gated tools (`GORELO_ENABLE_DESTRUCTIVE`, off by default, and each call also needs `confirm=true`):
-the delete and void tools, `create_approved_invoice`, and `share_document`, which makes a document
-readable outside Gorelo. You can enable them one by one by listing their names. Scope the key
+the delete and void tools, `create_approved_invoice`, `remove_document_related_item`, which removes
+a related item from a document, and `share_document`, which makes a document readable outside Gorelo. You can enable them one by one by listing their names. Scope the key
 minimally: give it only the areas you use, and do not grant Project, Forms or Documents unless you
 enable those toolsets. Some operations can never be called whatever the key allows (client,
 contact, ticket, asset and contract deletes, and creating or revoking API keys (`POST /v1/api-keys`

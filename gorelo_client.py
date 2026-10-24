@@ -25,20 +25,40 @@ Contract (the observed API behavior behind every rule is in docs/API-OBSERVED-BE
   content types (default application/pdf); anything else is parsed as an envelope or refused. Every
   body of a binary request is read through the max_bytes cap, a download or not: a huge page of an
   unexpected content type is refused (kind "shape") without being buffered whole first.
-* 429 (Gorelo did not process the request) is retried within a small budget for every method.
-  Timeouts, connection errors, 5xx, 3xx (a redirect is never followed) and unreadable 2xx responses
-  are NEVER retried: for a write they are reported as `write_unconfirmed` so nobody repeats a write
+* Gorelo limits the whole API key, not each endpoint (a burst of about 6 requests, then about 1 request per
+  second, and once one endpoint answers 429 the others do too), so a client has ONE token bucket for all its
+  requests: `burst` tokens (default 5), one more every 1/`rate_per_second` seconds (default 1 request per
+  second), full at the start. EVERY attempt sent to Gorelo, the first one and each retry, takes a token before it
+  is sent. Waiters are served strictly in arrival order, the waiting uses the injectable `sleep` (and `clock`),
+  and the token comes BEFORE the in-flight slot below, so a request that waits for a token holds no slot.
+* 429 (Gorelo did not process the request) is retried for every method, honoring Retry-After, within a budget
+  for each request: at most `max_429_retries` retries (default 5) and `max_429_wait` seconds (default 30) of
+  Retry-After waits in all (a budget of waiting, not of wall time: the time a request spends queued behind others
+  comes on top). A 429 also empties the bucket and holds back every token until Retry-After has passed (at most
+  `max_429_wait` seconds), so all the requests of this client that are queued, not only the one that got the 429,
+  back off together; the one that got it retries after at least the Retry-After. A request that already has its
+  token and waits for an in-flight slot waits out that back-off too once it holds the slot, so none leaves while the
+  back-off runs. When the budget is used up the call raises kind "rate_limit".
+* A GET that changes nothing (every GET except SIDE_EFFECT_GETS, the document PDF included) is retried ONCE,
+  after 2.0 s, when the gateway answers HTTP 502, 503 or 504 (any body, any content type) or the connection is
+  never established (httpx.ConnectError). The retry takes a token like every attempt. If the second attempt
+  fails too, the call raises exactly what it has always raised for that failure.
+* Everything else is NEVER retried: a timeout (a connect timeout too), a read or protocol error, a 500 or any
+  other 5xx, a 3xx (a redirect is never followed), an unreadable 2xx, and every failure but a 429 of a POST,
+  PATCH, DELETE or multipart upload or of a SIDE_EFFECT_GETS call (a 502, 503 or 504 and a connection that was
+  never established included). For a write they are reported as `write_unconfirmed` so nobody repeats a write
   that may have applied.
 * SIDE_EFFECT_GETS are GETs that still change state (the invoice PDF download is recorded as an
   export event). They are treated like writes for every failure above: write_unconfirmed is True and
   the message says the export may already be recorded and a retry records another export event. Like
   FORBIDDEN_OPS they are compared by SHAPE (is_side_effect_get: every {placeholder} counts the same, whatever
   Gorelo calls it), so a placeholder rename cannot turn the PDF export back into a harmless read.
-* At most `max_concurrency` requests are in flight at once.
+* At most `max_concurrency` requests are in flight at once (default 4), after they have their token.
 * Logging (logger "gorelo_client"): one INFO line per request with the tool, operation, the path with its
-  record ids, status, latency, attempts, query parameter NAMES and body field NAMES (only names of fields the
-  spec defines, as returned by spec.validate_body). Never field or query values, never secrets. The httpx
-  logger is raised to WARNING because it logs full URLs, and URLs carry query values.
+  record ids, status, latency, attempts (every retry counts), query parameter NAMES and body field NAMES (only
+  names of fields the spec defines, as returned by spec.validate_body). One WARNING line per 429 retry and per
+  retry of a read, with the tool, the operation and the failure, never a value. Never field or query values,
+  never secrets. The httpx logger is raised to WARNING because it logs full URLs, and URLs carry query values.
 
 Helpers (get_one, get_list, get_page, get_all, post, patch, delete, post_multipart, get_binary)
 all take the calling tool's name as `tool=`; it only labels logs.
@@ -159,6 +179,12 @@ DEFAULT_MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024  # used only if a caller passes bi
 DEFAULT_EXPECTED_CONTENT_TYPES = ("application/pdf",)  # what a binary operation's download may be
 MAX_PAGES = 500  # get_all stops with an error rather than follow cursors forever
 DEFAULT_RETRY_AFTER = 1.0
+# A read that changes nothing is sent once more, after this many seconds, when the gateway answers one of these
+# statuses (any body) or the connection is never established. Never a write, never a SIDE_EFFECT_GETS call (the only
+# retry those get is the one of a 429, which Gorelo did not process: it is retried for every method).
+GATEWAY_RETRY_WAIT = 2.0
+GATEWAY_RETRY_STATUSES = frozenset({502, 503, 504})
+_NOT_STARTED = "GoreloClient is not started (or already closed): use 'async with GoreloClient(...) as client'"
 
 _ERROR_KINDS = ("http", "envelope", "shape", "timeout", "transport", "rate_limit", "forbidden", "spec")
 _CONTENT_TYPE = re.compile(r"[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*")
@@ -467,12 +493,135 @@ def _clamp_page_size(value: Any) -> int:
 
 
 # --------------------------------------------------------------------------
+# The proactive rate limit
+# --------------------------------------------------------------------------
+
+
+class _NeverConnected(Exception):
+    """Internal signal from GoreloClient._send_once to request(): the connection to Gorelo was never established
+    (httpx.ConnectError), so nothing reached Gorelo and a read may be sent once more.
+
+    It carries the error that request() raises when it does not retry, so the caller sees exactly what it always saw.
+    """
+
+    def __init__(self, error: GoreloAPIError) -> None:
+        super().__init__(error.message)
+        self.error = error
+
+
+class _TokenBucket:
+    """The token bucket that every attempt of one GoreloClient passes before it is sent.
+
+    Gorelo limits the whole API key, not each endpoint: after a burst of about 6 requests it lets about 1 request per
+    second through, and once one endpoint has answered 429 the others do too. The bucket holds `burst` tokens, gets one
+    back every 1/`rate` seconds and starts full. take() waits for a token. Waiters are served strictly in arrival
+    order: they queue on one asyncio.Lock (which wakes its waiters first come, first served), and the holder of the
+    lock is the only one that sleeps, so a request that arrives later never gets a token before an earlier one, and a
+    waiter that is cancelled takes nothing. back_off(seconds) is the 429: the bucket is emptied and no token goes out
+    before now + seconds, so every request that is queued, not only the one that got the 429, waits for it.
+
+    The state is two moments, not a count of tokens, so nothing accumulates rounding errors: `_full_at` is when the
+    bucket will be full again (each token taken moves it one interval later) and `_blocked_until` is the moment before
+    which no token goes out (only back_off moves it).
+
+    The bucket keeps its own time: the injected clock, but never behind the latest moment that one of its own waits has
+    reached. After a sleep until a token is due it does not read the clock again to confirm that the time has passed,
+    it knows it. A sleep that returns at once (a test double) therefore cannot make a waiter spin, and a frozen clock
+    still lets time pass through the sleeps. With the real clock and the real sleep the two agree.
+    """
+
+    def __init__(
+        self,
+        rate: float,
+        burst: int,
+        clock: Callable[[], float],
+        sleep: Callable[[float], Awaitable[None]],
+    ) -> None:
+        start = clock()
+        if isinstance(start, bool) or not isinstance(start, (int, float)) or not math.isfinite(start):
+            raise ValueError("clock must return the time in seconds as a finite number")
+        self._interval = 1.0 / rate
+        self._burst = burst
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = asyncio.Lock()
+        self._floor = float(start)
+        self._full_at = self._floor
+        self._blocked_until = self._floor
+
+    def _now(self) -> float:
+        reading = self._clock()
+        if reading > self._floor:  # a clock that stands still or goes backwards never moves the bucket's time back
+            self._floor = reading
+        return self._floor
+
+    async def take(self) -> None:
+        """Wait until it is this caller's turn and a token is due, then take it."""
+        async with self._lock:
+            while True:
+                now = self._now()
+                due = max(self._full_at - (self._burst - 1) * self._interval, self._blocked_until)
+                if due <= now:
+                    self._full_at = max(now, self._full_at) + self._interval
+                    return
+                await self._sleep(due - now)
+                # a back_off during the sleep moved `due` and the next round waits for the rest
+                if due > self._floor:
+                    self._floor = due
+
+    def back_off(self, seconds: float) -> None:
+        """A 429: empty the bucket and let no token out for `seconds` from now (a longer back-off stays in force)."""
+        now = self._now()
+        self._full_at = now + self._burst * self._interval
+        self._blocked_until = max(self._blocked_until, now + max(0.0, seconds))
+
+    async def wait_unblocked(self) -> None:
+        """Wait, through the injected sleep, until no back-off of a 429 is running. Takes no token, queues behind nobody.
+
+        take() already waits for the back-off, but a request that took its token BEFORE a 429 and then waited for an
+        in-flight slot would otherwise leave inside it. The client calls this right after it gets the slot. Like take()
+        it knows that the time it slept has passed, so a sleep that returns at once cannot make it spin, and it checks
+        again after the sleep, because a later 429 may have moved the end of the back-off.
+        """
+        while True:
+            now = self._now()
+            until = self._blocked_until
+            if until <= now:
+                return
+            await self._sleep(until - now)
+            if until > self._floor:
+                self._floor = until
+
+
+def _check_rate(value: Any) -> float:
+    """rate_per_second as a float: a finite number above 0 whose interval (1/rate seconds) is finite too."""
+    problem = "rate_per_second must be a finite number greater than 0"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{problem}, got {value!r}")
+    try:
+        rate = float(value)
+        interval = 1.0 / rate if rate > 0 else math.inf
+    except (OverflowError, ZeroDivisionError):
+        raise ValueError(f"{problem}, got {value!r}") from None
+    if not math.isfinite(rate) or not math.isfinite(interval) or rate <= 0:
+        raise ValueError(f"{problem}, got {value!r}")
+    return rate
+
+
+# --------------------------------------------------------------------------
 # The client
 # --------------------------------------------------------------------------
 
 
 class GoreloClient:
-    """Async client for the Gorelo Public API. Use as `async with GoreloClient(key) as client`."""
+    """Async client for the Gorelo Public API. Use as `async with GoreloClient(key) as client`.
+
+    Besides the transport and the timeout, the constructor sets how the client treats Gorelo's limits (the module
+    docstring has the rules): `max_concurrency` requests in flight, a token bucket of `burst` tokens refilled at
+    `rate_per_second` that every attempt passes first, and the budget of a 429 (`max_429_retries` retries and
+    `max_429_wait` seconds of Retry-After). `max_429_retries` and `max_429_wait` may be assigned while the client runs
+    (the live harness does so around one write). `sleep` and `clock` are injectable so that a test moves time itself.
+    """
 
     def __init__(
         self,
@@ -484,9 +633,12 @@ class GoreloClient:
         event_hooks: dict[str, list[Callable[..., Any]]] | None = None,
         timeout: float = 30.0,
         max_concurrency: int = 4,
-        max_429_retries: int = 3,
-        max_429_wait: float = 20.0,
+        max_429_retries: int = 5,
+        max_429_wait: float = 30.0,
+        rate_per_second: float = 1.0,
+        burst: int = 5,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ):
         if not api_key or not str(api_key).strip():
             raise ValueError("api_key is required")
@@ -496,6 +648,11 @@ class GoreloClient:
             raise ValueError("max_429_retries and max_429_wait must not be negative")
         if timeout <= 0:
             raise ValueError("timeout must be positive")
+        rate = _check_rate(rate_per_second)
+        if isinstance(burst, bool) or not isinstance(burst, int) or burst < 1:
+            raise ValueError(f"burst must be an integer of at least 1, got {burst!r}")
+        if not callable(clock):
+            raise ValueError("clock must be a callable that returns the time in seconds")
         self.base_url = base_url.rstrip("/")
         self.spec: SpecIndex = spec if spec is not None else load_spec_index()
         self.max_429_retries = max_429_retries
@@ -505,6 +662,7 @@ class GoreloClient:
         self._event_hooks = event_hooks
         self._timeout = timeout
         self._sleep = sleep
+        self._bucket = _TokenBucket(rate, burst, clock, sleep)
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._base_path = urlsplit(self.base_url).path.rstrip("/")
         self._http: httpx.AsyncClient | None = None
@@ -537,6 +695,10 @@ class GoreloClient:
     def is_closed(self) -> bool:
         return self._http is None or self._http.is_closed
 
+    def _require_started(self) -> None:
+        if self._http is None or self._http.is_closed:
+            raise RuntimeError(_NOT_STARTED)
+
     # -- the one low-level call -------------------------------------------
 
     async def request(
@@ -564,6 +726,11 @@ class GoreloClient:
         or SpecViolation for an invalid query name, body field, body value shape, path id or form value
         (always before any HTTP call), or GoreloAPIError kind "spec" for an operation the running tool
         did not declare.
+
+        Every attempt takes a token from the client's bucket before it is sent (see the module docstring). A 429
+        is retried for every method; a GET that is not a SIDE_EFFECT_GETS call is also sent once more, after
+        GATEWAY_RETRY_WAIT seconds, when the answer is one of GATEWAY_RETRY_STATUSES or the connection is never
+        established. Nothing else is retried.
         """
         _require_tool(tool)
         self._check_allowed(op_key, tool)
@@ -575,30 +742,57 @@ class GoreloClient:
         if binary and limit < 1:
             raise ValueError("max_bytes must be at least 1")
         expected = _normalize_content_types(expected_content_types)
+        repeatable = op.method == "GET" and not is_side_effect_get(op.key)  # a read that Gorelo does not record
 
         started = time.perf_counter()
-        attempts = 0
-        waited = 0.0
+        attempts = 0  # requests sent, the retries included
+        rate_limited = 0  # 429 answers so far
+        waited = 0.0  # seconds of Retry-After this request has accepted
+        gateway_retried = False
         status: Any = "none"
         try:
             while True:
+                status = "none"  # the log line tells how the LAST attempt ended
+                self._require_started()  # before the wait for a token: a closed client fails at once
+                await self._bucket.take()
                 attempts += 1
-                raw = await self._send_once(
-                    op, path, query_params, body_kwargs, binary=binary, max_bytes=limit, expected=expected
-                )
-                status = raw.status
-                if raw.status != 429:
-                    break
-                wait = _retry_after_seconds(raw.headers, raw.content)
-                if attempts <= self.max_429_retries and waited + wait <= self.max_429_wait:
-                    logger.warning(
-                        "tool=%s op=%s got HTTP 429 (Gorelo did not process it); waiting %.1fs, retry %d of %d",
-                        tool, op.key, wait, attempts, self.max_429_retries,
+                try:
+                    raw = await self._send_once(
+                        op, path, query_params, body_kwargs, binary=binary, max_bytes=limit, expected=expected
                     )
-                    waited += wait
-                    await self._sleep(wait)
+                except _NeverConnected as refused:
+                    if repeatable and not gateway_retried:
+                        gateway_retried = True
+                        logger.warning(
+                            "tool=%s op=%s connect error; retrying once in %.1fs", tool, op.key, GATEWAY_RETRY_WAIT
+                        )
+                        await self._sleep(GATEWAY_RETRY_WAIT)
+                        continue
+                    raise refused.error from None
+                status = raw.status
+                if raw.status == 429:
+                    wait = _retry_after_seconds(raw.headers, raw.content)
+                    # Every queued request of this client waits for it too. A silly Retry-After (an hour) holds
+                    # the others back for one budget (max_429_wait) at most.
+                    self._bucket.back_off(min(wait, self.max_429_wait))
+                    rate_limited += 1
+                    if rate_limited <= self.max_429_retries and waited + wait <= self.max_429_wait:
+                        logger.warning(
+                            "tool=%s op=%s got HTTP 429 (Gorelo did not process it); waiting %.1fs, retry %d of %d",
+                            tool, op.key, wait, rate_limited, self.max_429_retries,
+                        )
+                        waited += wait
+                        continue  # the next round waits for a token; none goes out before the Retry-After has passed
+                    raise self._rate_limit_error(op, raw, attempts, waited)
+                if raw.status in GATEWAY_RETRY_STATUSES and repeatable and not gateway_retried:
+                    gateway_retried = True
+                    logger.warning(
+                        "tool=%s op=%s got HTTP %d; retrying once in %.1fs",
+                        tool, op.key, raw.status, GATEWAY_RETRY_WAIT,
+                    )
+                    await self._sleep(GATEWAY_RETRY_WAIT)
                     continue
-                raise self._rate_limit_error(op, raw, attempts, waited)
+                break
             return self._interpret(op, raw)
         except GoreloAPIError as exc:
             if status == "none" and exc.kind in ("timeout", "transport"):
@@ -1106,11 +1300,11 @@ class GoreloClient:
         expected: frozenset[str] = frozenset(DEFAULT_EXPECTED_CONTENT_TYPES),
     ) -> _Raw:
         if self._http is None or self._http.is_closed:
-            raise RuntimeError(
-                "GoreloClient is not started (or already closed): use 'async with GoreloClient(...) as client'"
-            )
+            raise RuntimeError(_NOT_STARTED)
         headers = {"Accept": ", ".join([*sorted(expected), "application/json"])} if binary else None
         async with self._semaphore:
+            # A token was taken before this slot: if a 429 came in the meantime, the back-off still holds this request.
+            await self._bucket.wait_unblocked()
             try:
                 request = self._http.build_request(
                     op.method,
@@ -1123,6 +1317,10 @@ class GoreloClient:
                 response = await self._http.send(request, stream=True)
             except httpx.TimeoutException as exc:
                 raise self._transport_failure(op, "timeout", exc) from None
+            except httpx.ConnectError as exc:
+                # The connection was never established, so nothing reached Gorelo: request() may send a read once more.
+                # (A connect TIMEOUT is a TimeoutException, caught above, and is never retried.)
+                raise _NeverConnected(self._transport_failure(op, "transport", exc)) from None
             except httpx.RequestError as exc:
                 raise self._transport_failure(op, "transport", exc) from None
             try:
@@ -1233,7 +1431,7 @@ class GoreloClient:
         envelope = body if isinstance(body, dict) else {}
         return GoreloAPIError(
             f"{op.key}: Gorelo is rate limiting (HTTP 429); gave up after {attempts} attempt(s) "
-            f"and {waited:.1f}s of waiting",
+            f"and {waited:.1f}s of Retry-After waits (time queued behind other requests not counted)",
             status=429, op_key=op.key, kind="rate_limit",
             notifications=_envelope_notifications(envelope), trace_id=_envelope_trace_id(envelope),
         )

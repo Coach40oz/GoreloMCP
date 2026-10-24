@@ -41,7 +41,7 @@ CREATE_PARAMS = [
 UPDATE_PARAMS = [
     "contact_id", "first_name", "last_name", "primary_email", "location_id", "mobile_phone",
     "mobile_phone_country_code", "office_phone", "office_phone_country_code", "job_title", "department",
-    "time_zone", "description", "clear_fields", "secondary_email", "clear_secondary_email_ok",
+    "time_zone", "description", "clear_fields", "secondary_email",
 ]
 
 TOOLS = {
@@ -74,6 +74,26 @@ READ_ONLY_KEYS = {"Id", "Alias", "Status", "CreatedOn", "UpdatedOn", "IsTemporar
 REQUIRED_KEYS = {"FirstName", "LastName", "ClientId", "PrimaryEmail"}
 # The optional command fields a contact may not have: left out of the body when it has no value.
 OPTIONAL_KEYS = COMMAND_KEYS - REQUIRED_KEYS
+
+# The `note` of an update that leaves a stored region code out because the contact has no such phone, pinned word for word
+# (tools/contacts.py _cleared_note): the region parameter with the code it held, and why.
+MOBILE_NOTE = (
+    "mobile_phone_country_code (was US) was cleared because the contact has no mobile phone, and Gorelo refuses a region "
+    "code without its phone number."
+)
+OFFICE_NOTE = (
+    "office_phone_country_code (was US) was cleared because the contact has no office phone, and Gorelo refuses a region "
+    "code without its phone number."
+)
+BOTH_NOTE = (
+    "mobile_phone_country_code (was US) and office_phone_country_code (was CA) were cleared because the contact has no "
+    "mobile phone and no office phone, and Gorelo refuses a region code without its phone number."
+)
+# The two phone pairs: phone parameter, region parameter, their command fields and the note of the pair's stored region code.
+PHONE_PAIR_CASES = [
+    pytest.param("mobile_phone", "mobile_phone_country_code", "MobilePhone", "MobilePhoneCountryCode", MOBILE_NOTE, id="mobile"),
+    pytest.param("office_phone", "office_phone_country_code", "OfficePhone", "OfficePhoneCountryCode", OFFICE_NOTE, id="office"),
+]
 
 
 @pytest.fixture
@@ -114,7 +134,7 @@ def command(**overrides):
     id: the id is in the path.
 
     An override of None means "the contact has no such value after the update": the field is LEFT OUT of the body
-    (PATCH replaces the contact, so an omitted field is stored as null, and an explicit null is never sent).
+    (Gorelo clears a phone, job title, department, time zone or description that a PATCH leaves out, and an explicit null is never sent).
     """
     body = {
         "FirstName": "Jane",
@@ -208,8 +228,7 @@ async def test_the_defaults_the_model_sees_are_none_meaning_not_given(server):
     assert tools["list_contacts"]["page_size"]["default"] == 200
     for name in ("client_id", "client_ids", "status_ids", "query", "cursor"):
         assert "default" not in tools["list_contacts"][name] and name not in required["list_contacts"], name
-    assert tools["update_contact"]["clear_secondary_email_ok"]["default"] is False
-    for name in UPDATE_PARAMS[1:-1]:
+    for name in UPDATE_PARAMS[1:]:
         assert "default" not in tools["update_contact"][name] and name not in required["update_contact"], name
     for name in CREATE_PARAMS[4:]:
         assert "default" not in tools["create_contact"][name] and name not in required["create_contact"], name
@@ -289,43 +308,52 @@ async def test_each_id_description_names_the_tool_that_resolves_it(server, name,
     assert resolver in tool.inputSchema["properties"][param]["description"]
 
 
-def test_the_update_docstring_explains_the_replace_semantics_and_sends_the_secondary_email_choice_through_the_user():
+# The sentence of update_contact's description about the secondary emails: the API cannot show them, the user sees them in the
+# Gorelo app, so the model asks the user for the complete list; the list replaces all of them and [] erases them.
+SECONDARY_SENTENCE = (
+    "The API cannot show the secondary emails, the user sees them in the Gorelo app: to change them ask the user for the "
+    "complete list; secondary_email REPLACES all ([] erases)."
+)
+
+
+def test_the_update_docstring_says_what_gorelo_clears_what_it_keeps_and_what_secondary_email_replaces():
     doc = flat(contacts_module.update_contact.__doc__)
-    assert "replaces the whole contact" in doc and "reads it first" in doc
-    assert "the client cannot change" in doc
-    # the API cannot show the secondary emails, only the user can see them, so the user decides
-    assert "The API cannot show a contact's secondary emails (only the user can see them in the Gorelo app)" in doc
-    assert "ask the user for the complete list, pass it as secondary_email (replaces ALL existing ones; [] erases)" in doc
-    assert "or ask the user before passing clear_secondary_email_ok=true" in doc
-    assert "Without either the call is refused before anything is sent" in doc
+    # live, 2026-10-24: a PATCH clears the phones, job title, department, time zone and description it leaves out, so the
+    # tool reads the contact first and re-sends them; a LocationId and the secondary emails that are left out are kept
+    assert "Gorelo clears the phones, job title, department, time zone and description an update leaves out" in doc
+    assert "so this tool reads the contact and re-sends them." in doc
+    assert "Location and secondary emails you do not send are kept" in doc
+    # the API cannot show the secondary emails but the user sees them in the Gorelo app, so the model asks the user for the
+    # complete list; a list that is passed replaces them all
+    assert SECONDARY_SENTENCE in doc
+    assert "The location can be moved, not cleared." in doc
     assert "Side effects: overwrites the contact" in doc and "an app edit made between the read and the write is lost" in doc
-    assert "never returns secondary emails" not in doc  # the old wording said nothing about asking the user
+    # nothing is left of the false claim that nobody can read the list, of the old flag or of the old refusal
+    for gone in ("nobody can read", "clear_secondary_email_ok", "refused before anything is sent", "replaces the whole contact"):
+        assert gone not in doc, gone
 
 
-async def test_the_update_parameters_explain_clear_fields_and_the_secondary_email_flag(server):
+async def test_the_update_parameters_explain_clear_fields_and_secondary_email(server):
     tool = next(t for t in await list_tools(server) if t.name == "update_contact")
     props = tool.inputSchema["properties"]
     # the names clear_fields accepts are in the schema (a Literal list), not repeated in the text
     assert props["clear_fields"]["type"] == "array"
     assert props["clear_fields"]["items"] == {"type": "string", "enum": list(contacts_module.CLEARABLE_FIELDS)}
+    assert "location_id" not in props["clear_fields"]["items"]["enum"]  # Gorelo cannot clear a contact's location
     assert props["clear_fields"]["description"] == (
         "Fields to clear: the contact ends up without them. Not with a value for the same field."
     )
     assert [f for f in contacts_module.CLEARABLE_FIELDS if f.endswith("_country_code")] == [
         "mobile_phone_country_code", "office_phone_country_code",
     ]
-    # both secondary email parameters send the decision through the user
     secondary = props["secondary_email"]["description"]
-    assert secondary.startswith("COMPLETE list after this update")
-    assert "replaces ALL existing ones ([] erases)" in secondary
-    assert "The API cannot show them, only the user can see them in the Gorelo app: ask the user." in secondary
-    flag = props["clear_secondary_email_ok"]["description"]
-    assert "True erases ALL secondary emails when secondary_email is omitted" in flag
-    assert "Ask the user first" in flag
-    assert "the API cannot show them, only the user can see them in the Gorelo app" in flag
-    for text in (secondary, flag):  # both parameters say the same three things
-        assert "API cannot show them" in text and "only the user can see them in the Gorelo app" in text
-        assert "ask the user" in text.lower()
+    assert secondary == (
+        "COMPLETE list; replaces ALL secondary emails ([] erases them). The API cannot show them but the user sees them in "
+        "the Gorelo app: to change them, ask the user for the complete list. Omit it to keep them."
+    )
+    assert len(secondary) <= 220  # MAX_PARAM_DESCRIPTION_CHARS of tests/test_integration.py
+    assert "nobody can read" not in secondary and "Gorelo app" in secondary and "ask the user" in secondary
+    assert "clear_secondary_email_ok" not in props  # the flag is gone: omitting secondary_email loses nothing
 
 
 def test_the_create_docstring_says_nothing_is_inferred():
@@ -669,10 +697,47 @@ async def test_create_contact_sends_every_optional_field_under_its_pascal_name(s
     }
 
 
-async def test_a_region_without_a_phone_is_sent_as_given(server, mock_gorelo):
+@pytest.mark.parametrize("phone, region, phone_key, region_key, note", PHONE_PAIR_CASES)
+async def test_a_region_without_its_phone_is_a_local_error_naming_the_region_and_nothing_is_sent(
+    server, mock_gorelo, phone, region, phone_key, region_key, note
+):
+    # Gorelo answers HTTP 400, code 070101, "OfficePhone is required when OfficePhoneCountryCode is provided" (live, on a test
+    # client, 2026-10-24), so the region code is refused here, before any request, for each pair
+    text = await call_tool_error(server, "create_contact", {**REQUIRED_FOUR, region: "US"})
+    assert text == (
+        f"{region}: Gorelo refuses a region code without its phone number; pass {phone} too, or leave {region} out"
+    )
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("phone, region, phone_key, region_key, note", PHONE_PAIR_CASES)
+async def test_a_region_next_to_its_phone_is_sent_with_it(server, mock_gorelo, phone, region, phone_key, region_key, note):
     mock_gorelo.on("POST", CONTACTS, envelope(contact_record()))
-    await call_tool(server, "create_contact", {**REQUIRED_FOUR, "mobile_phone_country_code": "US"})
-    assert mock_gorelo.last.json["MobilePhoneCountryCode"] == "US" and "MobilePhone" not in mock_gorelo.last.json
+    await call_tool(server, "create_contact", {**REQUIRED_FOUR, phone: "5555550142", region: "US"})
+    assert mock_gorelo.last.json == {
+        "ClientId": 9101, "FirstName": "Jane", "LastName": "Doe", "PrimaryEmail": "jane@example.invalid",
+        phone_key: "5555550142", region_key: "US",
+    }
+
+
+async def test_the_other_phone_does_not_satisfy_a_region(server, mock_gorelo):
+    text = await call_tool_error(
+        server,
+        "create_contact",
+        {**REQUIRED_FOUR, "mobile_phone_country_code": "US", "office_phone": "5555550100", "office_phone_country_code": "CA"},
+    )
+    assert text.startswith("mobile_phone_country_code: Gorelo refuses a region code without its phone number; pass mobile_phone too")
+    assert mock_gorelo.requests == []
+
+
+async def test_a_blank_phone_next_to_a_region_is_still_refused_as_blank(server, mock_gorelo):
+    # the phone was given, so it is the blank phone that is wrong, and the message says so (not the region)
+    text = await call_tool_error(
+        server, "create_contact", {**REQUIRED_FOUR, "office_phone": "  ", "office_phone_country_code": "US"}
+    )
+    assert text.startswith("office_phone: must not be empty or whitespace only")
+    assert "Gorelo refuses a region code" not in text
+    assert mock_gorelo.requests == []
 
 
 @pytest.mark.parametrize(
@@ -813,7 +878,7 @@ async def test_create_contact_refuses_an_answer_that_is_not_a_record_with_an_id(
 async def test_update_contact_reads_the_contact_then_sends_the_complete_command(server, mock_gorelo):
     updated = contact_record(JobTitle="CTO")
     routed_update(mock_gorelo, answer=updated)
-    result = await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "CTO", "clear_secondary_email_ok": True})
+    result = await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "CTO"})
     assert result == updated
     assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", CONTACT_5), ("PATCH", CONTACT_5)]
     get, patch = mock_gorelo.requests
@@ -826,8 +891,8 @@ async def test_update_contact_puts_the_id_in_the_path_and_sends_no_contact_id_in
     routed_update(mock_gorelo)
     mock_gorelo.on("GET", "/v1/contacts/6", envelope(contact_record(6)))
     mock_gorelo.on("PATCH", "/v1/contacts/6", envelope(contact_record(6, JobTitle="CTO")))
-    await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "CTO", "clear_secondary_email_ok": True})
-    await call_tool(server, "update_contact", {"contact_id": 6, "job_title": "CTO", "clear_secondary_email_ok": True})
+    await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "CTO"})
+    await call_tool(server, "update_contact", {"contact_id": 6, "job_title": "CTO"})
     patches = patched(mock_gorelo)
     assert [(r.path, r.raw_path) for r in patches] == [(CONTACT_5, CONTACT_5), ("/v1/contacts/6", "/v1/contacts/6")]
     for request in patches:
@@ -852,14 +917,14 @@ async def test_update_contact_reports_a_405_as_an_error_never_as_a_success(serve
     # what the retired collection form answered; if Gorelo ever moves the operation again this must stay loud
     mock_gorelo.on("GET", CONTACT_5, envelope(contact_record()))
     mock_gorelo.on("PATCH", CONTACT_5, httpx.Response(405, headers={"Allow": "GET, POST"}))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X"})
     assert text.startswith("Gorelo returned an unexpected response for update_contact: PATCH /v1/contacts/{contactId}: ")
     assert "HTTP 405" in text and [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
 
 
 async def test_update_contact_sends_every_command_field_and_never_a_read_only_one(server, mock_gorelo, spec_index):
     routed_update(mock_gorelo)
-    await call_tool(server, "update_contact", {"contact_id": 5, "department": "Ops", "clear_secondary_email_ok": True})
+    await call_tool(server, "update_contact", {"contact_id": 5, "department": "Ops"})
     body = patched(mock_gorelo)[0].json
     assert set(body) == COMMAND_KEYS
     assert not set(body) & READ_ONLY_KEYS
@@ -869,7 +934,7 @@ async def test_update_contact_sends_every_command_field_and_never_a_read_only_on
 
 async def test_update_contact_preserves_every_value_it_was_not_told_to_change(server, mock_gorelo):
     routed_update(mock_gorelo)
-    await call_tool(server, "update_contact", {"contact_id": 5, "first_name": "Janet", "clear_secondary_email_ok": True})
+    await call_tool(server, "update_contact", {"contact_id": 5, "first_name": "Janet"})
     body = patched(mock_gorelo)[0].json
     expected = command(FirstName="Janet")
     assert body == expected
@@ -879,14 +944,14 @@ async def test_update_contact_preserves_every_value_it_was_not_told_to_change(se
 
 
 async def test_update_contact_omits_the_values_the_contact_does_not_have_and_sends_no_null(server, mock_gorelo):
-    # PATCH /v1/contacts/{contactId} replaces the contact, so an omitted field is stored as null anyway; most of these
+    # PATCH /v1/contacts/{contactId} clears a field it leaves out (a LocationId is kept), so an explicit null adds nothing; most of these
     # fields are not nullable in the spec, so an explicit null is never sent
     sparse = contact_record(
         LocationId=None, MobilePhone=None, MobilePhoneCountryCode=None, OfficePhone=None,
         OfficePhoneCountryCode=None, JobTitle=None, Department=None, TimeZone=None, Description=None,
     )
     routed_update(mock_gorelo, record=sparse)
-    await call_tool(server, "update_contact", {"contact_id": 5, "last_name": "Smith", "clear_secondary_email_ok": True})
+    await call_tool(server, "update_contact", {"contact_id": 5, "last_name": "Smith"})
     body = patched(mock_gorelo)[0].json
     assert body == {
         "FirstName": "Jane", "LastName": "Smith", "ClientId": 9101,
@@ -898,14 +963,14 @@ async def test_update_contact_omits_the_values_the_contact_does_not_have_and_sen
 
 async def test_update_contact_copies_empty_strings_from_the_record_as_they_are(server, mock_gorelo):
     routed_update(mock_gorelo, record=contact_record(JobTitle="", Description=""))
-    await call_tool(server, "update_contact", {"contact_id": 5, "department": "Ops", "clear_secondary_email_ok": True})
+    await call_tool(server, "update_contact", {"contact_id": 5, "department": "Ops"})
     body = patched(mock_gorelo)[0].json
     assert body["JobTitle"] == "" and body["Description"] == "" and body["Department"] == "Ops"
 
 
 async def test_update_contact_takes_the_client_from_the_record_and_cannot_move_it(server, mock_gorelo):
     routed_update(mock_gorelo, record=contact_record(ClientId=9102))
-    await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "X", "clear_secondary_email_ok": True})
+    await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "X"})
     assert patched(mock_gorelo)[0].json["ClientId"] == 9102
     tool = next(t for t in await list_tools(server) if t.name == "update_contact")
     assert "client_id" not in tool.inputSchema["properties"]
@@ -932,7 +997,7 @@ async def test_update_contact_takes_the_client_from_the_record_and_cannot_move_i
 )
 async def test_each_changeable_field_replaces_exactly_its_own_command_field(server, mock_gorelo, param, value, key):
     routed_update(mock_gorelo)
-    await call_tool(server, "update_contact", {"contact_id": 5, param: value, "clear_secondary_email_ok": True})
+    await call_tool(server, "update_contact", {"contact_id": 5, param: value})
     assert patched(mock_gorelo)[0].json == command(**{key: value})
 
 
@@ -948,7 +1013,6 @@ async def test_several_changes_are_applied_in_one_command(server, mock_gorelo):
             "mobile_phone_country_code": "CA",
             "job_title": "CTO",
             "clear_fields": ["department", "description"],
-            "clear_secondary_email_ok": True,
         },
     )
     body = patched(mock_gorelo)[0].json
@@ -968,9 +1032,6 @@ async def test_several_changes_are_applied_in_one_command(server, mock_gorelo):
 @pytest.mark.parametrize(
     "param, key",
     [
-        ("location_id", "LocationId"),
-        ("mobile_phone", "MobilePhone"),
-        ("office_phone", "OfficePhone"),
         ("job_title", "JobTitle"),
         ("department", "Department"),
         ("time_zone", "TimeZone"),
@@ -978,13 +1039,15 @@ async def test_several_changes_are_applied_in_one_command(server, mock_gorelo):
     ],
 )
 async def test_clear_fields_leaves_the_named_field_out_of_the_body_and_keeps_the_rest(server, mock_gorelo, param, key):
-    # clearing is done by omitting the field (the PATCH replaces the contact), never by sending a null
+    # clearing is done by omitting the field (Gorelo clears what a PATCH leaves out), never by sending a null. The two phones are
+    # not in this list: a phone that is cleared alone takes its stored region code with it (see the tests of that rule below)
     routed_update(mock_gorelo)
-    await call_tool(server, "update_contact", {"contact_id": 5, "clear_fields": [param], "clear_secondary_email_ok": True})
+    result = await call_tool(server, "update_contact", {"contact_id": 5, "clear_fields": [param]})
     body = patched(mock_gorelo)[0].json
     assert key not in body
     assert body == {k: v for k, v in command().items() if k != key}
     assert None not in body.values()
+    assert "note" not in result
 
 
 async def test_a_phone_and_its_region_can_be_cleared_together(server, mock_gorelo):
@@ -992,7 +1055,7 @@ async def test_a_phone_and_its_region_can_be_cleared_together(server, mock_gorel
     await call_tool(
         server,
         "update_contact",
-        {"contact_id": 5, "clear_fields": ["mobile_phone", "mobile_phone_country_code"], "clear_secondary_email_ok": True},
+        {"contact_id": 5, "clear_fields": ["mobile_phone", "mobile_phone_country_code"]},
     )
     body = patched(mock_gorelo)[0].json
     assert "MobilePhone" not in body and "MobilePhoneCountryCode" not in body
@@ -1004,21 +1067,22 @@ async def test_every_clearable_field_can_be_cleared_at_once(server, mock_gorelo)
     await call_tool(
         server,
         "update_contact",
-        {"contact_id": 5, "clear_fields": list(contacts_module.CLEARABLE_FIELDS), "clear_secondary_email_ok": True},
+        {"contact_id": 5, "clear_fields": list(contacts_module.CLEARABLE_FIELDS)},
     )
     body = patched(mock_gorelo)[0].json
     assert body == command(
-        LocationId=None, MobilePhone=None, MobilePhoneCountryCode=None, OfficePhone=None,
+        MobilePhone=None, MobilePhoneCountryCode=None, OfficePhone=None,
         OfficePhoneCountryCode=None, JobTitle=None, Department=None, TimeZone=None, Description=None,
     )
-    assert set(body) == REQUIRED_KEYS  # every optional field is gone, the four required ones remain with values
+    # every clearable field is gone, the four required ones remain with values, and so does the location, which cannot be cleared
+    assert set(body) == REQUIRED_KEYS | {"LocationId"} and body["LocationId"] == 9001
 
 
 async def test_a_repeated_name_in_clear_fields_is_cleared_once(server, mock_gorelo):
     routed_update(mock_gorelo)
     await call_tool(
         server, "update_contact",
-        {"contact_id": 5, "clear_fields": ["job_title", "job_title"], "clear_secondary_email_ok": True},
+        {"contact_id": 5, "clear_fields": ["job_title", "job_title"]},
     )
     body = patched(mock_gorelo)[0].json
     assert body == command(JobTitle=None) and "JobTitle" not in body
@@ -1026,18 +1090,26 @@ async def test_a_repeated_name_in_clear_fields_is_cleared_once(server, mock_gore
 
 async def test_clear_fields_for_a_field_that_is_already_null_is_left_out_too(server, mock_gorelo):
     routed_update(mock_gorelo, record=contact_record(Department=None))
-    await call_tool(server, "update_contact", {"contact_id": 5, "clear_fields": ["department"], "clear_secondary_email_ok": True})
+    await call_tool(server, "update_contact", {"contact_id": 5, "clear_fields": ["department"]})
     body = patched(mock_gorelo)[0].json
     assert body == command(Department=None) and "Department" not in body
 
 
 async def test_an_empty_clear_fields_list_is_a_local_error_and_sends_nothing(server, mock_gorelo):
     text = await call_tool_error(
-        server, "update_contact", {"contact_id": 5, "clear_fields": [], "clear_secondary_email_ok": True}
+        server, "update_contact", {"contact_id": 5, "clear_fields": []}
     )
     assert "clear_fields: must not be an empty list; omit it when nothing should be cleared" in text
     assert mock_gorelo.requests == []
 
+
+# What update_contact says when asked to clear the location (live, on a test client, 2026-10-24: a PATCH that leaves LocationId
+# out or sends it as null keeps the location).
+LOCATION_CANNOT_BE_CLEARED = (
+    "clear_fields: Gorelo cannot clear a contact's location through the API (leaving it out or sending null keeps it; "
+    "verified 2026-10-24); pass location_id to move the contact to another location of its client, or clear it in the "
+    "Gorelo app"
+)
 
 # What update_contact says when asked to clear something that cannot be cleared.
 CANNOT_BE_CLEARED = [
@@ -1045,7 +1117,8 @@ CANNOT_BE_CLEARED = [
     (["last_name"], "clear_fields: last_name cannot be cleared because Gorelo requires it"),
     (["primary_email"], "clear_fields: primary_email cannot be cleared because Gorelo requires it"),
     (["secondary_email"], "clear_fields: secondary_email is not cleared through clear_fields; pass secondary_email=[]"),
-    (["client_id"], "clear_fields: unknown field 'client_id'; accepted: location_id, mobile_phone,"),
+    (["client_id"], "clear_fields: unknown field 'client_id'; accepted: mobile_phone,"),
+    (["location_id"], LOCATION_CANNOT_BE_CLEARED),
     (["JobTitle"], "clear_fields: unknown field 'JobTitle'"),
     (["job_title", "bogus"], "clear_fields: unknown field 'bogus'"),
 ]
@@ -1056,7 +1129,7 @@ async def test_clear_fields_is_a_literal_list_so_the_schema_refuses_every_other_
     # like update_item's, clear_fields offers only the clearable names; any other is refused by the schema
     # before the tool runs (the error lists the accepted names), with no HTTP call
     text = await call_tool_error(
-        server, "update_contact", {"contact_id": 5, "clear_fields": clear_fields, "clear_secondary_email_ok": True}
+        server, "update_contact", {"contact_id": 5, "clear_fields": clear_fields}
     )
     assert "clear_fields." in text and "Input should be" in text
     for accepted in contacts_module.CLEARABLE_FIELDS:
@@ -1072,7 +1145,7 @@ async def test_update_contact_called_directly_still_explains_why_a_name_cannot_b
     async with client_factory() as client:
         with pytest.raises(ToolError) as caught:
             await contacts_module.update_contact(
-                make_ctx(client), contact_id=5, clear_fields=clear_fields, clear_secondary_email_ok=True
+                make_ctx(client), contact_id=5, clear_fields=clear_fields
             )
     assert fragment in str(caught.value)
     assert mock_gorelo.requests == []
@@ -1088,7 +1161,7 @@ def test_the_clearable_names_are_the_literal_of_the_schema_and_never_the_require
 async def test_a_field_cannot_be_given_a_value_and_cleared_in_the_same_call(server, mock_gorelo):
     text = await call_tool_error(
         server, "update_contact",
-        {"contact_id": 5, "job_title": "CTO", "clear_fields": ["job_title"], "clear_secondary_email_ok": True},
+        {"contact_id": 5, "job_title": "CTO", "clear_fields": ["job_title"]},
     )
     assert text == "job_title: cannot be given a value and listed in clear_fields in the same call"
     assert mock_gorelo.requests == []
@@ -1098,7 +1171,7 @@ async def test_a_blank_value_next_to_clear_fields_is_just_a_second_way_of_saying
     routed_update(mock_gorelo)
     await call_tool(
         server, "update_contact",
-        {"contact_id": 5, "job_title": "", "department": "  ", "clear_fields": ["job_title", "department"], "clear_secondary_email_ok": True},
+        {"contact_id": 5, "job_title": "", "department": "  ", "clear_fields": ["job_title", "department"]},
     )
     body = patched(mock_gorelo)[0].json
     assert body == command(JobTitle=None, Department=None) and "JobTitle" not in body and "Department" not in body
@@ -1109,7 +1182,7 @@ async def test_a_blank_value_next_to_clear_fields_is_just_a_second_way_of_saying
 )
 @pytest.mark.parametrize("blank", ["", "   "])
 async def test_a_blank_optional_value_is_rejected_with_the_way_to_clear_it(server, mock_gorelo, param, blank):
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, param: blank, "clear_secondary_email_ok": True})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, param: blank})
     assert text == (
         f"{param}: must not be empty or whitespace only; to remove the stored value pass "
         f'clear_fields=["{param}"]'
@@ -1119,64 +1192,31 @@ async def test_a_blank_optional_value_is_rejected_with_the_way_to_clear_it(serve
 
 @pytest.mark.parametrize("param", ["first_name", "last_name", "primary_email"])
 async def test_a_blank_required_value_is_rejected_and_cannot_be_cleared(server, mock_gorelo, param):
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, param: " ", "clear_secondary_email_ok": True})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, param: " "})
     assert text == f"{param}: must not be empty; Gorelo requires it and it cannot be cleared"
     assert mock_gorelo.requests == []
 
 
 # --------------------------------------------------------------------------
-# update_contact: the secondary email decision
+# update_contact: the location and the secondary emails
 # --------------------------------------------------------------------------
 
-
-REFUSAL = (
-    "secondary_email: refusing to update contact 5 until the user has decided what happens to its secondary emails. "
-    "Gorelo's PATCH /v1/contacts/{contactId} replaces the whole contact and the API cannot show a contact's secondary emails "
-    "(only the user can see them in the Gorelo app), so this update would erase them. Ask the user first, do not "
-    "retry on your own. Either ask which complete list of secondary emails the contact should have afterwards and "
-    "pass it as secondary_email (it replaces ALL existing ones; [] erases them), or ask whether erasing all of them "
-    "is acceptable and only if the user says yes pass clear_secondary_email_ok=true. Nothing has been sent to Gorelo."
-)
+# Live, on a test client, 2026-10-24: a PATCH that leaves LocationId and SecondaryEmail out KEEPS both
+# (a search by Query on a secondary address was the oracle: no read returns SecondaryEmail), "LocationId": null keeps the
+# location, and "SecondaryEmail": [] clears the secondary emails. So an update that does not pass secondary_email just sends
+# no SecondaryEmail, and a location is never cleared.
 
 
-async def test_without_a_secondary_email_decision_the_update_is_refused_before_any_http_call(server, mock_gorelo):
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "CTO"})
-    assert flat(text) == REFUSAL
-    assert mock_gorelo.requests == []  # not even the read
-
-
-async def test_the_refusal_sends_the_secondary_email_choice_through_the_user(server, mock_gorelo):
-    # the wording is pinned piece by piece, so that none of it can drift back into a hint to retry
-    message = flat(await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "CTO"}))
-    assert message.startswith("secondary_email: refusing to update contact 5 until the user has decided")
-    assert "the API cannot show a contact's secondary emails (only the user can see them in the Gorelo app)" in message
-    assert "this update would erase them" in message
-    assert "Ask the user first, do not retry on your own." in message
-    assert "ask which complete list of secondary emails the contact should have afterwards" in message
-    assert "(it replaces ALL existing ones; [] erases them)" in message
-    assert "ask whether erasing all of them is acceptable and only if the user says yes pass clear_secondary_email_ok=true" in message
-    assert message.endswith("Nothing has been sent to Gorelo.")
-    # the flag is never offered on its own as the way out: asking the user comes first, in the same breath
-    assert message.index("Ask the user first") < message.index("clear_secondary_email_ok=true")
-    assert "Two ways forward" not in message
-    assert "pass clear_secondary_email_ok=true to accept" not in message
-    assert "if you want to keep them" not in message  # the old text told the model to read them itself in the app
-    assert mock_gorelo.requests == []
-
-
-async def test_an_explicit_false_is_the_same_as_no_decision(server, mock_gorelo):
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "CTO", "clear_secondary_email_ok": False})
-    assert text.startswith("secondary_email: refusing to update contact 5")
-    assert mock_gorelo.requests == []
-
-
-async def test_clear_secondary_email_ok_accepts_the_loss_and_sends_no_secondary_email_field(server, mock_gorelo):
+async def test_an_update_without_secondary_email_is_not_refused_and_sends_no_secondary_email(server, mock_gorelo):
     routed_update(mock_gorelo)
-    await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "CTO", "clear_secondary_email_ok": True})
-    assert "SecondaryEmail" not in patched(mock_gorelo)[0].json
+    result = await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "CTO"})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", CONTACT_5), ("PATCH", CONTACT_5)]  # one read, one write
+    body = patched(mock_gorelo)[0].json
+    assert "SecondaryEmail" not in body and body == command(JobTitle="CTO")
+    assert "note" not in result
 
 
-async def test_a_secondary_email_list_is_sent_whole_and_needs_no_flag(server, mock_gorelo):
+async def test_a_secondary_email_list_is_sent_whole(server, mock_gorelo):
     routed_update(mock_gorelo)
     await call_tool(
         server, "update_contact",
@@ -1197,15 +1237,7 @@ async def test_secondary_email_alone_is_a_valid_update(server, mock_gorelo):
     routed_update(mock_gorelo)
     await call_tool(server, "update_contact", {"contact_id": 5, "secondary_email": ["only@example.invalid"]})
     assert patched(mock_gorelo)[0].json == command(SecondaryEmail=["only@example.invalid"])
-
-
-async def test_an_explicit_list_wins_over_the_flag(server, mock_gorelo):
-    routed_update(mock_gorelo)
-    await call_tool(
-        server, "update_contact",
-        {"contact_id": 5, "secondary_email": ["x@example.invalid"], "clear_secondary_email_ok": True},
-    )
-    assert patched(mock_gorelo)[0].json["SecondaryEmail"] == ["x@example.invalid"]
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
 
 
 async def test_a_blank_secondary_address_is_a_local_error(server, mock_gorelo):
@@ -1214,14 +1246,58 @@ async def test_a_blank_secondary_address_is_a_local_error(server, mock_gorelo):
     assert mock_gorelo.requests == []
 
 
+@pytest.mark.parametrize("flag", [True, False, "true"])
+async def test_the_removed_secondary_email_flag_is_refused_by_the_schema(server, mock_gorelo, flag):
+    tool = next(t for t in await list_tools(server) if t.name == "update_contact")
+    assert "clear_secondary_email_ok" not in tool.inputSchema["properties"]
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "CTO", "clear_secondary_email_ok": flag})
+    assert "clear_secondary_email_ok" in text and "Unexpected keyword argument" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_the_location_from_the_record_is_still_copied_when_the_caller_does_not_pass_one(server, mock_gorelo):
+    routed_update(mock_gorelo, record=contact_record(LocationId=9007))
+    await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "CTO"})
+    assert patched(mock_gorelo)[0].json == command(JobTitle="CTO", LocationId=9007)
+
+
+async def test_a_new_location_replaces_the_stored_one(server, mock_gorelo):
+    routed_update(mock_gorelo, record=contact_record(LocationId=9007))
+    await call_tool(server, "update_contact", {"contact_id": 5, "location_id": 9002})
+    assert patched(mock_gorelo)[0].json == command(LocationId=9002)
+
+
+async def test_clearing_the_location_is_refused_before_any_http_call_naming_clear_fields(client_factory, mock_gorelo):
+    async with client_factory() as client:
+        with pytest.raises(ToolError) as caught:
+            await contacts_module.update_contact(make_ctx(client), contact_id=5, clear_fields=["location_id"])
+    assert str(caught.value) == LOCATION_CANNOT_BE_CLEARED
+    assert mock_gorelo.requests == []
+
+
+async def test_clearing_the_location_through_the_server_is_refused_by_the_schema_with_no_http_call(server, mock_gorelo):
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "clear_fields": ["location_id"]})
+    assert "clear_fields." in text and "Input should be 'mobile_phone', 'mobile_phone_country_code'" in text  # not offered
+    assert mock_gorelo.requests == []
+
+
+async def test_a_location_cannot_be_cleared_next_to_other_clears_either(client_factory, mock_gorelo):
+    async with client_factory() as client:
+        with pytest.raises(ToolError) as caught:
+            await contacts_module.update_contact(
+                make_ctx(client), contact_id=5, clear_fields=["job_title", "location_id"]
+            )
+    assert str(caught.value) == LOCATION_CANNOT_BE_CLEARED
+    assert mock_gorelo.requests == []
+
+
 # --------------------------------------------------------------------------
 # update_contact: at least one change, ids, regions
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("arguments", [{}, {"clear_secondary_email_ok": True}, {"clear_secondary_email_ok": False}])
-async def test_update_contact_with_nothing_to_change_is_a_local_error(server, mock_gorelo, arguments):
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, **arguments})
+async def test_update_contact_with_nothing_to_change_is_a_local_error(server, mock_gorelo):
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5})
     assert text.startswith("nothing to update: pass at least one of first_name, last_name, primary_email")
     assert "secondary_email or clear_fields" in text
     assert mock_gorelo.requests == []
@@ -1229,13 +1305,13 @@ async def test_update_contact_with_nothing_to_change_is_a_local_error(server, mo
 
 async def test_update_contact_rejects_an_id_that_cannot_exist_naming_contact_id(server, mock_gorelo):
     for bad in (0, -1):
-        text = await call_tool_error(server, "update_contact", {"contact_id": bad, "job_title": "X", "secondary_email": []})
+        text = await call_tool_error(server, "update_contact", {"contact_id": bad, "job_title": "X"})
         assert text.startswith("contact_id: expected a positive whole number")
     assert mock_gorelo.requests == []
 
 
 async def test_update_contact_rejects_a_location_that_cannot_exist(server, mock_gorelo):
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "location_id": 0, "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "location_id": 0})
     assert text.startswith("location_id: expected a positive whole number")
     assert mock_gorelo.requests == []
 
@@ -1243,14 +1319,14 @@ async def test_update_contact_rejects_a_location_that_cannot_exist(server, mock_
 @pytest.mark.parametrize("region_param", ["mobile_phone_country_code", "office_phone_country_code"])
 @pytest.mark.parametrize("dial_code", ["1", "+1", "us", ""])
 async def test_update_contact_rejects_a_dial_code_or_a_badly_written_region(server, mock_gorelo, region_param, dial_code):
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, region_param: dial_code, "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, region_param: dial_code})
     assert text.startswith(f"{region_param}: expected a 2 letter ISO region code in capitals")
     assert mock_gorelo.requests == []
 
 
 async def test_a_new_phone_keeps_the_region_the_contact_already_has(server, mock_gorelo):
     routed_update(mock_gorelo)
-    await call_tool(server, "update_contact", {"contact_id": 5, "mobile_phone": "5555550100", "secondary_email": []})
+    await call_tool(server, "update_contact", {"contact_id": 5, "mobile_phone": "5555550100"})
     body = patched(mock_gorelo)[0].json
     assert body["MobilePhone"] == "5555550100" and body["MobilePhoneCountryCode"] == "US"
 
@@ -1266,13 +1342,13 @@ async def test_a_new_phone_for_a_contact_with_no_region_needs_one_and_nothing_is
     server, mock_gorelo, phone, region, phone_key, region_key
 ):
     routed_update(mock_gorelo, record=contact_record(**{phone_key: None, region_key: None}))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, phone: "5555550100", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, phone: "5555550100"})
     assert text.startswith(f"{region}: {phone} needs an ISO region code (for example US or CA)")
     assert f'pass {region}, for example "US" (no default is assumed)' in text
     assert patched(mock_gorelo) == []
     mock_gorelo.reset()
     routed_update(mock_gorelo, record=contact_record(**{phone_key: None, region_key: None}))
-    await call_tool(server, "update_contact", {"contact_id": 5, phone: "5555550100", region: "CA", "secondary_email": []})
+    await call_tool(server, "update_contact", {"contact_id": 5, phone: "5555550100", region: "CA"})
     body = patched(mock_gorelo)[0].json
     assert body[phone_key] == "5555550100" and body[region_key] == "CA"
 
@@ -1281,7 +1357,7 @@ async def test_clearing_only_the_region_of_a_filled_phone_is_a_local_error(serve
     routed_update(mock_gorelo)
     text = await call_tool_error(
         server, "update_contact",
-        {"contact_id": 5, "clear_fields": ["mobile_phone_country_code"], "secondary_email": []},
+        {"contact_id": 5, "clear_fields": ["mobile_phone_country_code"]},
     )
     assert text.startswith("mobile_phone_country_code: mobile_phone needs an ISO region code")
     assert "clear mobile_phone as well, or keep mobile_phone_country_code" in text
@@ -1291,11 +1367,304 @@ async def test_clearing_only_the_region_of_a_filled_phone_is_a_local_error(serve
 async def test_a_phone_the_caller_did_not_touch_is_never_blocked_by_a_missing_region(server, mock_gorelo):
     # legacy data: a phone with no region stored. A change to something else must still go through.
     routed_update(mock_gorelo, record=contact_record(MobilePhone="5555550142", MobilePhoneCountryCode=None))
-    await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "CTO", "secondary_email": []})
+    await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "CTO"})
     body = patched(mock_gorelo)[0].json
     # the region the contact does not have is left out of the body, never sent as an explicit null
     assert body["MobilePhone"] == "5555550142" and "MobilePhoneCountryCode" not in body
     assert None not in body.values()
+
+
+# --------------------------------------------------------------------------
+# update_contact: a region code stored without its phone
+# --------------------------------------------------------------------------
+
+# Gorelo answers HTTP 400, code 070101, PropertyName OfficePhone, "OfficePhone is required when OfficePhoneCountryCode is
+# provided" to an update of a contact that holds a region code and no phone. PATCH clears what it leaves out, the full
+# command copied the stored code, and Gorelo refuses a region code without its phone number, so ANY update of such a
+# contact failed. A code that comes from the stored record is now left out of the command and reported in a `note`; a code
+# the caller passes in the call is refused here, after the one read and before any write.
+
+FIRST_NAME_ONLY = {"contact_id": 5, "first_name": "Janet"}
+CLEARED_SENTENCE = "A stored region code with no phone is left out; the result's `note` names it."
+
+
+@pytest.mark.parametrize("phone, region, phone_key, region_key, note", PHONE_PAIR_CASES)
+async def test_a_stored_region_code_with_no_phone_is_left_out_of_the_command_and_reported_in_a_note(
+    server, mock_gorelo, phone, region, phone_key, region_key, note
+):
+    record = contact_record(**{phone_key: None, region_key: "US"})
+    answer = contact_record(FirstName="Janet", **{phone_key: None, region_key: None})
+    routed_update(mock_gorelo, record=record, answer=answer)
+    result = await call_tool(server, "update_contact", FIRST_NAME_ONLY)
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", CONTACT_5), ("PATCH", CONTACT_5)]
+    body = patched(mock_gorelo)[0].json
+    assert phone_key not in body and region_key not in body  # neither the phone nor the code is sent
+    assert body == command(FirstName="Janet", **{phone_key: None, region_key: None})  # everything else is copied
+    assert result == {**answer, "note": note}  # Gorelo's record, plus the one key the tool added
+    assert region in result["note"] and "(was US)" in result["note"]
+
+
+async def test_two_stored_region_codes_with_no_phones_are_left_out_under_one_note(server, mock_gorelo):
+    record = contact_record(MobilePhone=None, MobilePhoneCountryCode="US", OfficePhone=None, OfficePhoneCountryCode="CA")
+    answer = contact_record(
+        FirstName="Janet", MobilePhone=None, MobilePhoneCountryCode=None, OfficePhone=None, OfficePhoneCountryCode=None
+    )  # Gorelo's answer shows both codes gone
+    routed_update(mock_gorelo, record=record, answer=answer)
+    result = await call_tool(server, "update_contact", FIRST_NAME_ONLY)
+    body = patched(mock_gorelo)[0].json
+    assert body == command(
+        FirstName="Janet", MobilePhone=None, MobilePhoneCountryCode=None, OfficePhone=None, OfficePhoneCountryCode=None
+    )
+    assert result == {**answer, "note": BOTH_NOTE}
+    assert len(mock_gorelo.requests) == 2
+
+
+@pytest.mark.parametrize("blank", ["", "   "], ids=["empty", "spaces"])
+@pytest.mark.parametrize("phone, region, phone_key, region_key, note", PHONE_PAIR_CASES)
+async def test_a_blank_stored_phone_counts_as_empty(server, mock_gorelo, phone, region, phone_key, region_key, note, blank):
+    routed_update(
+        mock_gorelo,
+        record=contact_record(**{phone_key: blank, region_key: "US"}),
+        answer=contact_record(FirstName="Janet", **{phone_key: None, region_key: None}),
+    )
+    result = await call_tool(server, "update_contact", FIRST_NAME_ONLY)
+    body = patched(mock_gorelo)[0].json
+    assert phone_key not in body and region_key not in body  # the blank phone is not sent either: the contact has no phone
+    assert body == command(FirstName="Janet", **{phone_key: None, region_key: None})
+    assert result["note"] == note
+
+
+@pytest.mark.parametrize("stored_region", [None, "US"], ids=["no-stored-code", "stored-code"])
+@pytest.mark.parametrize("stored_phone", [None, "", "   "], ids=["null", "empty", "blank"])
+@pytest.mark.parametrize("phone, region, phone_key, region_key, note", PHONE_PAIR_CASES)
+async def test_a_region_code_passed_for_a_contact_without_that_phone_is_refused_after_the_read_and_nothing_is_written(
+    server, mock_gorelo, phone, region, phone_key, region_key, note, stored_phone, stored_region
+):
+    routed_update(mock_gorelo, record=contact_record(**{phone_key: stored_phone, region_key: stored_region}))
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, region: "CA"})
+    assert text == (
+        f"{region}: Gorelo refuses a region code without its phone number; pass {phone} too, or leave {region} out "
+        f"(contact 5 would have no {phone} after this update)"
+    )
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", CONTACT_5)]  # exactly one read, no PATCH
+
+
+@pytest.mark.parametrize("stored_region", [None, "US"], ids=["no-stored-code", "stored-code"])
+@pytest.mark.parametrize("phone, region, phone_key, region_key, note", PHONE_PAIR_CASES)
+async def test_the_phone_passed_with_its_region_code_is_sent_with_both_and_there_is_no_note(
+    server, mock_gorelo, phone, region, phone_key, region_key, note, stored_region
+):
+    routed_update(mock_gorelo, record=contact_record(**{phone_key: None, region_key: stored_region}))
+    result = await call_tool(
+        server, "update_contact", {"contact_id": 5, phone: "5555550100", region: "CA"}
+    )
+    assert patched(mock_gorelo)[0].json == command(**{phone_key: "5555550100", region_key: "CA"})
+    assert "note" not in result
+
+
+@pytest.mark.parametrize("phone, region, phone_key, region_key, note", PHONE_PAIR_CASES)
+async def test_a_new_phone_takes_the_region_code_the_contact_holds_without_a_phone(
+    server, mock_gorelo, phone, region, phone_key, region_key, note
+):
+    routed_update(mock_gorelo, record=contact_record(**{phone_key: None, region_key: "US"}))
+    result = await call_tool(server, "update_contact", {"contact_id": 5, phone: "5555550100"})
+    assert patched(mock_gorelo)[0].json == command(**{phone_key: "5555550100"})  # the stored "US" goes with it
+    assert "note" not in result
+
+
+async def test_a_stored_phone_with_its_stored_region_code_is_copied_unchanged_and_there_is_no_note(server, mock_gorelo):
+    routed_update(mock_gorelo)
+    result = await call_tool(server, "update_contact", FIRST_NAME_ONLY)
+    assert patched(mock_gorelo)[0].json == command(FirstName="Janet")
+    assert "note" not in result and result == contact_record()
+
+
+@pytest.mark.parametrize("phone, region, phone_key, region_key, note", PHONE_PAIR_CASES)
+async def test_clearing_a_phone_alone_takes_its_stored_region_code_with_it_and_says_so(
+    server, mock_gorelo, phone, region, phone_key, region_key, note
+):
+    # the phone would be gone and its code would stay: the same combination Gorelo refuses
+    routed_update(mock_gorelo, answer=contact_record(**{phone_key: None, region_key: None}))
+    result = await call_tool(server, "update_contact", {"contact_id": 5, "clear_fields": [phone]})
+    assert patched(mock_gorelo)[0].json == command(**{phone_key: None, region_key: None})
+    assert result["note"] == note
+
+
+@pytest.mark.parametrize("phone, region, phone_key, region_key, note", PHONE_PAIR_CASES)
+async def test_clearing_the_region_code_of_a_contact_without_that_phone_needs_no_note(
+    server, mock_gorelo, phone, region, phone_key, region_key, note
+):
+    routed_update(mock_gorelo, record=contact_record(**{phone_key: None, region_key: "US"}))
+    result = await call_tool(server, "update_contact", {"contact_id": 5, "clear_fields": [region]})
+    assert patched(mock_gorelo)[0].json == command(**{phone_key: None, region_key: None})
+    assert "note" not in result
+
+
+@pytest.mark.parametrize("phone, region, phone_key, region_key, note", PHONE_PAIR_CASES)
+async def test_a_region_code_passed_next_to_the_clear_of_its_phone_is_refused(
+    server, mock_gorelo, phone, region, phone_key, region_key, note
+):
+    routed_update(mock_gorelo)
+    text = await call_tool_error(
+        server, "update_contact", {"contact_id": 5, region: "CA", "clear_fields": [phone]}
+    )
+    assert text.startswith(f"{region}: Gorelo refuses a region code without its phone number; pass {phone} too")
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_create_and_update_refuse_a_lone_region_code_in_the_same_words(server, mock_gorelo):
+    created = await call_tool_error(server, "create_contact", {**REQUIRED_FOUR, "office_phone_country_code": "US"})
+    routed_update(mock_gorelo, record=contact_record(OfficePhone=None, OfficePhoneCountryCode=None))
+    updated = await call_tool_error(
+        server, "update_contact", {"contact_id": 5, "office_phone_country_code": "US"}
+    )
+    assert updated.startswith(created) and updated != created  # the update adds which contact and why
+
+
+async def test_the_secondary_email_list_travels_with_the_command_that_leaves_a_stale_region_code_out(server, mock_gorelo):
+    routed_update(
+        mock_gorelo,
+        record=contact_record(OfficePhone=None, OfficePhoneCountryCode="US"),
+        answer=contact_record(FirstName="Janet", OfficePhone=None, OfficePhoneCountryCode=None),
+    )
+    result = await call_tool(
+        server, "update_contact", {"contact_id": 5, "first_name": "Janet", "secondary_email": ["a@example.invalid"]}
+    )
+    assert patched(mock_gorelo)[0].json == command(
+        FirstName="Janet", OfficePhone=None, OfficePhoneCountryCode=None, SecondaryEmail=["a@example.invalid"]
+    )
+    assert result["note"] == OFFICE_NOTE
+
+
+async def test_a_contact_with_a_stale_region_code_is_updated_without_a_secondary_email_decision(server, mock_gorelo):
+    # the case of a stale region code, now with nothing to decide about secondary emails: one read, one write, no SecondaryEmail
+    routed_update(
+        mock_gorelo,
+        record=contact_record(OfficePhone=None, OfficePhoneCountryCode="US"),
+        answer=contact_record(FirstName="Janet", OfficePhone=None, OfficePhoneCountryCode=None),
+    )
+    result = await call_tool(server, "update_contact", {"contact_id": 5, "first_name": "Janet"})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", CONTACT_5), ("PATCH", CONTACT_5)]
+    assert patched(mock_gorelo)[0].json == command(FirstName="Janet", OfficePhone=None, OfficePhoneCountryCode=None)
+    assert result["note"] == OFFICE_NOTE
+
+
+# The note is built from Gorelo's ANSWER, not from what was sent: a code is called cleared only when the answer shows that
+# field null or blank. When the answer still shows the code the note says so, and the tool does not raise (the PATCH was
+# answered 2xx with a record).
+STILL_SHOWN = {
+    "mobile_phone_country_code": (
+        "mobile_phone_country_code (was US) was left out of the update, but Gorelo's answer still shows it; "
+        "check with get_contact."
+    ),
+    "office_phone_country_code": (
+        "office_phone_country_code (was US) was left out of the update, but Gorelo's answer still shows it; "
+        "check with get_contact."
+    ),
+}
+
+
+@pytest.mark.parametrize("phone, region, phone_key, region_key, note", PHONE_PAIR_CASES)
+async def test_the_note_does_not_say_cleared_when_the_answer_still_shows_the_code(
+    server, mock_gorelo, phone, region, phone_key, region_key, note
+):
+    record = contact_record(**{phone_key: None, region_key: "US"})
+    answer = contact_record(FirstName="Janet", **{phone_key: None, region_key: "US"})  # Gorelo kept the code
+    routed_update(mock_gorelo, record=record, answer=answer)
+    result = await call_tool(server, "update_contact", FIRST_NAME_ONLY)  # no error
+    assert patched(mock_gorelo)[0].json == command(FirstName="Janet", **{phone_key: None, region_key: None})
+    assert result == {**answer, "note": STILL_SHOWN[region]}
+    assert "cleared" not in result["note"]
+
+
+@pytest.mark.parametrize("phone, region, phone_key, region_key, note", PHONE_PAIR_CASES)
+@pytest.mark.parametrize("blank", [None, "", "   "], ids=["null", "empty", "spaces"])
+async def test_the_note_says_cleared_when_the_answer_shows_the_code_null_or_blank(
+    server, mock_gorelo, phone, region, phone_key, region_key, note, blank
+):
+    answer = contact_record(FirstName="Janet", **{phone_key: None, region_key: blank})
+    routed_update(mock_gorelo, record=contact_record(**{phone_key: None, region_key: "US"}), answer=answer)
+    result = await call_tool(server, "update_contact", FIRST_NAME_ONLY)
+    assert result["note"] == note
+
+
+async def test_one_code_cleared_and_one_still_shown_get_one_note_that_tells_them_apart(server, mock_gorelo):
+    record = contact_record(MobilePhone=None, MobilePhoneCountryCode="US", OfficePhone=None, OfficePhoneCountryCode="CA")
+    answer = contact_record(
+        FirstName="Janet", MobilePhone=None, MobilePhoneCountryCode=None, OfficePhone=None, OfficePhoneCountryCode="CA"
+    )
+    routed_update(mock_gorelo, record=record, answer=answer)
+    result = await call_tool(server, "update_contact", FIRST_NAME_ONLY)
+    assert result["note"] == (
+        MOBILE_NOTE + " office_phone_country_code (was CA) was left out of the update, but Gorelo's answer still shows it; "
+        "check with get_contact."
+    )
+
+
+async def test_two_codes_that_the_answer_still_shows_are_named_together(server, mock_gorelo):
+    record = contact_record(MobilePhone=None, MobilePhoneCountryCode="US", OfficePhone=None, OfficePhoneCountryCode="CA")
+    routed_update(mock_gorelo, record=record, answer=record)
+    result = await call_tool(server, "update_contact", FIRST_NAME_ONLY)
+    assert result["note"] == (
+        "mobile_phone_country_code (was US) and office_phone_country_code (was CA) were left out of the update, but "
+        "Gorelo's answer still shows them; check with get_contact."
+    )
+
+
+async def test_an_answer_that_does_not_show_the_field_does_not_claim_it_was_cleared(server, mock_gorelo):
+    record = contact_record(OfficePhone=None, OfficePhoneCountryCode="US")
+    routed_update(mock_gorelo, record=record, answer=only(record, "OfficePhoneCountryCode"))
+    result = await call_tool(server, "update_contact", FIRST_NAME_ONLY)
+    assert result["note"] == (
+        "office_phone_country_code (was US) was left out of the update, but Gorelo's answer does not show it; "
+        "check with get_contact."
+    )
+
+
+async def test_a_new_phone_still_needs_its_region_code_when_the_other_pair_holds_a_stale_one(server, mock_gorelo):
+    routed_update(
+        mock_gorelo,
+        record=contact_record(MobilePhone=None, MobilePhoneCountryCode=None, OfficePhone=None, OfficePhoneCountryCode="US"),
+    )
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "mobile_phone": "5555550100"})
+    assert text.startswith("mobile_phone_country_code: mobile_phone needs an ISO region code (for example US or CA)")
+    assert patched(mock_gorelo) == []  # nothing is written, the stale office code included
+
+
+@pytest.mark.parametrize("answer", [True, None, {}, []], ids=["boolean", "null", "empty-object", "empty-list"])
+async def test_when_the_write_answers_without_a_record_the_dropped_code_adds_no_note_and_the_error_is_the_old_one(
+    server, mock_gorelo, answer
+):
+    mock_gorelo.on("GET", CONTACT_5, envelope(contact_record(OfficePhone=None, OfficePhoneCountryCode="US")))
+    mock_gorelo.on("PATCH", CONTACT_5, envelope(answer))
+    text = await call_tool_error(server, "update_contact", FIRST_NAME_ONLY)
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
+    assert "OfficePhoneCountryCode" not in patched(mock_gorelo)[0].json  # the PATCH did go out without the stale code
+    assert text.startswith(
+        "Gorelo returned an unexpected response for update_contact: PATCH /v1/contacts/{contactId}: "
+        "expected Data to be a non-empty object but got "
+    )
+    assert "the write may have been applied, so verify it with a read before repeating it" in text
+    assert "cleared" not in text and "office_phone_country_code" not in text
+
+
+def test_the_update_docstring_says_a_stored_region_code_with_no_phone_is_left_out_and_reported():
+    doc = flat(contacts_module.update_contact.__doc__)
+    assert CLEARED_SENTENCE in doc
+    assert doc.index(CLEARED_SENTENCE) < doc.index("Side effects:")  # the side effects stay last, as the template has it
+
+
+async def test_the_update_description_the_model_sees_has_the_sentence_and_stays_within_the_cap(server):
+    tool = next(t for t in await list_tools(server) if t.name == "update_contact")
+    assert CLEARED_SENTENCE in flat(tool.description)
+    assert len(tool.description) <= 900  # MAX_TOOL_DESCRIPTION_CHARS of tests/test_integration.py
+
+
+def test_the_module_text_explains_the_region_code_rule():
+    doc = flat(contacts_module.__doc__)
+    assert "Gorelo refuses a region code without its phone number" in doc and "code 070101" in doc
+    assert "left OUT of the command" in doc and "`note`" in doc
+    assert "built from Gorelo's ANSWER, not from what was sent" in doc
 
 
 # --------------------------------------------------------------------------
@@ -1305,14 +1674,14 @@ async def test_a_phone_the_caller_did_not_touch_is_never_blocked_by_a_missing_re
 
 async def test_a_missing_contact_stops_at_the_read_with_a_tool_error(server, mock_gorelo):
     mock_gorelo.on("GET", "/v1/contacts/99999", error_envelope(404, [("070404", "Contact not found.")]))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 99999, "job_title": "X", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 99999, "job_title": "X"})
     assert text == trace("Gorelo rejected update_contact (HTTP 404, code 070404): Contact not found.")
     assert [r.method for r in mock_gorelo.requests] == ["GET"]
 
 
 async def test_a_record_without_data_stops_at_the_read(server, mock_gorelo):
     mock_gorelo.on("GET", CONTACT_5, envelope(None))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X"})
     assert "Data is null" in text
     assert [r.method for r in mock_gorelo.requests] == ["GET"]
 
@@ -1320,40 +1689,44 @@ async def test_a_record_without_data_stops_at_the_read(server, mock_gorelo):
 @pytest.mark.parametrize("key", ["MobilePhone", "JobTitle", "ClientId", "FirstName", "LocationId", "Description"])
 async def test_a_record_missing_a_field_it_would_have_to_copy_is_refused_before_the_write(server, mock_gorelo, key):
     routed_update(mock_gorelo, record=only(contact_record(), key))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops"})
     assert text.startswith("Gorelo returned an unexpected response for update_contact: GET /v1/contacts/{contactId}: the contact record has no " + key)
-    assert "replaces the whole contact and would erase every value that could not be copied" in text
+    assert (
+        "refusing to send an update built from it, because Gorelo clears the phone, region code, job title, department, time "
+        "zone and description fields that an update leaves out, so a record that lacks one of its fields cannot be copied safely"
+    ) in text
+    assert "replaces the whole contact" not in text
     assert patched(mock_gorelo) == []
 
 
 async def test_every_missing_field_is_listed_at_once(server, mock_gorelo):
     routed_update(mock_gorelo, record=only(contact_record(), "MobilePhone", "OfficePhone", "TimeZone"))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops"})
     assert "the contact record has no MobilePhone, OfficePhone, TimeZone;" in text
 
 
 async def test_a_missing_field_does_not_matter_when_the_caller_supplies_that_field(server, mock_gorelo):
     routed_update(mock_gorelo, record=only(contact_record(), "MobilePhone"))
-    await call_tool(server, "update_contact", {"contact_id": 5, "mobile_phone": "5555550100", "secondary_email": []})
+    await call_tool(server, "update_contact", {"contact_id": 5, "mobile_phone": "5555550100"})
     assert patched(mock_gorelo)[0].json["MobilePhone"] == "5555550100"
 
 
 async def test_a_missing_field_does_not_matter_when_the_caller_clears_that_field(server, mock_gorelo):
     routed_update(mock_gorelo, record=only(contact_record(), "JobTitle"))
-    await call_tool(server, "update_contact", {"contact_id": 5, "clear_fields": ["job_title"], "secondary_email": []})
+    await call_tool(server, "update_contact", {"contact_id": 5, "clear_fields": ["job_title"]})
     assert "JobTitle" not in patched(mock_gorelo)[0].json
 
 
 async def test_a_record_without_an_id_is_refused(server, mock_gorelo):
     routed_update(mock_gorelo, record=only(contact_record(), "Id"))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops"})
     assert "the contact record has no Id" in text
     assert patched(mock_gorelo) == []
 
 
 async def test_a_record_for_another_contact_is_refused(server, mock_gorelo):
     routed_update(mock_gorelo, record=contact_record(contact_id=6))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops"})
     assert "asked for contact 5 but Gorelo returned contact 6; refusing to update" in text
     assert patched(mock_gorelo) == []
 
@@ -1361,7 +1734,7 @@ async def test_a_record_for_another_contact_is_refused(server, mock_gorelo):
 @pytest.mark.parametrize("data, found", [([contact_record()], "a list of 1 item"), ({}, "an empty object"), (True, "a boolean")])
 async def test_a_record_that_is_not_an_object_is_refused_before_the_write(server, mock_gorelo, data, found):
     mock_gorelo.on("GET", CONTACT_5, envelope(data))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops"})
     assert text.startswith("Gorelo returned an unexpected response for update_contact: GET /v1/contacts/{contactId}: ")
     assert f"expected Data to be a non-empty object but got {found}; refusing to guess" in text
     assert [r.method for r in mock_gorelo.requests] == ["GET"]
@@ -1369,7 +1742,7 @@ async def test_a_record_that_is_not_an_object_is_refused_before_the_write(server
 
 async def test_a_contact_with_no_client_cannot_be_updated_and_nothing_is_written(server, mock_gorelo):
     routed_update(mock_gorelo, record=contact_record(ClientId=None))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops"})
     assert text.startswith("contact_id: contact 5 has no client in Gorelo (ClientId is null)")
     assert "cannot attach a contact to a client" in text
     assert patched(mock_gorelo) == []
@@ -1389,13 +1762,13 @@ async def test_a_contact_with_no_value_for_a_required_field_is_refused_unless_th
     # the five required fields are always sent with a value, never null and never left out. A record that has
     # none for one of them (and a caller who gave none) is refused locally, naming the parameter to pass.
     routed_update(mock_gorelo, record=contact_record(**{key: None}))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "department": "Ops"})
     assert text.startswith(f"{param}: contact 5 has no ")
     assert f"in Gorelo and Gorelo's update requires one; pass {param} with the value it should have" in text
     assert patched(mock_gorelo) == []
     mock_gorelo.reset()
     routed_update(mock_gorelo, record=contact_record(**{key: None}))
-    await call_tool(server, "update_contact", {"contact_id": 5, param: value, "secondary_email": []})
+    await call_tool(server, "update_contact", {"contact_id": 5, param: value})
     body = patched(mock_gorelo)[0].json
     assert body[key] == value and None not in body.values()
 
@@ -1422,7 +1795,7 @@ SPARSE_RECORD = {
         pytest.param({"job_title": "CTO"}, id="change-one"),
         pytest.param({"clear_fields": ["department", "description"]}, id="clear-two"),
         pytest.param({"clear_fields": list(contacts_module.CLEARABLE_FIELDS)}, id="clear-all"),
-        pytest.param({"job_title": "CTO", "clear_fields": ["location_id"]}, id="change-and-clear"),
+        pytest.param({"job_title": "CTO", "clear_fields": ["department"]}, id="change-and-clear"),
         pytest.param({"secondary_email": ["a@example.invalid"]}, id="secondary-email-list"),
         pytest.param({"secondary_email": []}, id="secondary-email-erased-explicitly"),
     ],
@@ -1432,10 +1805,7 @@ async def test_the_body_never_carries_a_null_whatever_the_record_and_the_clearin
     # fields are always present with values, and no value of the body is ever null
     record = contact_record(**record_values)
     routed_update(mock_gorelo, record=record)
-    arguments = {"contact_id": 5, **extra}
-    if "secondary_email" not in extra:
-        arguments["clear_secondary_email_ok"] = True
-    await call_tool(server, "update_contact", arguments)
+    await call_tool(server, "update_contact", {"contact_id": 5, **extra})
     body = patched(mock_gorelo)[0].json  # patched() already asserts: no null anywhere, the four required fields present
     expected = {}
     expected.update({k: v for k, v in record.items() if k in contacts_module.COPIED_FIELDS and v is not None})
@@ -1452,7 +1822,7 @@ async def test_the_body_never_carries_a_null_whatever_the_record_and_the_clearin
 
 async def test_an_id_that_arrives_as_a_string_in_the_record_still_matches(server, mock_gorelo):
     routed_update(mock_gorelo, record=contact_record(contact_id="5"))
-    await call_tool(server, "update_contact", {"contact_id": 5, "department": "Ops", "secondary_email": []})
+    await call_tool(server, "update_contact", {"contact_id": 5, "department": "Ops"})
     assert "ContactId" not in patched(mock_gorelo)[0].json  # the contact id is in the path only
     assert patched(mock_gorelo)[0].path == CONTACT_5
 
@@ -1482,21 +1852,21 @@ async def test_an_id_that_arrives_as_a_string_in_the_record_still_matches(server
 async def test_update_contact_maps_a_gorelo_error_to_the_snake_case_parameter(server, mock_gorelo, property_name, param):
     mock_gorelo.on("GET", CONTACT_5, envelope(contact_record()))
     mock_gorelo.on("PATCH", CONTACT_5, error_envelope(400, [("070101", "Value is not valid.", property_name)]))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X"})
     assert text == trace(f"Gorelo rejected update_contact (HTTP 400, code 070101): {param}: Value is not valid.")
 
 
 async def test_a_property_the_tool_has_no_parameter_for_keeps_gorelos_own_name(server, mock_gorelo):
     mock_gorelo.on("GET", CONTACT_5, envelope(contact_record()))
     mock_gorelo.on("PATCH", CONTACT_5, error_envelope(400, [("070101", "Client is not active.", "ClientId")]))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X"})
     assert text == trace("Gorelo rejected update_contact (HTTP 400, code 070101): ClientId: Client is not active.")
 
 
 async def test_update_contact_that_times_out_on_the_write_says_to_verify_and_is_not_retried(server, mock_gorelo):
     mock_gorelo.on("GET", CONTACT_5, envelope(contact_record()))
     mock_gorelo.on("PATCH", CONTACT_5, httpx.ReadTimeout("slow"))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X"})
     assert text.startswith("Gorelo did not confirm update_contact") and "Verify with a read before retrying" in text
     assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
 
@@ -1504,14 +1874,14 @@ async def test_update_contact_that_times_out_on_the_write_says_to_verify_and_is_
 async def test_update_contact_after_a_server_error_on_the_write_says_it_may_have_been_applied(server, mock_gorelo):
     mock_gorelo.on("GET", CONTACT_5, envelope(contact_record()))
     mock_gorelo.on("PATCH", CONTACT_5, httpx.Response(503, text="down", headers={"content-type": "text/plain"}))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X"})
     assert "The change may or may not have been applied" in text
     assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
 
 
 async def test_a_read_that_times_out_is_a_plain_read_failure(server, mock_gorelo):
     mock_gorelo.on("GET", CONTACT_5, httpx.ReadTimeout("slow"))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "X"})
     assert text.startswith("Gorelo did not answer update_contact") and "retrying is safe" in text
     assert [r.method for r in mock_gorelo.requests] == ["GET"]
 
@@ -1534,7 +1904,7 @@ async def test_when_the_write_does_not_answer_with_a_record_the_tool_raises_and_
     # A read-back would show the OLD record after a `false` and look like success, so there is none.
     mock_gorelo.on("GET", CONTACT_5, envelope(contact_record()))
     mock_gorelo.on("PATCH", CONTACT_5, envelope(answer))
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "CTO", "secondary_email": []})
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "CTO"})
     assert text.startswith("Gorelo returned an unexpected response for update_contact: PATCH /v1/contacts/{contactId}: ")
     assert f"expected Data to be a non-empty object but got {found}" in text
     assert "the write may have been applied, so verify it with a read before repeating it" in text
@@ -1545,13 +1915,13 @@ async def test_update_contact_returns_the_record_the_write_answered_with(server,
     fresh = contact_record(JobTitle="CTO")
     mock_gorelo.on("GET", CONTACT_5, envelope(contact_record()))
     mock_gorelo.on("PATCH", CONTACT_5, envelope(fresh))
-    result = await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "CTO", "secondary_email": []})
+    result = await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "CTO"})
     assert result == fresh
     assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
 
 
 # --------------------------------------------------------------------------
-# Strict ids and the strict secondary-email flag
+# Strict ids
 # --------------------------------------------------------------------------
 
 STRICT_CASES = [
@@ -1559,8 +1929,8 @@ STRICT_CASES = [
     ("get_contact", {"contact_id": 5}, "contact_id"),
     ("create_contact", dict(REQUIRED_FOUR), "client_id"),
     ("create_contact", dict(REQUIRED_FOUR), "location_id"),
-    ("update_contact", {"contact_id": 5, "job_title": "X", "secondary_email": []}, "contact_id"),
-    ("update_contact", {"contact_id": 5, "job_title": "X", "secondary_email": []}, "location_id"),
+    ("update_contact", {"contact_id": 5, "job_title": "X"}, "contact_id"),
+    ("update_contact", {"contact_id": 5, "job_title": "X"}, "location_id"),
 ]
 
 
@@ -1601,20 +1971,13 @@ async def test_ids_above_the_largest_gorelo_id_are_refused_naming_the_parameter(
     assert mock_gorelo.requests == []
 
 
-@pytest.mark.parametrize("flag", ["true", "True", "yes", "1", 1, 0, 1.0, [True]])
-async def test_clear_secondary_email_ok_is_a_strict_boolean_so_text_and_numbers_do_not_count(server, mock_gorelo, flag):
-    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "job_title": "CTO", "clear_secondary_email_ok": flag})
-    assert "clear_secondary_email_ok" in text and "valid boolean" in text
-    assert mock_gorelo.requests == []
-
-
 async def test_an_explicit_null_for_every_optional_parameter_is_still_accepted(server, mock_gorelo):
     # the schema no longer advertises null for optional parameters, but validation still accepts it
     routed_update(mock_gorelo)
-    nulls = {name: None for name in UPDATE_PARAMS[1:-1] if name != "secondary_email"}
+    nulls = {name: None for name in UPDATE_PARAMS[1:] if name != "secondary_email"}
     await call_tool(
         server, "update_contact",
-        {"contact_id": 5, **nulls, "job_title": "CTO", "secondary_email": None, "clear_secondary_email_ok": True},
+        {"contact_id": 5, **nulls, "job_title": "CTO", "secondary_email": None},
     )
     assert patched(mock_gorelo)[0].json == command(JobTitle="CTO")
     mock_gorelo.on("GET", CONTACTS, paged_envelope([contact_record()]))

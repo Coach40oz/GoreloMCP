@@ -180,15 +180,26 @@ def _search_text(param: str, value: str | None) -> str | None:
     return value
 
 
+# The filters whose values are TEXT (not ids). Gorelo's limit for them was not measured (2026-10-24 measured the 100 of an
+# ID filter only), so they are joined with no cap and Gorelo answers for itself; every id filter keeps csv_ids' cap of 100.
+TEXT_FILTERS = frozenset({"skus", "vendors", "part_numbers"})
+
+
 def _to_query(filters: dict[str, Any]) -> dict[str, Any]:
     """Gorelo's query names; a list becomes one comma separated value (csv_ids names the param on error).
 
-    Unset filters stay in the dict as None on purpose: the client checks every NAME before it drops them.
+    An id list is capped at 100 by csv_ids; a text list (TEXT_FILTERS) has no cap here. Unset filters stay in the dict
+    as None on purpose: the client checks every NAME before it drops them.
     """
-    return {
-        FILTER_FIELDS[param]: csv_ids(param, value) if isinstance(value, (list, tuple)) else value
-        for param, value in filters.items()
-    }
+    query: dict[str, Any] = {}
+    for param, value in filters.items():
+        if not isinstance(value, (list, tuple)):
+            query[FILTER_FIELDS[param]] = value
+        elif param in TEXT_FILTERS:
+            query[FILTER_FIELDS[param]] = csv_ids(param, value, limit=None)
+        else:
+            query[FILTER_FIELDS[param]] = csv_ids(param, value)
+    return query
 
 
 def _amount(param: str, value: Any, *, may_be_negative: bool = False) -> float | int | None:

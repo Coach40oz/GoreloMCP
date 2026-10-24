@@ -49,6 +49,8 @@ import server as server_module
 import tools  # noqa: F401  importing the package fills the registry
 from gorelo_client import (
     FORBIDDEN_OPS,
+    GATEWAY_RETRY_STATUSES,
+    GATEWAY_RETRY_WAIT,
     GORELO_BASE_URL,
     MAX_PAGES,
     PAGE_SIZE_MAX,
@@ -490,12 +492,24 @@ def quoted_facts() -> list[tuple[str, str]]:
     """(what, the exact words the document uses for it, built from the constant in the code)."""
     parameters = inspect.signature(GoreloClient.__init__).parameters
     spec = load_spec_index()
+    gateway_statuses = sorted(GATEWAY_RETRY_STATUSES)
     return [
         ("concurrency", f"at most {parameters['max_concurrency'].default} requests in flight"),
         ("timeout", f"a {int(parameters['timeout'].default)} s timeout per request"),
         (
+            "token bucket",
+            f"a burst of {parameters['burst'].default} requests, then {parameters['rate_per_second'].default:g} request per second",
+        ),
+        (
             "429 retries",
-            f"up to {parameters['max_429_retries'].default} times within about {int(parameters['max_429_wait'].default)} s",
+            f"up to {parameters['max_429_retries'].default} times, with at most {int(parameters['max_429_wait'].default)} s "
+            "of `Retry-After` waits (time queued behind other requests is not counted)",
+        ),
+        ("429 back-off ceiling", f"({int(parameters['max_429_wait'].default)} s at most)"),
+        (
+            "gateway retry of a read",
+            f"retried once, after {GATEWAY_RETRY_WAIT:g} seconds, when the gateway answers "
+            f"{', '.join(str(status) for status in gateway_statuses[:-1])} or {gateway_statuses[-1]}",
         ),
         ("page size", f"clamped to {PAGE_SIZE_MIN} to {PAGE_SIZE_MAX}"),
         ("page limit", f"after {MAX_PAGES} pages"),
@@ -568,9 +582,12 @@ def quantities_in_the_code() -> dict[str, set[int]]:
             int(delay.group(1)),
         },
         "s": {int(parameters["timeout"].default), int(parameters["max_429_wait"].default)},
+        "seconds": {int(GATEWAY_RETRY_WAIT)},
         "pages": {MAX_PAGES},
         "times": {parameters["max_429_retries"].default},
         "requests in flight": {parameters["max_concurrency"].default},
+        "requests": {parameters["burst"].default, parameters["max_concurrency"].default},
+        "request per second": {int(parameters["rate_per_second"].default)},
         "wrong passwords": {oauth_guard.FAILURES_PER_IP, oauth_guard.FAILURES_OVERALL},
         "KiB": {oauth_guard.MAX_BODY_BYTES // 1024},
         "addresses": {oauth_guard.MAX_LIMITER_KEYS},

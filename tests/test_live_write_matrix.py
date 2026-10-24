@@ -49,7 +49,7 @@ import pytest
 from conftest import TEST_API_KEY, MockGorelo, envelope, error_envelope, paged_envelope
 from site_helper import site_config_env  # noqa: F401  (autouse: points GORELO_SITE_CONFIG at invented values)
 
-from gorelo_client import GoreloAPIError, GoreloClient
+from gorelo_client import GATEWAY_RETRY_STATUSES, GoreloAPIError, GoreloClient
 from scripts.live import _env, cleanup, write_matrix
 from scripts.live.guard import _CREATES, GuardViolation, LiveGuard
 from scripts.live.manifest import Manifest, Record
@@ -525,7 +525,9 @@ class FakeGorelo:
         for required in ("PrimaryEmail", "ClientId"):
             if not q.json.get(required):
                 return error_envelope(400, [("070101", f"{required} is required.", required)])
-        self.contacts[ident] = self.contact_record(ident, q.json)  # PATCH REPLACES: whatever the body leaves out is gone
+        # a phone, job title, department, time zone or description that the body leaves out is cleared (live, 2026-10-24); a
+        # LocationId and a SecondaryEmail that are left out are kept, which this fake does not model: nothing here reads them
+        self.contacts[ident] = self.contact_record(ident, q.json)
         return envelope(self.contacts[ident])
 
     def delete_contact(self, q):
@@ -2109,7 +2111,7 @@ async def test_clients_an_update_that_did_not_stick_on_the_temporary_client_is_c
     assert fake.leftovers() == []  # the temporary client is still deleted by the cleanup
 
 
-async def test_contacts_the_phone_survives_the_update_and_a_missing_secondary_email_choice_is_refused_locally(run):
+async def test_contacts_an_update_without_secondary_email_goes_through_with_one_read_and_one_write_and_the_phone_survives(run):
     fake = FakeGorelo()
     report = await run(fake, areas=["contacts"])
     assert report.ok
@@ -2123,14 +2125,20 @@ async def test_contacts_the_phone_survives_the_update_and_a_missing_secondary_em
             "MobilePhone": "2025550142", "MobilePhoneCountryCode": "US",
         }
     ]
-    assert results(report)["contacts"].requests == 4  # the refused update_contact sent nothing
-    # the id is in the path only (UpdateContactCommand has no ContactId) and the body is the whole contact
+    # the create, the update's read, its write and the read back: the update sends nothing more than before it was allowed
+    # without a secondary-email choice, and it is not refused
+    assert results(report)["contacts"].requests == 4
+    assert area_ops(fake, report)["contacts"] == GOLDEN["contacts"]
+    # the id is in the path only (UpdateContactCommand has no ContactId), the body is the command and it carries no
+    # SecondaryEmail: Gorelo keeps the secondary emails that an update leaves out (live, 2026-10-24)
     (patch,) = [r for r in fake.mock.requests if r.method == "PATCH"]
     assert patch.path == "/v1/contacts/8301" and "ContactId" not in patch.json and patch.json["ClientId"] == TEST_CLIENT
     assert {"FirstName", "LastName", "PrimaryEmail"} <= set(patch.json)
+    assert "SecondaryEmail" not in patch.json
+    assert any("update_contact without secondary_email went through" in note for note in results(report)["contacts"].notes)
 
 
-async def test_contacts_an_update_that_wipes_the_phone_is_caught(run):
+async def test_contacts_a_patch_that_loses_the_mobile_phone_fails_the_area_at_the_read_back(run):
     fake = FakeGorelo()
     original = fake.handlers["PATCH /v1/contacts/{contactId}"]
 
@@ -3984,17 +3992,41 @@ async def test_approved_invoice_a_push_that_takes_a_few_reads_is_waited_for(appr
     assert the_invoice(fake)["ExternalId"] is not None and fake.residue()
 
 
+def client_asks_again(answer) -> bool:
+    """True when GoreloClient sends a read once more after this answer (1.4.2): an HTTP 502, 503 or 504 (an error envelope is
+    served with its StatusCode as the HTTP status) or a refused connection. Gorelo answers the second request on its own."""
+    if isinstance(answer, httpx.ConnectError):
+        return True
+    status = answer.status_code if isinstance(answer, httpx.Response) else answer.get("StatusCode") if isinstance(answer, dict) else None
+    return status in GATEWAY_RETRY_STATUSES
+
+
 def flaky_reads(fake: FakeGorelo, failing: set[int] | dict[int, object], answer=None) -> list[str]:
     """The reads of an invoice (GET /v1/invoices/{invoiceId}) whose 1-based position is in `failing` get `answer` instead (an
     error envelope, an httpx.Response or an exception such as a timeout); `failing` may also map positions to answers. Every
-    other read is served as usual. Returns the paths of the reads so far."""
+    other read is served as usual. Returns the paths of the requests so far.
+
+    A position counts the requests the area makes to the client, except for the client's own second try of a read that got a
+    gateway answer (see client_asks_again): that request is served the same failing answer and takes no position of its own, so
+    the read still fails after its retry, as the area saw it before the retry existed, and a read that fails like that shows
+    twice in `reads` and in the requests of the fake. A 429 is different: the client's retry of it takes the next position."""
     original = fake.handlers[READ]
     answers = failing if isinstance(failing, dict) else {position: answer for position in failing}
     reads: list[str] = []
+    state = {"position": 0, "second_try": None}
 
     def serve(request):
         reads.append(request.path)
-        return answers[len(reads)] if len(reads) in answers else original(request)
+        if state["second_try"] is not None:  # the client's one more try of the read it just got a gateway answer for
+            repeat, state["second_try"] = state["second_try"], None
+            return repeat
+        state["position"] += 1
+        if state["position"] not in answers:
+            return original(request)
+        failure = answers[state["position"]]
+        if client_asks_again(failure):
+            state["second_try"] = failure
+        return failure
 
     fake.handlers[READ] = serve
     return reads
@@ -4005,15 +4037,16 @@ FAILED_READ = "get_invoice failed at read 1 while waiting for the accounting sys
 
 
 @pytest.mark.parametrize(
-    "answer",
+    "answer, requests",
     [
-        pytest.param(error_envelope(500, [("070500", "boom")]), id="500"),
-        pytest.param(httpx.Response(502, text="Bad Gateway"), id="502-without-an-envelope"),
-        pytest.param(httpx.Response(504, text="Gateway Timeout"), id="504"),
-        pytest.param(httpx.ReadTimeout("slow"), id="timeout"),
+        pytest.param(error_envelope(500, [("070500", "boom")]), 1, id="500"),
+        # a 502 or 504 is a read's one retry (1.4.2): the poll is two requests, and it still fails
+        pytest.param(httpx.Response(502, text="Bad Gateway"), 2, id="502-without-an-envelope"),
+        pytest.param(httpx.Response(504, text="Gateway Timeout"), 2, id="504"),
+        pytest.param(httpx.ReadTimeout("slow"), 1, id="timeout"),
     ],
 )
-async def test_approved_invoice_a_poll_read_that_fails_means_not_synced_yet_and_the_invoice_is_still_voided(approved, answer):
+async def test_approved_invoice_a_poll_read_that_fails_means_not_synced_yet_and_the_invoice_is_still_voided(approved, answer, requests):
     # the create's read-back is read 1 and the first poll is read 2; a GET writes nothing, so a failed one says nothing
     # about the invoice and must not end the wait before the void (the invoice may already be in the accounting system).
     # A 429 is no case of its own here: the client asks again by itself (the retries are off only for the create), and only a
@@ -4024,7 +4057,7 @@ async def test_approved_invoice_a_poll_read_that_fails_means_not_synced_yet_and_
     found = results(report)["approved_invoice"]
     assert found.status == "pass" and report.ok, found.detail
     ops = area_ops(fake, report)["approved_invoice"]
-    assert ops == [*GOLDEN_APPROVED[:5], READ, *GOLDEN_APPROVED[5:]]  # the failed poll is one more read, then the usual void
+    assert ops == [*GOLDEN_APPROVED[:5], *[READ] * requests, *GOLDEN_APPROVED[5:]]  # the failed poll is one more read, then the usual void
     assert ops.count("DELETE /v1/invoices/{invoiceId}") == 1 and area_ops(fake, report)["cleanup"] == []
     assert any(note.startswith(FAILED_READ) for note in found.notes)  # it is said, not hidden
     assert the_invoice(fake)["Status"] == {"Id": 4, "Name": "Void"} and fake.leftovers() == [] and fake.residue()
@@ -4127,8 +4160,10 @@ async def test_approved_invoice_when_every_poll_read_fails_nothing_is_voided_and
     assert found.status == "FAIL"
     assert found.detail == f"{NOT_YET_SYNCED}{void_command(report)}"
     ops = area_ops(fake, report)
-    assert ops["approved_invoice"] == [*GOLDEN_APPROVED[:5], *[READ] * 4]  # the read-back, then 4 polls, no lookup, no DELETE
+    # the read-back, then 4 polls of two requests each (a 502 is asked once more), no lookup, no DELETE
+    assert ops["approved_invoice"] == [*GOLDEN_APPROVED[:5], *[READ] * 8]
     assert not any(r.method == "DELETE" for r in fake.mock.requests)
+    # the cleanup reads the invoice once, through its own plain HTTP client (no retry), and finds it still Approved
     assert ops["cleanup"] == [READ] and invoice["Status"]["Id"] == 5 and report.summary["leftovers"] == 1 and not report.ok
     # the area says that it could not see ExternalId at all, not that it was null
     assert any(note.startswith(FAILED_READ) for note in found.notes)
@@ -4145,7 +4180,8 @@ async def test_approved_invoice_the_note_of_a_failed_last_poll_says_that_no_poll
     report = await approved(fake)  # reads: the read-back, then the polls 2 to 5 (the last one is read 5)
     found = results(report)["approved_invoice"]
     assert found.status == "FAIL" and found.detail.startswith(NOT_YET_SYNCED)
-    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:5], *[READ] * 4]
+    # the read-back and polls 2 to 4 are one request each, the last poll (a 502, asked once more) is two
+    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:5], *[READ] * 5]
     first, last = [note for note in found.notes if note.startswith("get_invoice failed at read")]
     assert first.startswith("get_invoice failed at read 1 while waiting for the accounting system, so it is asked again at the next poll: ")
     assert last.startswith("get_invoice failed at read 4 while waiting for the accounting system, and no poll is left: ")
@@ -4557,6 +4593,12 @@ async def test_approved_invoice_a_create_that_made_nothing_but_was_not_confirmed
     assert any(line.startswith("  UNRESOLVED invoice ") for line in lines)
 
 
+# What the GoreloClient does with a 429: it asks again max_429_retries times before it gives up. The number is the default of
+# the constructor, read from it, so that a change of the client's budget moves these tests with it.
+CLIENT_RETRIES = inspect.signature(GoreloClient.__init__).parameters["max_429_retries"].default
+GIVES_UP = 1 + CLIENT_RETRIES  # requests of one call that is answered 429 every time
+
+
 # a 429 on the one create: never retried, so the guard is never asked for a second Approved invoice. The client's
 # 429 retries are off for that one call and for nothing else: the polls, the lookup by Number and the DELETE that
 # voids keep them
@@ -4564,7 +4606,7 @@ async def test_approved_invoice_a_create_that_made_nothing_but_was_not_confirmed
 
 async def test_approved_invoice_a_429_on_the_create_is_not_retried_and_settles_the_intent_truthfully(approved, lines):
     fake = FakeGorelo()
-    fake.fail("POST /v1/invoices", TOO_MANY, times=5)  # more than the client's three retries would ever use
+    fake.fail("POST /v1/invoices", TOO_MANY, times=GIVES_UP + 1)  # more than the client's retries would ever use
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     rate_limited = (
@@ -4589,7 +4631,7 @@ async def test_approved_invoice_without_the_switch_a_429_would_be_retried_into_t
     # has already allowed its one create. The run then stops as a guard violation and the intent says "nothing was sent".
     monkeypatch.setattr(write_matrix, "no_429_retries", lambda client: contextlib.nullcontext())
     fake = FakeGorelo()
-    fake.fail("POST /v1/invoices", TOO_MANY, times=5)
+    fake.fail("POST /v1/invoices", TOO_MANY, times=GIVES_UP + 1)
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     assert found.status == "FAIL" and found.detail.startswith("the guard refused a request, the run stops: ")
@@ -4599,8 +4641,6 @@ async def test_approved_invoice_without_the_switch_a_429_would_be_retried_into_t
     assert intent["reason"] == "the guard refused the request; nothing was sent"  # the misleading text the switch avoids
 
 
-CLIENT_RETRIES = 3  # what the GoreloClient does with a 429: it asks again 3 times before it gives up
-GIVES_UP = 1 + CLIENT_RETRIES  # requests of one call that is answered 429 every time
 INVOICE_LIST, INVOICE_DELETE = "GET /v1/invoices", "DELETE /v1/invoices/{invoiceId}"
 RATE_LIMITED_TEXT = "Gorelo is rate limiting requests (HTTP 429) for delete_invoice; it did not process this request. Retry later."
 
@@ -4637,11 +4677,13 @@ async def test_approved_invoice_the_429_retries_are_off_for_the_create_call_alon
     assert report.ok and area_ops(fake, report)["approved_invoice"] == GOLDEN_APPROVED
     # The create's POST and its read-back GET (one tool call) were sent with no retries. The preconditions before it, and the
     # first poll, the lookup by Number, the DELETE that voids, the read after it and the listing after the call, had the
-    # client's normal three. This is also the proof that the client the matrix switches is the one the tools send with.
+    # client's normal retries. This is also the proof that the client the matrix switches is the one the tools send with.
+    normal = CLIENT_RETRIES
     assert [(method, retries) for method, path, retries in seen] == [
-        ("GET", 3), ("GET", 3), ("GET", 3), ("POST", 0), ("GET", 0), ("GET", 3), ("GET", 3), ("DELETE", 3), ("GET", 3), ("GET", 3),
+        ("GET", normal), ("GET", normal), ("GET", normal), ("POST", 0), ("GET", 0),
+        ("GET", normal), ("GET", normal), ("DELETE", normal), ("GET", normal), ("GET", normal),
     ]
-    assert [client.max_429_retries for client in clients] == [3, 3]  # the matrix's client and the cleanup's own: both normal
+    assert [client.max_429_retries for client in clients] == [normal, normal]  # the matrix's client and the cleanup's own: both normal
 
 
 @pytest.mark.parametrize(
@@ -4655,11 +4697,11 @@ async def test_approved_invoice_the_429_retries_are_off_for_the_create_call_alon
 async def test_approved_invoice_the_429_retries_are_back_right_after_a_create_that_failed(approved, monkeypatch, answer):
     fake = FakeGorelo()
     clients, seen = watch_retries(fake, monkeypatch)
-    fake.fail("POST /v1/invoices", answer, times=5)
+    fake.fail("POST /v1/invoices", answer, times=GIVES_UP + 1)
     report = await approved(fake)
     assert results(report)["approved_invoice"].status == "FAIL"
     assert [retries for method, path, retries in seen if method == "POST"] == [0]  # ONE POST, sent with no retry
-    assert clients[0].max_429_retries == 3  # the client's normal setting is back, although the create raised
+    assert clients[0].max_429_retries == CLIENT_RETRIES  # the client's normal setting is back, although the create raised
 
 
 async def test_approved_invoice_the_429_retries_are_back_even_when_the_create_call_is_interrupted(approved, monkeypatch):
@@ -4680,15 +4722,15 @@ async def test_approved_invoice_the_429_retries_are_back_even_when_the_create_ca
     monkeypatch.setattr(write_matrix.Matrix, "tool", tool)
     with pytest.raises(Abort):
         await approved(fake)
-    assert clients[0].max_429_retries == 3
+    assert clients[0].max_429_retries == CLIENT_RETRIES
 
 
 def test_no_429_retries_is_a_window_that_puts_back_the_setting_it_found():
     client = GoreloClient("key-for-the-test", transport=httpx.MockTransport(lambda request: httpx.Response(200)))
-    assert client.max_429_retries == 3  # the default of GoreloClient
+    assert client.max_429_retries == CLIENT_RETRIES  # the default of GoreloClient
     with write_matrix.no_429_retries(client):
         assert client.max_429_retries == 0
-    assert client.max_429_retries == 3
+    assert client.max_429_retries == CLIENT_RETRIES
 
     class Abort(BaseException):
         pass
@@ -4698,20 +4740,20 @@ def test_no_429_retries_is_a_window_that_puts_back_the_setting_it_found():
             with write_matrix.no_429_retries(client):
                 assert client.max_429_retries == 0
                 raise error
-        assert client.max_429_retries == 3
-    client.max_429_retries = 7  # what was there is what comes back, not a constant
+        assert client.max_429_retries == CLIENT_RETRIES
+    client.max_429_retries = CLIENT_RETRIES + 4  # what was there is what comes back, not a constant
     with write_matrix.no_429_retries(client):
         assert client.max_429_retries == 0
         with write_matrix.no_429_retries(client):
             assert client.max_429_retries == 0
         assert client.max_429_retries == 0  # the inner window found 0 and puts back 0
-    assert client.max_429_retries == 7
+    assert client.max_429_retries == CLIENT_RETRIES + 4
 
 
 def test_gorelo_client_behind_finds_the_client_the_tools_use_and_refuses_what_is_not_one():
     client = GoreloClient("key-for-the-test", transport=httpx.MockTransport(lambda request: httpx.Response(200)))
     assert write_matrix.gorelo_client_behind(SimpleNamespace(_lifespan_result={"gorelo": client, "toolsets": []})) is client
-    assert client.max_429_retries == 3  # finding it changes nothing
+    assert client.max_429_retries == CLIENT_RETRIES  # finding it changes nothing
     for server in (
         SimpleNamespace(),  # not started: no lifespan state
         SimpleNamespace(_lifespan_result=None),
@@ -4739,7 +4781,7 @@ def test_a_matrix_for_the_approved_run_must_hold_the_client_whose_retries_it_swi
     client = GoreloClient("key-for-the-test", transport=httpx.MockTransport(lambda request: httpx.Response(200)))
     with matrix(with_approved_invoice=True, gorelo=client).without_429_retries():
         assert client.max_429_retries == 0
-    assert client.max_429_retries == 3
+    assert client.max_429_retries == CLIENT_RETRIES
 
 
 async def test_approved_invoice_the_run_does_not_start_when_the_client_cannot_be_reached(run, monkeypatch):
@@ -4760,7 +4802,7 @@ async def test_the_other_runs_never_touch_the_clients_retries(run, monkeypatch):
     clients, seen = watch_retries(fake, monkeypatch)
     report = await run(fake, areas=["clients"])
     assert report.ok
-    assert seen and {retries for method, path, retries in seen} == {3}  # every request of the run, the cleanup's included
+    assert seen and {retries for method, path, retries in seen} == {CLIENT_RETRIES}  # every request of the run, the cleanup's included
 
 
 # 429 on the reads of the wait, the lookup by Number and the DELETE that voids: the client asks again, and when it has
@@ -4779,7 +4821,7 @@ async def test_approved_invoice_one_429_on_a_poll_read_is_retried_by_the_client_
 
 async def test_approved_invoice_a_429_that_outlasts_the_clients_retries_on_a_poll_read_is_one_failed_poll(approved):
     fake = FakeGorelo()
-    flaky_reads(fake, set(range(2, 2 + GIVES_UP)), TOO_MANY)  # the whole first poll: 1 + 3 requests, every one of them 429
+    flaky_reads(fake, set(range(2, 2 + GIVES_UP)), TOO_MANY)  # the whole first poll: 1 + the client's retries, every one of them 429
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     assert found.status == "pass" and report.ok, found.detail
@@ -4821,7 +4863,7 @@ async def test_approved_invoice_one_429_on_the_lookup_or_the_delete_is_retried_b
 
 async def test_approved_invoice_a_429_on_the_lookup_that_outlasts_the_clients_retries_is_asked_again_by_the_area(approved):
     fake = FakeGorelo()
-    throttled_number_lookups(fake, GIVES_UP)  # one whole attempt of delete_invoice: its lookup is answered 429 four times
+    throttled_number_lookups(fake, GIVES_UP)  # one whole attempt of delete_invoice: its lookup is answered 429 on every request
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     assert found.status == "pass" and report.ok, found.detail
@@ -4836,12 +4878,12 @@ async def test_approved_invoice_a_429_on_the_lookup_that_outlasts_the_clients_re
 
 async def test_approved_invoice_a_429_on_the_delete_that_outlasts_the_clients_retries_is_asked_again_by_the_area(approved):
     fake = FakeGorelo()
-    fake.fail(INVOICE_DELETE, TOO_MANY, times=GIVES_UP)  # one whole attempt of delete_invoice: its DELETE is answered 429 four times
+    fake.fail(INVOICE_DELETE, TOO_MANY, times=GIVES_UP)  # one whole attempt of delete_invoice: its DELETE is answered 429 on every request
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     assert found.status == "pass" and report.ok, found.detail
     ops = area_ops(fake, report)["approved_invoice"]
-    # the first attempt: the lookup, then the DELETE four times (Gorelo processed none of them); the second: lookup, DELETE
+    # the first attempt: the lookup, then the DELETE GIVES_UP times (Gorelo processed none of them); the second: lookup, DELETE
     assert ops == [*GOLDEN_APPROVED[:7], *[INVOICE_DELETE] * GIVES_UP, INVOICE_LIST, *GOLDEN_APPROVED[7:]]
     assert "delete_invoice was rate limited by Gorelo (HTTP 429) 1 time and went through on attempt 2" in found.notes
     invoice = the_invoice(fake)
@@ -4853,7 +4895,7 @@ async def test_approved_invoice_a_429_on_the_delete_that_outlasts_the_clients_re
 async def test_approved_invoice_a_lagging_lookup_and_a_429_share_the_three_attempts(approved):
     fake = FakeGorelo()
     lagging_number_lookups(fake, 1)
-    throttled_number_lookups(fake, GIVES_UP)  # wraps the lagging one: attempt 1 is 429 four times, 2 finds nothing, 3 goes through
+    throttled_number_lookups(fake, GIVES_UP)  # wraps the lagging one: attempt 1 is 429 on every request, 2 finds nothing, 3 goes through
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     assert found.status == "pass" and report.ok, found.detail
@@ -4941,7 +4983,7 @@ async def test_approved_invoice_a_429_on_the_creates_read_back_is_not_retried_an
     ops = area_ops(fake, report)
     assert ops["approved_invoice"] == GOLDEN_APPROVED[:5]  # the POST and ONE read-back: not asked again, nothing polled or voided
     assert [(method, retries) for method, path, retries in seen[3:5]] == [("POST", 0), ("GET", 0)]  # no retry: it is part of the call
-    assert clients[0].max_429_retries == 3  # and the window is closed again
+    assert clients[0].max_429_retries == CLIENT_RETRIES  # and the window is closed again
     assert not any(r.method == "DELETE" for r in fake.mock.requests)
     # recorded as Approved (never as a Draft) and left for the user, with the command that voids it
     assert invoice_record_of(report).details == {"status_id": 5, "number": None, "display_number": None}
@@ -6711,3 +6753,172 @@ async def test_approved_invoice_the_closed_gate_does_not_touch_the_guards_rules_
     monkeypatch.setattr(write_matrix, "UNEMAILABLE_CONTACT_STATUS_IDS", ())
     report = await run(FakeGorelo(), areas=["approved_invoice"], with_approved_invoice=True)
     assert report.refused == 0 and results(report)["approved_invoice"].status == "skipped"
+
+
+# --------------------------------------------------------------------------
+# contacts: the update check counts WRITES, not requests (1.4.2): the client sends a read again after a retryable answer
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(httpx.Response(502, text="Bad Gateway"), id="502"),
+        pytest.param(httpx.Response(503, text="Service Unavailable"), id="503"),
+        pytest.param(httpx.Response(504, text="Gateway Timeout"), id="504"),
+        pytest.param(httpx.ConnectError("refused"), id="refused-connection"),
+        pytest.param(
+            httpx.Response(429, headers={"Retry-After": "0"}, json={"error": "rate_limited", "retry_after": "0s"}), id="429"
+        ),
+    ],
+)
+async def test_contacts_a_read_that_the_client_sends_again_does_not_fail_the_update_check(run, answer):
+    fake = FakeGorelo()
+    fake.fail("GET /v1/contacts/{contactId}", answer)  # the first read of a contact in this area is update_contact's own
+    report = await run(fake, areas=["contacts"])
+    found = results(report)["contacts"]
+    assert report.ok and found.status == "pass", found.detail
+    # the create, the update's read sent twice, its one write and the read back: five requests, two of them writes
+    assert found.requests == 5
+    ops = area_ops(fake, report)["contacts"]
+    assert ops == [
+        "POST /v1/contacts", "GET /v1/contacts/{contactId}", "GET /v1/contacts/{contactId}", "PATCH /v1/contacts/{contactId}",
+        "GET /v1/contacts/{contactId}",
+    ]
+    assert [r.method for r in fake.mock.requests].count("PATCH") == 1
+    assert any(
+        "update_contact without secondary_email went through (one write and 2 read request(s): the client sent a read again "
+        "after a retryable answer)" in note
+        for note in found.notes
+    )
+
+
+async def test_contacts_the_note_of_the_plain_update_still_says_the_read_and_the_write(run):
+    report = await run(FakeGorelo(), areas=["contacts"])
+    assert any(
+        note.startswith("update_contact without secondary_email went through (the read and the write); Gorelo keeps the secondary")
+        for note in results(report)["contacts"].notes
+    )
+
+
+async def test_contacts_an_update_that_let_two_writes_through_fails_the_area_naming_the_count(run):
+    # the client sends a PATCH again after a 429 (Gorelo did not process it), and the guard counts every request that is not a
+    # GET: the harness cannot tell that from a second write, and it stops rather than guess
+    fake = FakeGorelo()
+    fake.fail(
+        "PATCH /v1/contacts/{contactId}",
+        httpx.Response(429, headers={"Retry-After": "0"}, json={"error": "rate_limited", "retry_after": "0s"}),
+    )
+    report = await run(fake, areas=["contacts"])
+    found = results(report)["contacts"]
+    assert found.status == "FAIL"
+    assert found.detail == (
+        "update_contact without secondary_email let 2 write request(s) through to Gorelo, expected exactly one (3 request(s) in all)"
+    )
+
+
+async def test_contacts_an_update_that_sent_no_read_fails_the_area():
+    # the other half of the check: the update must have read the contact before its write. area_contacts only needs a create that
+    # answers and a tool call, so a stand-in for the matrix whose update sends one write and no read shows the failure.
+    guard, pacer = SimpleNamespace(writes_allowed=0), SimpleNamespace(requests=0)
+    created = {"Id": 1, "MobilePhone": write_matrix.CONTACT_PHONE, "MobilePhoneCountryCode": write_matrix.REGION}
+
+    class Stand:
+        def __init__(self):
+            self.guard, self.pacer, self.notes = guard, pacer, []
+            self.manifest = SimpleNamespace(run_id=RUN, label=lambda text: f"{RUN} {text}")
+
+        async def create(self, kind, label, details, tool, arguments):
+            return created
+
+        async def tool(self, name, **arguments):
+            pacer.requests += 1
+            guard.writes_allowed += 1
+            return {"Id": 1, "JobTitle": "x"}
+
+        def note(self, text):
+            self.notes.append(text)
+
+    with pytest.raises(write_matrix.CheckFailed) as failed:
+        await write_matrix.area_contacts(Stand())
+    assert str(failed.value) == (
+        "update_contact without secondary_email sent 1 request(s) and none of them was a read of the contact, expected its read "
+        "before the write"
+    )
+
+
+# --------------------------------------------------------------------------
+# the three local-refusal checks count writes and need at least one read (1.4.2): a read the client sends again is not a failure
+# --------------------------------------------------------------------------
+
+
+class Refused:
+    """Just enough of Matrix for refuse_move_without_location, refuse_unknown_field and refuse_dropping_the_attachment: a tool call
+    that sends `gets` GETs and `writes` writes (the counters the checks read), then fails like the tool refusing locally."""
+
+    def __init__(self, text, *, gets=1, writes=0):
+        self.guard, self.pacer, self.notes = SimpleNamespace(writes_allowed=0), SimpleNamespace(requests=0), []
+        self._text, self._gets, self._writes = text, gets, writes
+
+    async def tool(self, tool_name, /, **arguments):
+        self.pacer.requests += self._gets + self._writes
+        self.guard.writes_allowed += self._writes
+        raise write_matrix.ToolFailed(tool_name, self._text, sent=self._gets + self._writes > 0)
+
+    def note(self, text):
+        self.notes.append(text)
+
+
+CHECKS = [
+    pytest.param(
+        lambda m: write_matrix.refuse_move_without_location(m, "asset", "renamed"),
+        "location_id: required when client_id moves the asset",
+        "refused locally after its read of the asset, ",
+        id="move-without-location",
+    ),
+    pytest.param(
+        lambda m: write_matrix.refuse_dropping_the_attachment(m, "doc", "other.txt"),
+        "attachments: the current file would be removed",
+        "refused locally after its read of the document, ",
+        id="dropping-the-attachment",
+    ),
+]
+
+
+@pytest.mark.parametrize("check, text, said", CHECKS)
+@pytest.mark.parametrize("gets", [1, 2, 3])
+async def test_a_local_refusal_passes_after_one_read_or_after_a_read_the_client_sent_again(check, text, said, gets):
+    # a 429, a 502, 503 or 504 or a refused connection makes the client send the read once more; no write went out
+    matrix = Refused(text, gets=gets)
+    await check(matrix)
+    (note,) = matrix.notes
+    assert said in note
+    assert note.endswith("nothing was sent but that GET" if gets == 1 else f"nothing was sent but GETs ({gets} requests: the read and the client's own retries of it)")
+
+
+@pytest.mark.parametrize("check, text, said", CHECKS)
+@pytest.mark.parametrize("writes", [1, 2])
+async def test_a_local_refusal_that_let_a_write_through_fails_whatever_the_reads_were(check, text, said, writes):
+    with pytest.raises(write_matrix.CheckFailed, match=rf"let {writes} write request\(s\) through to Gorelo"):
+        await check(Refused(text, gets=1, writes=writes))
+
+
+@pytest.mark.parametrize("check, text, said", CHECKS)
+async def test_a_local_refusal_with_no_request_at_all_does_not_pass(check, text, said):
+    with pytest.raises(write_matrix.CheckFailed, match=r"\(0 request\(s\), no HTTP answer\)"):
+        await check(Refused(text, gets=0))
+
+
+async def test_the_unknown_custom_field_refusal_passes_after_one_read_or_a_read_sent_again():
+    unknown = f"custom_properties (item 1, id): {write_matrix.CUSTOM_PROPERTY_UNKNOWN_ID} is not a custom field of this client"
+    one = await write_matrix.refuse_unknown_field(Refused(unknown, gets=1), 9501, "text")
+    assert one == "the tool refused it itself after reading the client: its one request was that GET, no PATCH was sent"
+    again = await write_matrix.refuse_unknown_field(Refused(unknown, gets=2), 9501, "text")
+    assert again == (
+        "the tool refused it itself after reading the client: its 2 requests were that GET and the client's own retries of it, "
+        "no PATCH was sent"
+    )
+    with pytest.raises(write_matrix.CheckFailed, match=r"let 1 write request\(s\) through to Gorelo"):
+        await write_matrix.refuse_unknown_field(Refused(unknown, gets=1, writes=1), 9501, "text")
+    with pytest.raises(write_matrix.CheckFailed, match=r"\(0 request\(s\), no HTTP answer\)"):
+        await write_matrix.refuse_unknown_field(Refused(unknown, gets=0), 9501, "text")

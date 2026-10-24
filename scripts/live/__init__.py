@@ -1,6 +1,6 @@
 """Live test harness for the Gorelo MCP server (the test client and the second client only).
 
-Safety infrastructure, built first and reviewed before anything runs live:
+Safety infrastructure for the live runs:
 
     _env.py      the API key (read from the app .env at run time, never printed), live Settings, request pacer
     manifest.py  the run manifest: every record a run creates, written before and after the create call

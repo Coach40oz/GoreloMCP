@@ -256,7 +256,6 @@ def refusal_matrix(tmp_path, mode):
         ("no-read", f"{NOT_REFUSED} (0 request(s), no HTTP answer)"),
         ("other-text", f"{NOT_REFUSED} (1 request(s), no HTTP answer)"),
         ("http", f"{NOT_REFUSED} (1 request(s), HTTP 500)"),
-        ("two-requests", f"{NOT_REFUSED} (2 request(s), no HTTP answer)"),
         (
             "writes",
             f"update_document with a list that leaves the current file out let 1 write request(s) through to Gorelo; look at document "
@@ -274,6 +273,18 @@ async def test_the_attachment_check_fails_with_its_exact_text_unless_the_list_is
     with pytest.raises(write_matrix.CheckFailed) as failed:
         await write_matrix.refuse_dropping_the_attachment(matrix, DOCUMENT, OTHER_FILE)
     assert str(failed.value) == said
+
+
+async def test_a_refusal_after_a_read_that_the_client_sent_again_passes_the_attachment_check(tmp_path):
+    # the client sends the read once more after a 429, a 502, 503 or 504 or a refused connection: two GETs and no write
+    matrix = refusal_matrix(tmp_path, "two-requests")
+    await write_matrix.refuse_dropping_the_attachment(matrix, DOCUMENT, OTHER_FILE)
+    assert matrix.pacer.requests == 2 and matrix.guard.writes_allowed == 0
+    assert any(
+        "refused locally after its read of the document, nothing was sent but GETs (2 requests: the read and the client's own "
+        "retries of it)" in note
+        for note in matrix.notes
+    )
 
 
 async def test_a_refusal_after_one_get_passes_the_attachment_check_and_sends_nothing_but_that_get(tmp_path):

@@ -454,7 +454,6 @@ NOT_REFUSED = (
         ("no-read", f"{NOT_REFUSED} (0 request(s), no HTTP answer): location_id: required when client_id moves the asset"),
         ("other-text", f"{NOT_REFUSED} (1 request(s), no HTTP answer): name: not blank"),
         ("http", f"{NOT_REFUSED} (1 request(s), HTTP 500): Gorelo failed update_custom_asset (HTTP 500, code 1)"),
-        ("two-requests", f"{NOT_REFUSED} (2 request(s), no HTTP answer): location_id: required when client_id moves the asset"),
         (
             "accepts",
             "update_custom_asset with another client_id and no location_id was ACCEPTED (a PATCH reached Gorelo): the asset may "
@@ -467,6 +466,19 @@ async def test_a_move_without_a_location_that_the_tool_does_not_refuse_locally_a
     with pytest.raises(write_matrix.CheckFailed) as failed:
         await write_matrix.area_custom_assets(matrix)
     assert str(failed.value) == said
+
+
+async def test_a_refusal_after_a_read_that_the_client_sent_again_is_still_the_local_refusal(tmp_path):
+    # the client sends the read once more after a 429, a 502, 503 or 504 or a refused connection: two GETs and no write are the
+    # same local refusal, and the note says how many requests there were
+    matrix, session = refusal_matrix(tmp_path, "two-requests")
+    await write_matrix.area_custom_assets(matrix)
+    assert matrix.guard.writes_allowed == 3  # the same three writes as without the retry; the refused move wrote nothing
+    assert any(
+        "refused locally after its read of the asset, nothing was sent but GETs (2 requests: the read and the client's own retries "
+        "of it)" in note
+        for note in matrix.notes
+    )
 
 
 # the opt-in move to the second client and back (--with-asset-move)

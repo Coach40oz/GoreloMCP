@@ -676,14 +676,28 @@ def require_confirm(confirm: bool, *, action: str, effect: str | None = None) ->
     )
 
 
-def csv_ids(param: str, values: Any) -> str | None:
-    """A list of ids (ints or strings) as one comma separated string. None stays None; [] is an error."""
+# Gorelo refuses an id filter of more than 100 ids with HTTP 400 "A filter accepts at most 100 ids." Measured live on
+# 2026-10-24 on tickets ClientIds, agents ClientIds, time entries UserIds and documents ClientIds, also where the spec
+# text for the filter names no limit, so csv_ids applies it to every ID list it joins. A list of TEXT values (the skus,
+# vendors and part numbers of list_items) was not measured: its caller passes limit=None, so nothing is refused that
+# Gorelo might accept.
+FILTER_IDS_MAX = 100
+
+
+def csv_ids(param: str, values: Any, *, limit: int | None = FILTER_IDS_MAX) -> str | None:
+    """A list of ids (ints or strings) as one comma separated string. None stays None; [] is an error.
+
+    More than `limit` (FILTER_IDS_MAX, Gorelo's measured limit for an id filter) are refused here, before any HTTP call,
+    because Gorelo refuses them too. `limit=None` sets no cap: for a list of text values whose limit is not measured.
+    """
     if values is None:
         return None
     if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)):
         raise ValueError(f"{param}: expected a list of ids such as [1, 2, 3], got {type(values).__name__}")
     if not values:
         raise ValueError(f"{param}: the list must contain at least one id (omit {param} to apply no filter)")
+    if limit is not None and len(values) > limit:
+        raise ValueError(f"{param}: Gorelo accepts at most {limit} ids in one filter, got {len(values)}")
     parts: list[str] = []
     for item in values:
         if isinstance(item, bool) or not isinstance(item, (int, str)):

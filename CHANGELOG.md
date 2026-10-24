@@ -2,6 +2,59 @@
 
 All notable changes to this project are listed here, newest first, in the plain style of Keep a Changelog.
 
+## 1.4.2 (2026-10-24)
+
+Follows Gorelo's limits as measured on 2026-10-24 (the published description is unchanged: contract 05200951c89e, no operation
+added or removed). No tool was added or removed.
+
+### Changed
+
+- The client keeps to Gorelo's real rate limit. Gorelo limits the whole API key, not each endpoint: a burst of about 6 requests,
+  then about 1 per second, shared by everything that uses the key (`docs/API-OBSERVED-BEHAVIOR.md`, entry 29). The server now has
+  one token bucket for all its requests (a burst of 5, then 1 per second, first come first served), and every attempt takes a
+  token before it is sent. A 429 (Gorelo did not process the request) empties the bucket, so every queued request waits
+  together, also one that already has its token and waits for one of the 4 in-flight slots. It is retried for every method up to
+  5 times, with at most 30 seconds of `Retry-After` waits in all (time queued behind other requests is not counted); it was 3
+  times within about 20 seconds. A read that changes nothing is also tried once more, after 2 seconds, when Gorelo answers 502,
+  503 or 504 or the connection is refused. A write, a multipart upload and the invoice PDF export are never sent again after
+  anything but a 429, and a timeout or any other server error is never retried.
+- `update_contact` keeps a contact's secondary emails when you do not give `secondary_email`, because Gorelo keeps them (give the
+  whole list to replace them, an empty list to clear them). It no longer refuses an update until the user has decided about
+  them, and its `clear_secondary_email_ok` parameter is removed: a call that still names it is refused before any request.
+- `update_contact` cannot clear a contact's location, because Gorelo keeps the location when it is left out or sent as null:
+  `clear_fields` no longer accepts `location_id` (it is refused).
+- A region code needs its phone. `create_contact` refuses a region code given without its phone before any request, as Gorelo
+  would; `update_contact` does the same after its read and before any write, when the contact has no such phone. When the stored
+  contact has a region code with no phone, `update_contact` leaves that code out of the update and names it in the `note` of its
+  result; the note says the code was cleared only when Gorelo's answer shows it gone, and otherwise says the answer still shows it.
+- The `secondary_email` text of `update_contact` says that the user can see the secondary emails in the Gorelo app (a contact
+  record never shows them), so the model asks the user for the complete list before changing them.
+- `get_agent` says that Gorelo has no agent with the id it was given. For an unknown agent id Gorelo answers success with no
+  record, unlike every other record, which answers 404; the error used to read "Gorelo reported success but Data is null".
+- `create_time_entry` says that Gorelo refuses time on a closed ticket (409), so log time before closing, or ask the user before
+  reopening it.
+- Id filters are checked for Gorelo's limit of 100 ids before any request, and the error names the filter. The check is for id
+  filters only: the catalog's text filters (skus, vendors, part numbers) are not capped, because their limit is not measured.
+
+### Documentation
+
+- `docs/API-OBSERVED-BEHAVIOR.md` has five new entries (29 to 33): the rate limit of the whole key, the unknown agent id, limits of
+  the lists that the description does not state (ids, `Query`, `PageSize`, URL length, dates, cursors, sort fields, unknown query
+  names), what a contact update keeps and clears, and the size limits of a document title and body.
+- `docs/TROUBLESHOOTING.md` and `docs/OVERVIEW.md` describe the rate limit and the contact update as they are now. The wording of
+  several notes was made exact: which sign-in lines carry the visitor's address, the list of gated tools in `docs/INSTALL.md`
+  step 8.2 and `SECURITY.md` (`remove_document_related_item` is a gated tool), what `scripts/oauth_state.py` prints on an
+  error, and the 401 advice (usage advice only).
+
+### Notes
+
+- Against a test client on 2026-10-24: the documents writes (create, edit, attach a file, move, duplicate, restore a version,
+  archive, restore, PDF export), the projects writes and the move of a custom asset to another client and back all worked as
+  published. Still not tested live: sharing a document, hidden custom fields and the sign-in of ChatGPT and Copilot Studio.
+- Gorelo's `PATCH /v1/contacts/{contactId}` cleared the job title and the mobile phone that a request left out (the published
+  text says the other such fields, region codes, department, time zone and description, are cleared too), and kept the location
+  and the secondary emails (entry 32 of `docs/API-OBSERVED-BEHAVIOR.md`).
+
 ## 1.4.1 (2026-10-23)
 
 Follows the changed text of the Gorelo Public API description (contract 05200951c89e, no operation added or removed).
@@ -146,8 +199,9 @@ reported: the region of the Gorelo account, and Microsoft Copilot Studio.
 
 ### Fixed
 
-- The server could only call the US host. Reported by a user of the public repository. Set `GORELO_BASE_URL` (see Added).
-  The start line `gorelo-mcp settings: api_host=<host>` in the journal names the host the server calls: it must be the host of your region.
+- The server could only call the US host. Reported by a user of the public repository. `GORELO_BASE_URL` now sets the host (see
+  Added): set it to the host of your region, and read the start line `gorelo-mcp settings: api_host=<host>` in the journal to
+  see the host the server calls.
 - Microsoft Copilot Studio could not finish its sign-in, because the server accepted a redirect only to `claude.ai`,
   `claude.com` and `localhost`. Reported by a user of the public repository. Add the host that the journal names after
   `register outcome=refused reason=redirect_not_allowed redirect=` to `MCP_EXTRA_REDIRECT_DOMAINS`.
@@ -164,7 +218,7 @@ reported: the region of the Gorelo account, and Microsoft Copilot Studio.
 
 ### Notes
 
-- Checked with read-only calls on 2026-10-17: an id outside the scale is a 400 for every scale that was tried (items and
+- Checked for this release with read-only calls: an id outside the scale is a 400 for every scale that was tried (items and
   tasks rest on the spec text); the document reads and the deletions feed answered with the published shapes. The list
   defaults follow the published text. Not tested live: every write of the documents toolset (including attachments, moves,
   archive and restore, versions and sharing), the move of a custom asset, hidden custom fields and the sign-in of ChatGPT

@@ -25,6 +25,7 @@ from conftest import (
     error_envelope,
     list_tools,
     make_ctx,
+    paged_envelope,
     quiet_loggers,
     uid,
 )
@@ -47,6 +48,7 @@ from gorelo_client import (
 from settings import TOOLSETS
 from spec import SpecViolation
 from tools._common import (
+    FILTER_IDS_MAX,
     GUID_EXAMPLE,
     MAX_ID,
     REGISTRY,
@@ -1450,19 +1452,20 @@ def _assert_the_warning_describes_the_read(warning, write_tool="create_it"):
 
 
 @pytest.mark.parametrize(
-    "response, reason",
+    "response, reason, reads",
     [
-        pytest.param(httpx.ReadTimeout("slow"), f"{REREAD} timed out", id="timeout"),
+        pytest.param(httpx.ReadTimeout("slow"), f"{REREAD} timed out", 1, id="timeout"),
         pytest.param(error_envelope(404, [("070401", "Client not found")], trace_id="00-t-1"),
-                     f"{REREAD} answered HTTP 404 (code 070401): Client not found [trace 00-t-1]", id="404"),
-        pytest.param(httpx.Response(502, text="<html>Bad Gateway</html>"), f"{REREAD}: unexpected response shape; refusing to guess (HTTP 502", id="gateway-page"),
-        pytest.param(envelope(None), f"{REREAD}: Gorelo reported success but Data is null; refusing to guess", id="data-null"),
-        pytest.param(envelope([{"Id": 7}]), f"{REREAD} returned a list instead of the record", id="data-is-a-list"),
-        pytest.param(envelope(True), f"{REREAD} returned a boolean instead of the record", id="data-is-a-boolean"),
+                     f"{REREAD} answered HTTP 404 (code 070401): Client not found [trace 00-t-1]", 1, id="404"),
+        # a read that gets a 502/503/504 or no connection is sent once more (1.4.2), so the gateway page is read twice
+        pytest.param(httpx.Response(502, text="<html>Bad Gateway</html>"), f"{REREAD}: unexpected response shape; refusing to guess (HTTP 502", 2, id="gateway-page"),
+        pytest.param(envelope(None), f"{REREAD}: Gorelo reported success but Data is null; refusing to guess", 1, id="data-null"),
+        pytest.param(envelope([{"Id": 7}]), f"{REREAD} returned a list instead of the record", 1, id="data-is-a-list"),
+        pytest.param(envelope(True), f"{REREAD} returned a boolean instead of the record", 1, id="data-is-a-boolean"),
     ],
 )
 async def test_a_failed_reread_after_a_successful_write_returns_the_warning_and_never_repeats_the_write(
-    server_factory, mock_gorelo, response, reason
+    server_factory, mock_gorelo, response, reason, reads
 ):
     mock_gorelo.on("POST", "/v1/clients", envelope({"Id": 7}))
     mock_gorelo.on("GET", "/v1/clients/7", response)
@@ -1474,29 +1477,30 @@ async def test_a_failed_reread_after_a_successful_write_returns_the_warning_and_
     assert warning.endswith(". Do not repeat the write; read it again later.") and ".." not in warning
     _assert_the_warning_describes_the_read(warning)
     assert len(mock_gorelo.calls("POST")) == 1  # the write happened exactly once
-    assert len(mock_gorelo.calls("GET")) == 1  # and the read was not retried either
+    assert len(mock_gorelo.calls("GET")) == reads  # the read is retried once only after a 502/503/504 or a refused connection
 
 
 @pytest.mark.parametrize(
-    "response, reason",
+    "response, reason, reads",
     [
-        pytest.param(httpx.ReadTimeout("slow"), f"{REREAD} timed out", id="timeout"),
-        pytest.param(httpx.ConnectError("refused"), f"the connection to Gorelo failed during {REREAD}", id="connection-failed"),
+        pytest.param(httpx.ReadTimeout("slow"), f"{REREAD} timed out", 1, id="timeout"),
+        # a read that gets a 502/503/504 or no connection is sent once more (1.4.2) and the second answer is the warning
+        pytest.param(httpx.ConnectError("refused"), f"the connection to Gorelo failed during {REREAD}", 2, id="connection-failed"),
         pytest.param(error_envelope(404, [("070401", "Client not found")], trace_id="00-t-1"),
-                     f"{REREAD} answered HTTP 404 (code 070401): Client not found [trace 00-t-1]", id="404"),
+                     f"{REREAD} answered HTTP 404 (code 070401): Client not found [trace 00-t-1]", 1, id="404"),
         pytest.param(error_envelope(500, [("070001", "Internal error")], trace_id="00-t-2"),
-                     f"{REREAD} answered HTTP 500 (code 070001): Internal error [trace 00-t-2]", id="500"),
+                     f"{REREAD} answered HTTP 500 (code 070001): Internal error [trace 00-t-2]", 1, id="500"),
         pytest.param(error_envelope(503, [("070001", "Busy"), ("070002", "Try later", "Client")], trace_id="00-t-3"),
-                     f"{REREAD} answered HTTP 503 (code 070001/070002): Busy; Client: Try later [trace 00-t-3]", id="503-two-notifications"),
-        pytest.param(error_envelope(500, [], trace_id=None), f"{REREAD} answered HTTP 500: no details returned", id="500-no-details"),
+                     f"{REREAD} answered HTTP 503 (code 070001/070002): Busy; Client: Try later [trace 00-t-3]", 2, id="503-two-notifications"),
+        pytest.param(error_envelope(500, [], trace_id=None), f"{REREAD} answered HTTP 500: no details returned", 1, id="500-no-details"),
         pytest.param(error_envelope(403, [("080203", "API key does not have 'Project' scope")], trace_id="00-t-4"),
-                     f"{REREAD} answered HTTP 403 (code 080203): API key does not have 'Project' scope [trace 00-t-4]", id="403-scope"),
+                     f"{REREAD} answered HTTP 403 (code 080203): API key does not have 'Project' scope [trace 00-t-4]", 1, id="403-scope"),
         pytest.param(httpx.Response(429, headers={"Retry-After": "100000"}, json={"error": "slow"}),
-                     f"{REREAD} was rate limited by Gorelo (HTTP 429)", id="429"),
+                     f"{REREAD} was rate limited by Gorelo (HTTP 429)", 1, id="429"),
     ],
 )
 async def test_the_warning_of_a_failed_reread_describes_the_read_never_the_write_tool(
-    server_factory, mock_gorelo, response, reason
+    server_factory, mock_gorelo, response, reason, reads
 ):
     # for a timeout, a 404 and a 5xx (and the other ways a read fails) the warning is the exact text
     # below. It never says "Gorelo rejected create_it", never says retrying is safe, never names the tool.
@@ -1509,7 +1513,7 @@ async def test_the_warning_of_a_failed_reread_describes_the_read_never_the_write
         "warning": f"the write succeeded; re-reading it failed: {reason}. Do not repeat the write; read it again later.",
     }
     _assert_the_warning_describes_the_read(result["warning"])
-    assert len(mock_gorelo.calls("POST")) == 1 and len(mock_gorelo.calls("GET")) == 1
+    assert len(mock_gorelo.calls("POST")) == 1 and len(mock_gorelo.calls("GET")) == reads
 
 
 class _FailingReader:
@@ -1660,6 +1664,71 @@ def test_csv_ids_errors_name_the_param(value, fragment):
     with pytest.raises(ValueError) as info:
         csv_ids("status_ids", value)
     assert str(info.value).startswith("status_ids:") and fragment in str(info.value)
+
+
+def test_csv_ids_accepts_exactly_the_most_ids_gorelo_takes_in_one_filter():
+    # Measured live on 2026-10-24: HTTP 400 "A filter accepts at most 100 ids." for 101 ids.
+    assert FILTER_IDS_MAX == 100
+    assert csv_ids("client_ids", list(range(1, 101))) == ",".join(str(n) for n in range(1, 101))
+    assert csv_ids("client_ids", tuple(range(1, 101))) == ",".join(str(n) for n in range(1, 101))
+    assert csv_ids("device_ids", [uid(n) for n in range(100)]).count(",") == 99
+
+
+@pytest.mark.parametrize("count", [101, 150, 1000])
+def test_csv_ids_refuses_more_than_the_most_and_names_the_param_and_the_count(count):
+    with pytest.raises(ValueError) as info:
+        csv_ids("client_ids", list(range(1, count + 1)))
+    assert str(info.value) == f"client_ids: Gorelo accepts at most 100 ids in one filter, got {count}"
+
+
+def test_csv_ids_limit_none_sets_no_cap_and_a_number_sets_that_cap():
+    # a list of text values (skus, vendors, part numbers) was not measured: its caller passes limit=None
+    many = [f"SKU-{n}" for n in range(1, 251)]
+    assert csv_ids("skus", many, limit=None) == ",".join(many)
+    assert csv_ids("skus", many[:3], limit=3) == "SKU-1,SKU-2,SKU-3"
+    with pytest.raises(ValueError, match=r"^skus: Gorelo accepts at most 3 ids in one filter, got 4$"):
+        csv_ids("skus", many[:4], limit=3)
+    with pytest.raises(ValueError, match="at most 100 ids"):  # the default is still the measured cap
+        csv_ids("client_ids", list(range(1, 102)))
+
+
+def test_csv_ids_limit_is_keyword_only_and_the_other_checks_stay_when_there_is_no_cap():
+    with pytest.raises(TypeError):
+        csv_ids("skus", ["a"], None)  # type: ignore[misc]
+    for value, fragment in (([], "at least one id"), ([""], "must not be blank"), (["a,b"], "comma"), ([True], "integers")):
+        with pytest.raises(ValueError, match=fragment):
+            csv_ids("skus", value, limit=None)
+
+
+def test_csv_ids_counts_before_it_looks_at_the_items():
+    # The count is the first thing wrong with 101 ids, whatever the items are.
+    with pytest.raises(ValueError, match=r"^user_ids: Gorelo accepts at most 100 ids in one filter, got 101$"):
+        csv_ids("user_ids", [True] * 101)
+    with pytest.raises(ValueError, match="at most 100 ids"):
+        csv_ids("user_ids", ["a,b"] * 101)
+
+
+async def test_list_tickets_sends_100_client_ids_and_refuses_101_before_any_http_call(server_factory, mock_gorelo):
+    mock_gorelo.on("GET", "/v1/tickets", paged_envelope([]))
+    server = server_factory()
+    hundred = list(range(9001, 9101))
+    await call_tool(server, "list_tickets", {"client_ids": hundred})
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+    assert mock_gorelo.last.query["ClientIds"] == ",".join(str(n) for n in hundred)
+    mock_gorelo.reset()
+    mock_gorelo.on("GET", "/v1/tickets", paged_envelope([]))
+    error = await call_tool_error(server, "list_tickets", {"client_ids": list(range(9001, 9102))})
+    assert "client_ids: Gorelo accepts at most 100 ids in one filter, got 101" in error
+    assert mock_gorelo.requests == []  # refused locally: nothing was sent
+
+
+async def test_a_modules_own_count_message_still_comes_first(server_factory, mock_gorelo):
+    # list_clients checks status_ids with its own message before csv_ids runs; the shared check is only the backstop.
+    server = server_factory()
+    error = await call_tool_error(server, "list_clients", {"status_ids": [1] * 101})
+    assert "status_ids: at most 100 values, got 101" in error
+    assert "Gorelo accepts at most" not in error
+    assert mock_gorelo.requests == []
 
 
 @pytest.mark.parametrize(

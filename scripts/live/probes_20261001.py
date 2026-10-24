@@ -10,7 +10,7 @@ of users, groups, statuses and types it read, and Gorelo's messages. It also pri
 sources and priorities, the fields Gorelo answered for the test records it wrote, and the status codes, flags and counts
 of each call. Before the first write it reads the test client and the second client and
 stops with exit 2 unless each is named exactly as the site config says. A missing or incomplete site config also
-exits 2, with the reason on stderr. Usage as run on 2026-10-01 (it no longer runs):
+exits 2, with the reason on stderr. Usage it had (it no longer runs):
 
     UV_PYTHON=/usr/bin/python3.13 /root/.local/bin/uv run --frozen -q python scripts/live/probes_20261001.py
 """

@@ -5,7 +5,10 @@ Test modules import the helpers directly (pytest puts tests/ on sys.path):
     from conftest import MockGorelo, call_tool, call_tool_error, envelope, error_envelope, paged_envelope
 
 Fixtures
-    (autouse)        _block_network: no socket can connect. _quiet_fastmcp_logs: the "fastmcp" and "mcp" loggers
+    (autouse)        _block_network: no socket can connect. _gorelo_client_never_waits: GoreloClient's default
+                     sleep returns at once (a test that needs real timing passes sleep and clock itself; the real
+                     default is kept in the module constant ORIGINAL_CLIENT_SLEEP).
+                     _quiet_fastmcp_logs: the "fastmcp" and "mcp" loggers
                      are raised to CRITICAL for the duration of each test and restored afterwards, because FastMCP
                      renders a Rich traceback for every ToolError (40 to 115 ms per error-path test). A test that
                      asserts on those loggers lowers the level itself inside the test (the fixture still restores
@@ -50,6 +53,7 @@ to share a single lifespan across several calls).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import socket
@@ -71,6 +75,12 @@ from server import build_server
 from settings import TOOLSETS, Settings
 from spec import SpecIndex, load_spec_index
 from tools._common import Registry
+
+# The default `sleep` of GoreloClient as the code defines it, read at import, before the autouse fixture below replaces it.
+# Production pacing (the token bucket, the 429 back-off) waits through this default, because server.build_server builds its
+# client with the defaults; tests/test_client_rate_limit.py pins that it is asyncio.sleep, so a change of the default
+# cannot hide behind the fixture.
+ORIGINAL_CLIENT_SLEEP = GoreloClient.__init__.__kwdefaults__["sleep"]
 
 TEST_API_KEY = "test-api-key-not-real"
 TEST_TRACE_ID = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
@@ -99,6 +109,23 @@ def _block_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket.socket, "connect_ex", refuse)
     monkeypatch.setattr(socket, "getaddrinfo", refuse)
     monkeypatch.setattr(socket, "create_connection", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _gorelo_client_never_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GoreloClient's DEFAULT sleep returns at once for every test.
+
+    Since 1.4.2 the client takes a token before every attempt (burst 5, then 1 per second) and waits out a 429 and the
+    pause before the one retry of a read, all through its `sleep`. `build_server()` builds the client with the defaults,
+    so without this the many-request tests would really wait. A test that needs real timing passes `sleep` and `clock`
+    itself (tests/test_client_rate_limit.py does); only the default of the constructor is replaced here. The default
+    the code really has is kept in ORIGINAL_CLIENT_SLEEP, and a test pins it.
+    """
+
+    async def _instant_sleep(delay: float) -> None:
+        await asyncio.sleep(0)
+
+    monkeypatch.setitem(GoreloClient.__init__.__kwdefaults__, "sleep", _instant_sleep)
 
 
 # The logger trees FastMCP and the MCP SDK log through. FastMCP's handler renders a Rich traceback for

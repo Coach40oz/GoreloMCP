@@ -326,6 +326,8 @@ async def test_default_tools_list_stays_within_budget(server_factory):
     assert size < TOOLS_LIST_BUDGET_BYTES, size
 
 
+# For 1.4.2 the default tools/list measured 104_764 bytes (the budget below is unchanged): the update_contact texts about the
+# secondary emails and the region code note grew by 64 bytes.
 # For 1.4.0 the default tools/list measured 104_409 bytes: the eight new core tools (6_301 bytes) and the new 1.4.0 parameters of
 # list_clients, update_client, list_alerts, post_alert, list_tickets and the custom asset tools. The budget is that plus about 1 percent,
 # rounded up to the next 100.

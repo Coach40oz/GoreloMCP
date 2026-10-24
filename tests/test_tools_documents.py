@@ -422,12 +422,19 @@ async def test_get_document_refuses_an_answer_that_is_not_a_document(server, moc
     assert text.startswith("Gorelo returned an unexpected response for get_document")
 
 
-@pytest.mark.parametrize("failure", [httpx.ReadTimeout("slow"), httpx.ConnectError("refused")])
-async def test_a_read_that_times_out_says_retrying_is_safe(server, mock_gorelo, failure):
+# A refused connection is a read's one retry (1.4.2), so it is asked twice; a timeout is never retried.
+READ_FAILURES = [
+    pytest.param(httpx.ReadTimeout("slow"), 1, id="timeout"),
+    pytest.param(httpx.ConnectError("refused"), 2, id="connection"),
+]
+
+
+@pytest.mark.parametrize("failure, reads", READ_FAILURES)
+async def test_a_read_that_times_out_says_retrying_is_safe(server, mock_gorelo, failure, reads):
     mock_gorelo.on("GET", DOC_PATH, failure)
     text = await call_tool_error(server, "get_document", {"document_id": DOC})
     assert text.startswith("Gorelo did not answer get_document") and "This was a read, so retrying is safe." in text
-    assert len(mock_gorelo.requests) == 1
+    assert len(mock_gorelo.requests) == reads
 
 
 # --------------------------------------------------------------------------
@@ -516,12 +523,13 @@ async def test_a_pdf_error_names_document_id(server, mock_gorelo):
     assert text == f"Gorelo rejected export_document_pdf (HTTP 404, code 070401): document_id: Document not found. [trace {TEST_TRACE_ID}]"
 
 
-@pytest.mark.parametrize("failure", [httpx.ReadTimeout("slow"), httpx.ConnectError("refused")])
-async def test_a_pdf_timeout_is_a_read_so_retrying_is_safe(server, mock_gorelo, failure):
+@pytest.mark.parametrize("failure, reads", READ_FAILURES)
+async def test_a_pdf_timeout_is_a_read_so_retrying_is_safe(server, mock_gorelo, failure, reads):
+    # the document PDF is a plain read (no export event), so a refused connection is asked once more like any read
     mock_gorelo.on("GET", PDF_PATH, failure)
     text = await call_tool_error(server, "export_document_pdf", {"document_id": DOC})
     assert text.startswith("Gorelo did not answer export_document_pdf") and "This was a read, so retrying is safe." in text
-    assert "export event" not in text and len(mock_gorelo.requests) == 1
+    assert "export event" not in text and len(mock_gorelo.requests) == reads
 
 
 def test_pdf_names_helper_keeps_a_safe_stem():
@@ -2012,16 +2020,17 @@ async def test_a_timeout_restoring_is_not_retried_and_the_version_list_is_not_re
 
 
 @pytest.mark.parametrize(
-    "failure, why",
+    "failure, why, reads",
     [
-        pytest.param(httpx.ReadTimeout("slow"), "the read timed out", id="timeout"),
-        pytest.param(httpx.ConnectError("refused"), "the connection failed", id="connection"),
-        pytest.param(error_envelope(500, [("070500", "Boom")]), "HTTP 500", id="http-500"),
-        pytest.param(envelope({"VersionId": OLD_VERSION}), "its answer could not be used (HTTP 200)", id="unusable-200"),
-        pytest.param(error_envelope(200, [("070500", "Boom")]), "Gorelo reported a failure (HTTP 200)", id="failure-in-200"),
+        pytest.param(httpx.ReadTimeout("slow"), "the read timed out", 1, id="timeout"),
+        # the version list is a read: a refused connection is asked once more (1.4.2), the POST is still sent once
+        pytest.param(httpx.ConnectError("refused"), "the connection failed", 2, id="connection"),
+        pytest.param(error_envelope(500, [("070500", "Boom")]), "HTTP 500", 1, id="http-500"),
+        pytest.param(envelope({"VersionId": OLD_VERSION}), "its answer could not be used (HTTP 200)", 1, id="unusable-200"),
+        pytest.param(error_envelope(200, [("070500", "Boom")]), "Gorelo reported a failure (HTTP 200)", 1, id="failure-in-200"),
     ],
 )
-async def test_a_version_list_that_fails_after_the_restore_is_reported_as_an_error_not_a_success(server, mock_gorelo, failure, why):
+async def test_a_version_list_that_fails_after_the_restore_is_reported_as_an_error_not_a_success(server, mock_gorelo, failure, why, reads):
     mock_gorelo.on("POST", RESTORE_PATH, envelope(detail()))
     mock_gorelo.on("GET", VERSIONS_PATH, failure)
     text = await call_tool_error(server, "restore_document_version", {"document_id": DOC, "version_id": OLD_VERSION})
@@ -2032,7 +2041,7 @@ async def test_a_version_list_that_fails_after_the_restore_is_reported_as_an_err
         "before repeating it (list_document_versions; repeating the restore is safe, restoring the current version changes nothing)"
     )
     assert "This was a read" not in text and "Gorelo rejected restore_document_version" not in text
-    assert [r.method for r in mock_gorelo.requests] == ["POST", "GET"]
+    assert [r.method for r in mock_gorelo.requests] == ["POST"] + ["GET"] * reads
 
 
 async def test_a_failed_confirmation_read_raises_a_write_unconfirmed_error_chained_to_the_read_error(client_factory, mock_gorelo):

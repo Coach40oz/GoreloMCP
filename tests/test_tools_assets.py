@@ -1,5 +1,6 @@
 """tools/assets.py: list_agents, get_agent, list_custom_assets (read only), and the custom asset hardware types, create and update."""
 
+import inspect
 import json
 import re
 from pathlib import Path
@@ -577,9 +578,102 @@ async def test_get_agent_maps_a_gorelo_error_about_the_id_to_agent_id(server, mo
     assert text == trace("Gorelo rejected get_agent (HTTP 400, code 070101): agent_id: The id is not valid.")
 
 
-async def test_get_agent_refuses_a_success_without_data(server, mock_gorelo):
-    mock_gorelo.on("GET", f"/v1/assets/agents/{uid(7)}", envelope(None))
-    assert "Data is null" in await call_tool_error(server, "get_agent", {"agent_id": uid(7)})
+# What the model reads when Gorelo answers success with no record for an agent id (the text is pinned word for word).
+NO_AGENT = (
+    "agent_id: Gorelo has no agent with this id (unknown or deleted). For an unknown agent id Gorelo answers success with no "
+    "record, unlike other records, which answer 404. Find agents with list_agents; read a custom asset with get_custom_asset."
+)
+# Measured live on 2026-10-24: an agent id Gorelo does not know answers HTTP 200, IsSuccess true and Data null (the first body).
+# The second body has no Data key at all: get_one never told the two apart (the shape error it raised cannot say which one
+# Gorelo wrote), so get_agent does not either, and both are the unknown agent.
+NO_RECORD_BODIES = [
+    pytest.param(envelope(None), id="data-null"),
+    pytest.param({"StatusCode": 200, "IsSuccess": True, "Notifications": []}, id="data-missing"),
+]
+
+
+@pytest.mark.parametrize("body", NO_RECORD_BODIES)
+async def test_get_agent_says_gorelo_has_no_such_agent_when_it_answers_success_with_no_record(server, mock_gorelo, body):
+    mock_gorelo.on("GET", f"/v1/assets/agents/{uid(9)}", body)
+    text = await call_tool_error(server, "get_agent", {"agent_id": uid(9)})
+    assert text == NO_AGENT == assets_module.NO_AGENT_TEXT
+    # it names the parameter, says what the answer means and sends the model on: list_agents for agents, get_custom_asset for custom assets
+    assert text.startswith("agent_id: Gorelo has no agent with this id (unknown or deleted)")
+    assert "Gorelo answers success with no record, unlike other records" in text
+    assert "Find agents with list_agents" in text and "read a custom asset with get_custom_asset" in text
+    # a plain refusal of a read: not the shape error it used to be, and no word about a write that may have been applied
+    for old in ("unexpected response", "refusing to guess", "Data is null", "verify", "may or may not", "Gorelo returned", "Gorelo rejected"):
+        assert old not in text, old
+    assert [(r.method, r.path, r.query, r.content) for r in mock_gorelo.requests] == [("GET", f"/v1/assets/agents/{uid(9)}", {}, b"")]
+
+
+def test_the_no_agent_text_names_only_tools_and_parameters_that_exist():
+    tools_by_name = {s.name: s for s in REGISTRY.specs}
+    names = set(re.findall(r"\b[a-z]+(?:_[a-z]+)+\b", NO_AGENT))
+    assert names == {"agent_id", "list_agents", "get_custom_asset"}
+    assert "agent_id" in inspect.signature(tools_by_name["get_agent"].fn).parameters  # the parameter the text names
+    assert names - {"agent_id"} <= set(tools_by_name) and tools_by_name["get_custom_asset"].kind == "read"
+    assert chr(0x2014) not in NO_AGENT and chr(0x2013) not in NO_AGENT
+
+
+async def test_get_agent_still_returns_a_record_next_to_an_unknown_id(server, mock_gorelo):
+    record = agent_record(7, CustomProperties=CUSTOM_PROPERTIES)
+    mock_gorelo.on("GET", f"/v1/assets/agents/{uid(7)}", envelope(record))
+    mock_gorelo.on("GET", f"/v1/assets/agents/{uid(9)}", envelope(None))
+    assert await call_tool(server, "get_agent", {"agent_id": uid(7)}) == record
+    assert await call_tool_error(server, "get_agent", {"agent_id": uid(9)}) == NO_AGENT
+    assert await call_tool(server, "get_agent", {"agent_id": uid(7)}) == record
+    assert [r.path for r in mock_gorelo.requests] == [f"/v1/assets/agents/{uid(n)}" for n in (7, 9, 7)]
+
+
+async def test_get_agent_maps_gorelos_404_for_an_unknown_id_as_before(server, mock_gorelo):
+    # every other single-record GET, and the agent sub-resources (apps, hardware, tags), answer this (measured live on 2026-10-24)
+    mock_gorelo.on("GET", f"/v1/assets/agents/{uid(9)}", error_envelope(404, [("070202", "The requested resource was not found.")]))
+    text = await call_tool_error(server, "get_agent", {"agent_id": uid(9)})
+    assert text == trace("Gorelo rejected get_agent (HTTP 404, code 070202): The requested resource was not found.")
+    assert text != NO_AGENT and len(mock_gorelo.requests) == 1
+
+
+async def test_get_agent_does_not_mistake_a_failure_envelope_for_an_unknown_agent(server, mock_gorelo):
+    # a failure envelope has Data null too: only a SUCCESS with no record is the unknown agent
+    mock_gorelo.on("GET", f"/v1/assets/agents/{uid(9)}", error_envelope(200, [("070500", "Something broke.")]))
+    text = await call_tool_error(server, "get_agent", {"agent_id": uid(9)})
+    assert text == trace("Gorelo rejected get_agent (HTTP 200, code 070500): Something broke.")
+    assert len(mock_gorelo.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "response, expected",
+    [
+        pytest.param(
+            error_envelope(500, [("070500", "Boom.")]),
+            trace("Gorelo rejected get_agent (HTTP 500, code 070500): Boom."),
+            id="http-500",
+        ),
+        pytest.param(
+            error_envelope(403, [("080203", "API key does not have 'Assets' scope")]),
+            trace("Gorelo rejected get_agent (HTTP 403, code 080203): the API key does not have the 'Assets' scope. Grant it on the API key in Gorelo, then retry"),
+            id="missing-scope",
+        ),
+        pytest.param(
+            httpx.ReadTimeout("slow"),
+            "Gorelo did not answer get_agent (the request timed out). This was a read, so retrying is safe.",
+            id="timeout",
+        ),
+    ],
+)
+async def test_get_agent_keeps_every_other_failure_as_it_was(server, mock_gorelo, response, expected):
+    mock_gorelo.on("GET", f"/v1/assets/agents/{uid(9)}", response)
+    text = await call_tool_error(server, "get_agent", {"agent_id": uid(9)})
+    assert text == expected and len(mock_gorelo.requests) == 1
+
+
+async def test_get_agent_keeps_the_shape_error_for_an_answer_that_is_no_envelope(server, mock_gorelo):
+    page = httpx.Response(200, text="<html>gateway</html>", headers={"content-type": "text/html"})
+    mock_gorelo.on("GET", f"/v1/assets/agents/{uid(9)}", page)
+    text = await call_tool_error(server, "get_agent", {"agent_id": uid(9)})
+    assert text.startswith("Gorelo returned an unexpected response for get_agent: GET /v1/assets/agents/{agentAssetId}: unexpected response shape; refusing to guess")
+    assert "text/html" in text and text != NO_AGENT
 
 
 @pytest.mark.parametrize("data, found", [({}, "an empty object"), ([agent_record(7)], "a list of 1 item"), ("x", "a string")])
@@ -588,6 +682,46 @@ async def test_get_agent_refuses_a_record_that_is_not_an_object(server, mock_gor
     text = await call_tool_error(server, "get_agent", {"agent_id": uid(7)})
     assert text.startswith("Gorelo returned an unexpected response for get_agent: GET /v1/assets/agents/{agentAssetId}: expected Data to be a non-empty object")
     assert f"but got {found}" in text and "refusing to guess" in text
+
+
+@pytest.mark.parametrize(
+    "data, found",
+    [
+        ([], "an empty list"),
+        ([agent_record(7), agent_record(8)], "a list of 2 items"),
+        ("", "an empty string"),
+        (0, "a number"),
+        (7, "a number"),
+        (False, "a boolean"),
+        (True, "a boolean"),
+    ],
+)
+async def test_get_agent_takes_only_a_null_data_for_an_unknown_agent_not_other_empty_looking_data(server, mock_gorelo, data, found):
+    # falsy is not null: an empty list, an empty string, 0 and false are shapes Gorelo does not promise, and stay the shape error
+    mock_gorelo.on("GET", f"/v1/assets/agents/{uid(7)}", envelope(data))
+    text = await call_tool_error(server, "get_agent", {"agent_id": uid(7)})
+    assert text.startswith("Gorelo returned an unexpected response for get_agent: GET /v1/assets/agents/{agentAssetId}: expected Data to be a non-empty object")
+    assert f"but got {found}" in text and "refusing to guess" in text and text != NO_AGENT
+    assert "verify" not in text.lower()  # a read: nothing may have been applied
+
+
+def test_the_single_agent_get_is_a_plain_unpaged_json_get_so_request_can_stand_in_for_get_one(spec_index):
+    # get_agent sends it with GoreloClient.request, which skips the method, paging and download checks of get_one
+    op = spec_index.op("GET /v1/assets/agents/{agentAssetId}")
+    assert (op.method, op.paged, op.is_binary) == ("GET", False, False)
+    assert op.path_placeholders == ("agentAssetId",) and not op.query_params and not op.body
+
+
+def test_the_module_text_records_the_unknown_agent_answer_and_the_error_that_replaced_the_shape_error():
+    doc = flat(assets_module.__doc__)
+    assert "An unknown agent id (measured live with read-only GETs on 2026-10-24)" in doc
+    assert "answers HTTP 200 with IsSuccess true and Data null" in doc
+    assert 'every other single-record GET answers 404 ("The requested resource was not found."), the agent sub-resources apps, hardware and tags included' in doc
+    assert "(for an id taken from elsewhere or mistyped)" in doc
+    assert "in production" not in doc
+    assert "turns a Data that is null or missing, the very condition under which get_one raised that error, into a plain refusal" in doc
+    assert "names agent_id" in doc and "points to list_agents and get_custom_asset" in doc
+    assert "The other per-agent reads keep get_one" in doc
 
 
 async def test_get_agent_never_sends_a_delete_even_for_a_well_formed_id(server, mock_gorelo):

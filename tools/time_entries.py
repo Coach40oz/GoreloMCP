@@ -40,6 +40,13 @@ Rules that shape the code (the evidence is in docs/API-OBSERVED-BEHAVIOR.md and 
   StartedOn, EndedOn and ActualHours are needed (Gorelo derives the third and, when all three are given,
   checks that they agree).
 * The only delete this module offers is delete_time_entry, behind the destructive gate and confirm=true.
+* Two 409 refusals that Gorelo gives (plain refusals, Gorelo wrote nothing): create_time_entry ("Time entry
+  cannot be created because ticket <id> is closed. Reopen the ticket first.") and update_time_entry ("Time entry <id>
+  cannot be changed because it has already been invoiced. Only a time entry that is still open can be changed."). The
+  description of create_time_entry says so before the call (a closed ticket refuses time, so log time before closing or ask the
+  user before reopening it). The descriptions of update_time_entry and delete_time_entry already say that an invoiced entry is
+  refused (409), so they got no new sentence. Gorelo's own 409 text still reaches the model unchanged. The tests keep the Gorelo
+  codes of those two answers.
 * Shape of a record (live probe 2026-10-03): GET /v1/time-entries and GET /v1/time-entries/{timeEntryId} return the
   published TimeEntryModel, which names the user, the ticket and the task as objects: User {Id, Name}, Ticket
   {Id, Number, Title} and Task {Id, Number, Title}, with Task null for a ticket entry (the spec: one of Ticket and Task
@@ -406,7 +413,7 @@ async def create_time_entry(
 ) -> dict:
     """Log time against ONE ticket or ONE task and return the created entry.
 
-    Give exactly one of ticket_id and task_id, and at least two of started_on, ended_on and actual_hours (the third is derived; all three must agree). The billed duration (AdjustedHours) is rounded UP by the work type's minimum and increment.
+    Give exactly one of ticket_id and task_id, and at least two of started_on, ended_on and actual_hours (the third is derived; all three must agree). The billed duration (AdjustedHours) is rounded UP by the work type's minimum and increment. Gorelo refuses time on a closed ticket (409), so log time before closing, or ask the user before reopening it.
     Side effects: creates a real time entry billed to the ticket's client (task: its project's client) and priced at once; it can draw down contract hours. Logging twice records the time twice: after a "did not confirm" error check list_time_entries before repeating. A result of {"Id", "warning"} means the entry exists and only the re-read failed: do not repeat the write.
     """
     ticket = guid("ticket_id", ticket_id) if ticket_id is not None else None

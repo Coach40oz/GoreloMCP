@@ -53,6 +53,15 @@ create_custom_asset and update_custom_asset take as hardware_type_id. The same c
 and WarrantyStartDate to the custom asset body (IpAddress is deprecated for LocalIPAddress), made GET
 /v1/assets/custom/hardware-types deprecated for GET /v1/assets/types, and renamed device statuses 2 and 3 to Online and Offline.
 
+An unknown agent id (measured live with read-only GETs on 2026-10-24): GET /v1/assets/agents/{agentAssetId} answers HTTP 200
+with IsSuccess true and Data null, where every other single-record GET answers 404 ("The requested resource was not
+found."), the agent sub-resources apps, hardware and tags included. The client reads that answer as the shape error "Gorelo
+reported success but Data is null; refusing to guess" (for an id taken from elsewhere or mistyped), so get_agent sends the GET with request() and turns a Data that is null or missing, the very condition
+under which get_one raised that error, into a plain refusal: it names agent_id, says Gorelo has no agent with that id (unknown
+or deleted) and points to list_agents and get_custom_asset. It is a read, so nothing was written. Every other outcome of the
+call is unchanged: an envelope or HTTP error, an answer that is no envelope, and a Data that is not a non-empty object. The
+other per-agent reads keep get_one, because their unknown ids are 404s.
+
 There are no delete tools: DELETE /v1/assets/agents/{agentAssetId} uninstalls the RMM agent from the host and
 DELETE /v1/assets/custom/{customAssetId} is not allowed; both are in FORBIDDEN_OPS.
 """
@@ -170,6 +179,13 @@ _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # The path placeholder of get_agent, so that a Gorelo error about the id names agent_id.
 GET_AGENT_FIELD_MAP = {"agent_id": "agentAssetId"}
 AGENT_ID_HELP = "Agent asset UUID: the Id of a list_agents row."
+# What get_agent says when Gorelo answers success with no record. For an unknown agent id Gorelo answers HTTP 200, IsSuccess true
+# and Data null (measured live on 2026-10-24), not the 404 of every other single-record read. The text names the parameter, says
+# what the answer means and where to look next; it is a plain refusal of a read, so it says nothing about a write.
+NO_AGENT_TEXT = (
+    "agent_id: Gorelo has no agent with this id (unknown or deleted). For an unknown agent id Gorelo answers success with no "
+    "record, unlike other records, which answer 404. Find agents with list_agents; read a custom asset with get_custom_asset."
+)
 # The path placeholder of get_custom_asset, so that a Gorelo error about the id names custom_asset_id.
 GET_CUSTOM_FIELD_MAP = {"custom_asset_id": "customAssetId"}
 
@@ -277,7 +293,12 @@ async def get_agent(
     Like list rows it has DisplayName, SerialNumber, Type ({Id, Name}), ContactId and Banner; SerialNo and HardwareType are deprecated.
     """
     aid = guid("agent_id", agent_id)
-    record = await client_of(ctx).get_one(GET_AGENT_OP, path_params={"agentAssetId": aid}, tool="get_agent")
+    # request() instead of get_one(): get_one refuses a null Data as a shape error, and for this operation a null Data is
+    # Gorelo's answer for an agent id it does not know. Everything else (errors, odd bodies) is get_one's behavior unchanged.
+    answer = await client_of(ctx).request(GET_AGENT_OP, path_params={"agentAssetId": aid}, tool="get_agent")
+    record = answer.get("Data")
+    if record is None:
+        raise ValueError(NO_AGENT_TEXT)
     return expect_object(record, GET_AGENT_OP, tool="get_agent")
 
 

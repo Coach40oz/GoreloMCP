@@ -1814,21 +1814,22 @@ REREAD = "GET /v1/tickets/{ticketId}"
 
 
 @pytest.mark.parametrize(
-    "response, reason",
+    "response, reason, reads",
     [
         pytest.param(error_envelope(404, [("070401", "Ticket not found")], trace_id="00-t-1"),
-                     f"{REREAD} answered HTTP 404 (code 070401): Ticket not found [trace 00-t-1]", id="404"),
+                     f"{REREAD} answered HTTP 404 (code 070401): Ticket not found [trace 00-t-1]", 1, id="404"),
         pytest.param(error_envelope(500, [("070001", "Internal error")], trace_id="00-t-2"),
-                     f"{REREAD} answered HTTP 500 (code 070001): Internal error [trace 00-t-2]", id="500"),
-        pytest.param(httpx.ReadTimeout("slow"), f"{REREAD} timed out", id="timeout"),
-        pytest.param(httpx.ConnectError("refused"), f"the connection to Gorelo failed during {REREAD}", id="connection"),
-        pytest.param(httpx.Response(502, text="<html>Bad Gateway</html>"), f"{REREAD}: unexpected response shape; refusing to guess (HTTP 502", id="gateway-page"),
-        pytest.param(envelope(None), f"{REREAD}: Gorelo reported success but Data is null; refusing to guess", id="data-null"),
-        pytest.param(envelope([ticket_detail(5)]), f"{REREAD} returned a list instead of the record", id="data-is-a-list"),
+                     f"{REREAD} answered HTTP 500 (code 070001): Internal error [trace 00-t-2]", 1, id="500"),
+        pytest.param(httpx.ReadTimeout("slow"), f"{REREAD} timed out", 1, id="timeout"),
+        # a read that gets a refused connection or a 502/503/504 is sent once more (1.4.2); the POST is still sent once
+        pytest.param(httpx.ConnectError("refused"), f"the connection to Gorelo failed during {REREAD}", 2, id="connection"),
+        pytest.param(httpx.Response(502, text="<html>Bad Gateway</html>"), f"{REREAD}: unexpected response shape; refusing to guess (HTTP 502", 2, id="gateway-page"),
+        pytest.param(envelope(None), f"{REREAD}: Gorelo reported success but Data is null; refusing to guess", 1, id="data-null"),
+        pytest.param(envelope([ticket_detail(5)]), f"{REREAD} returned a list instead of the record", 1, id="data-is-a-list"),
     ],
 )
 async def test_create_ticket_a_failed_reread_returns_the_id_and_a_warning_and_never_repeats_the_write(
-    server, mock_gorelo, response, reason
+    server, mock_gorelo, response, reason, reads
 ):
     mock_gorelo.on("POST", LIST, envelope({"Id": uid(5)}))
     mock_gorelo.on("GET", f"{LIST}/{uid(5)}", response)
@@ -1837,7 +1838,7 @@ async def test_create_ticket_a_failed_reread_returns_the_id_and_a_warning_and_ne
     assert result["warning"].startswith(f"the write succeeded; re-reading it failed: {reason}")
     assert result["warning"].endswith("Do not repeat the write; read it again later.")
     assert "create_ticket" not in result["warning"] and "Gorelo rejected" not in result["warning"]
-    assert len(mock_gorelo.calls("POST", LIST)) == 1 and len(mock_gorelo.calls("GET")) == 1
+    assert len(mock_gorelo.calls("POST", LIST)) == 1 and len(mock_gorelo.calls("GET")) == reads
 
 
 async def test_create_ticket_reads_back_an_id_that_came_with_padding(server, mock_gorelo):
@@ -2420,7 +2421,8 @@ async def test_update_ticket_a_billing_read_that_fails_or_cannot_be_used_sends_n
     assert fragment in text
     assert "may or may not have been applied" not in text and "the write may have been applied" not in text
     assert mock_gorelo.calls("PATCH") == []
-    assert [r.method for r in mock_gorelo.requests] == ["GET"]  # the read is not retried either
+    # the read is asked once more only after a refused connection (1.4.2); no PATCH follows either way
+    assert [r.method for r in mock_gorelo.requests] == ["GET"] * (2 if isinstance(response, httpx.ConnectError) else 1)
 
 
 async def test_update_ticket_a_billing_read_that_works_but_a_write_that_fails_is_reported_as_the_write(server, mock_gorelo):
@@ -2648,19 +2650,20 @@ async def test_update_ticket_cannot_unassign_or_clear_with_null(server, mock_gor
 
 
 @pytest.mark.parametrize(
-    "response, reason",
+    "response, reason, reads",
     [
         pytest.param(error_envelope(404, [("070401", "Ticket not found")], trace_id="00-t-1"),
-                     f"{REREAD} answered HTTP 404 (code 070401): Ticket not found [trace 00-t-1]", id="404"),
+                     f"{REREAD} answered HTTP 404 (code 070401): Ticket not found [trace 00-t-1]", 1, id="404"),
         pytest.param(error_envelope(500, [("070001", "Internal error")], trace_id="00-t-2"),
-                     f"{REREAD} answered HTTP 500 (code 070001): Internal error [trace 00-t-2]", id="500"),
-        pytest.param(httpx.ReadTimeout("slow"), f"{REREAD} timed out", id="timeout"),
-        pytest.param(httpx.Response(502, text="<html>Bad Gateway</html>"), f"{REREAD}: unexpected response shape; refusing to guess (HTTP 502", id="gateway-page"),
-        pytest.param(envelope(True), f"{REREAD} returned a boolean instead of the record", id="data-is-a-boolean"),
+                     f"{REREAD} answered HTTP 500 (code 070001): Internal error [trace 00-t-2]", 1, id="500"),
+        pytest.param(httpx.ReadTimeout("slow"), f"{REREAD} timed out", 1, id="timeout"),
+        # a read that gets a 502/503/504 is sent once more (1.4.2); the PATCH is still sent once
+        pytest.param(httpx.Response(502, text="<html>Bad Gateway</html>"), f"{REREAD}: unexpected response shape; refusing to guess (HTTP 502", 2, id="gateway-page"),
+        pytest.param(envelope(True), f"{REREAD} returned a boolean instead of the record", 1, id="data-is-a-boolean"),
     ],
 )
 async def test_update_ticket_a_failed_reread_returns_the_id_and_a_warning_and_never_repeats_the_write(
-    server, mock_gorelo, response, reason
+    server, mock_gorelo, response, reason, reads
 ):
     mock_gorelo.on("PATCH", f"{LIST}/{T1}", envelope({"Id": T1}))
     mock_gorelo.on("GET", f"{LIST}/{T1}", response)
@@ -2669,7 +2672,7 @@ async def test_update_ticket_a_failed_reread_returns_the_id_and_a_warning_and_ne
     assert result["warning"].startswith(f"the write succeeded; re-reading it failed: {reason}")
     assert result["warning"].endswith("Do not repeat the write; read it again later.")
     assert "update_ticket" not in result["warning"] and "Gorelo rejected" not in result["warning"]
-    assert len(mock_gorelo.calls("PATCH")) == 1 and len(mock_gorelo.calls("GET")) == 1
+    assert len(mock_gorelo.calls("PATCH")) == 1 and len(mock_gorelo.calls("GET")) == reads
 
 
 async def test_update_ticket_the_id_in_a_reread_warning_is_the_canonical_guid(server, mock_gorelo):

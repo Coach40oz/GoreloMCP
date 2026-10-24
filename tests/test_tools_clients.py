@@ -1151,21 +1151,22 @@ def prior_fields(arguments):
     return rows
 
 
-def route_update(mock_gorelo, arguments, answer, *, prior=None, after=None, second=None, client_id=9101):
+def route_update(mock_gorelo, arguments, answer, *, prior=None, after=None, second=None, second_reads=1, client_id=9101):
     """Serve what update_client asks Gorelo for when it writes custom fields: the read of the client, the PATCH, and the
     read of the client again (one more read than that is an unmatched request and fails the test).
 
     `answer` is a response spec for the PATCH (envelope(...), error_envelope(...), an exception). `prior` is the list of
     CustomProperties the first read shows (by default prior_fields(arguments)); `after` is the client record the second
     read shows (by default the record the PATCH answers with, when it answers with an envelope of an object); `second`
-    is a response spec for the second read as it is (an error, an exception, an odd envelope) and wins over `after`. A
-    PATCH that fails has no second read."""
+    is a response spec for the second read as it is (an error, an exception, an odd envelope) and wins over `after`;
+    `second_reads` is how many times Gorelo is asked for it (2 for a refused connection, which a read tries once more).
+    A PATCH that fails has no second read."""
     rows = prior_fields(arguments) if prior is None else prior
     if after is None and isinstance(answer, dict) and answer.get("IsSuccess") is True and isinstance(answer.get("Data"), dict):
         after = answer["Data"]
     reads = [envelope(client_record(client_id, CustomProperties=rows))]
     if second is not None:
-        reads.append(second)
+        reads.extend([second] * second_reads)
     elif after is not None:
         reads.append(envelope(after))
     mock_gorelo.on("GET", f"/v1/clients/{client_id}", in_order(*reads))
@@ -2360,10 +2361,12 @@ UNCHECKED_CALLS = [
 async def test_a_read_after_the_write_that_fails_lists_what_every_custom_field_held_before(
     server, mock_gorelo, spec, why, arguments, expected
 ):
-    route_update(mock_gorelo, arguments, envelope({"Id": 9101}), prior=BEFORE, second=spec)
+    # a read whose connection is refused is sent once more (1.4.2); the PATCH is still sent once and never repeated
+    second_reads = 2 if isinstance(spec, httpx.ConnectError) else 1
+    route_update(mock_gorelo, arguments, envelope({"Id": 9101}), prior=BEFORE, second=spec, second_reads=second_reads)
     text = await call_tool_error(server, "update_client", {"client_id": 9101, **arguments})
     assert text == unchecked(why, **expected)
-    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH", "GET"]  # the write is sent once, never repeated
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"] + ["GET"] * second_reads
     assert "SECRET-VALUE" not in text and "The update was applied" not in text  # what the caller sent is never echoed
 
 

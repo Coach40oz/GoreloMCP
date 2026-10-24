@@ -9,7 +9,7 @@ Ops owned by this module:
     POST /v1/contacts
     PATCH /v1/contacts/{contactId}
 
-Contract notes (observed on 2026-10-01, see docs/API-OBSERVED-BEHAVIOR.md):
+Contract notes (observed on 2026-10-01 and 2026-10-24, see docs/API-OBSERVED-BEHAVIOR.md):
 
 * GET /v1/contacts has both a legacy ClientId and ClientIds. list_contacts only ever sends ClientIds.
 * GET /v1/contacts StatusIds is 1 Active, 3 Temporary, 4 Archived (contract a7954b24844b, 2026-10-17; 2 Inactive is gone):
@@ -23,29 +23,47 @@ Contract notes (observed on 2026-10-01, see docs/API-OBSERVED-BEHAVIOR.md):
   and no id in the path; that form answered 405 live on 2026-10-02 and a live override swapped the path form in
   until Gorelo published it (the history is in spec/live_overrides.json, section retired). The operation is still
   a full-body command (without PrimaryEmail or ClientId it is a 400).
-* PATCH /v1/contacts/{contactId} REPLACES the whole contact: a request with only the required fields wiped the
-  phones and the job title (probe of 2026-10-01, on the retired collection form, with the same body; the live
-  operation is still a full-body command). update_contact therefore reads the contact (GET /v1/contacts/{contactId}),
-  builds the complete UpdateContactCommand from that record plus the caller's changes, and sends it. Only the
-  command's own fields are copied, never the read-only ones (Id, Alias, Status, CreatedOn, ...).
-  It refuses, before anything is written, a record that lacks a key it would have to copy (that value
-  would be erased), that belongs to another contact, whose ClientId is null, or whose FirstName,
-  LastName or PrimaryEmail is null and not given by the caller (the command requires them).
-* The body never carries an explicit null. A copied value that is null is OMITTED: PATCH replaces
-  the contact, so an omitted field is stored as null anyway (the probe showed it), and most of these
-  fields are not nullable in the spec. clear_fields works the same way: a cleared field is simply not
-  sent. FirstName, LastName, ClientId and PrimaryEmail are always sent with values.
-* SecondaryEmail is part of the command but is NOT returned by any read, and only the user can see a
-  contact's secondary emails (in the Gorelo app). Every update would erase them, so the choice goes
-  through the user: update_contact refuses to run until the caller passes the complete list the
-  user wants in secondary_email (it replaces ALL existing ones, [] erases them) or, after asking the user,
-  clear_secondary_email_ok=true. The refusal says to ask the user first and does not read as an invitation
-  to retry with the flag. SecondaryEmail is only sent when the caller gave secondary_email.
+* What PATCH /v1/contacts/{contactId} does with a field that is left out (live, on a test client, 2026-10-24; the
+  2026-10-22 spec text says the same): MobilePhone, MobilePhoneCountryCode,
+  OfficePhone, OfficePhoneCountryCode, JobTitle, Department, TimeZone and Description are CLEARED (the first probe, of
+  2026-10-01 on the retired collection form, wiped the phones and the job title the same way). LocationId and
+  SecondaryEmail are KEPT. "LocationId": null also KEEPS the location, so a contact's location cannot be cleared through
+  the API at all (clear_fields refuses location_id; location_id only moves the contact). "SecondaryEmail": [] clears the
+  secondary emails. The command still requires ClientId, FirstName, LastName and PrimaryEmail (without them it is a 400).
+  update_contact therefore reads the contact (GET /v1/contacts/{contactId}), builds the UpdateContactCommand from that
+  record plus the caller's changes, and sends it, so that what the caller did not mention is re-sent and not cleared.
+  LocationId is still copied from the record (harmless, and it keeps the behaviour explicit). Only the command's own
+  fields are copied, never the read-only ones (Id, Alias, Status, CreatedOn, ...). It refuses, before anything is
+  written, a record that lacks a key it would have to copy (that value would be erased), that belongs to another
+  contact, whose ClientId is null, or whose FirstName, LastName or PrimaryEmail is null and not given by the caller.
+* The body never carries an explicit null. A copied value that is null is OMITTED: an omitted field is cleared anyway
+  (or kept, for LocationId), and most of these fields are not nullable in the spec. clear_fields works the same way: a
+  cleared field is simply not sent. FirstName, LastName, ClientId and PrimaryEmail are always sent with values.
+* SecondaryEmail is part of the command but is NOT returned by any read: the API cannot show a contact's secondary
+  emails, and only the user can see them (in the Gorelo app; a search by Query on an address finds the contact). Left
+  out, they are KEPT (verified live 2026-10-24), so an update that does not pass secondary_email sends no
+  SecondaryEmail and loses nothing. secondary_email REPLACES all existing ones and [] erases them; the tool texts say
+  that the user sees the list in the Gorelo app, so the model asks the user for the complete list before it changes
+  them. Until 2026-10-24 the tool assumed that every update erased them: it refused to run until the caller passed
+  secondary_email or, after asking the user, clear_secondary_email_ok=true. Both are gone.
 * Gorelo's write endpoints answer with the full contact record (ContactResponse). create_contact and
   update_contact return it as it is. An answer that is not that record (null, {}, false, a list, or on
   create a record without an Id) is refused through created_id / expect_object (kind "shape",
   write_unconfirmed): the write may have been applied, so it must be verified with a read, never repeated.
   There is no read-back fallback: re-reading after a `false` would show the OLD record and look like success.
+* Gorelo refuses a region code without its phone number (HTTP 400, code 070101, PropertyName OfficePhone, "OfficePhone is
+  required when OfficePhoneCountryCode is provided"; seen live on 2026-10-24, on create and on update), and the same for
+  MobilePhone. The Gorelo app can store a region code on a contact that has no such phone, and the full command
+  copies every stored field, so ANY update of such a contact (a first_name change too) failed. After the caller's changes
+  are merged over the record, update_contact looks at each pair of PHONE_PAIRS whose phone is empty (null or blank) and
+  whose region code is filled. A code the caller passed in this call is refused locally, with the one GET as the only
+  request. A code that came from the stored record is left OUT of the command, so Gorelo stores none, which is the only
+  state it accepts for a contact without that phone (a blank phone is left out with it), and the result carries a `note`
+  that names each such parameter and its previous code. The note is built from Gorelo's ANSWER, not from what was sent:
+  it says a code was cleared only when the answer shows that field null or blank, and says "left out of the update, but
+  Gorelo's answer still shows it" (no error) when the answer still holds the code (a Gorelo answer that is not a usable
+  record raises as before, with no note). create_contact refuses a region code passed without its phone, in the same
+  words, before any request. A phone still needs its region code in both tools.
 
 There is no delete tool: DELETE /v1/contacts/{contactId} is in FORBIDDEN_OPS.
 """
@@ -58,7 +76,6 @@ from pydantic import Field
 from gorelo_client import GoreloAPIError
 from tools._common import (
     MAX_ID,
-    StrictBool,
     StrictId,
     build_body,
     clamp_page_size,
@@ -143,10 +160,11 @@ UPDATE_FIELD_MAP = {
 UPDATE_TOOL_FIELD_MAP = {**UPDATE_FIELD_MAP, "contact_id": "contactId"}
 
 # Fields update_contact may clear through clear_fields (the contact ends up without them: they are left out of
-# the PATCH, which replaces the whole contact), and the three it can never blank (the command requires them).
-# The Literal puts the allowed names in the advertised schema, like update_item's clear_fields.
+# the PATCH, and Gorelo clears a phone, job title, department, time zone or description that is left out), and the
+# three it can never blank (the command requires them). location_id is not here: Gorelo keeps a LocationId that is left
+# out or sent as null (live, 2026-10-24), so a location cannot be cleared. The Literal puts the allowed names in the
+# advertised schema, like update_item's clear_fields.
 ClearableField = Literal[
-    "location_id",
     "mobile_phone",
     "mobile_phone_country_code",
     "office_phone",
@@ -215,6 +233,11 @@ def _filled(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _empty(value: Any) -> bool:
+    """A phone number that is not there: null, or text that is blank."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
 def _addresses(param: str, values: list[str] | None, *, allow_empty: bool) -> list[str] | None:
     """A list of email addresses: None stays None, items must be non-blank text, [] only if allowed."""
     if values is None:
@@ -236,6 +259,21 @@ def _phone_needs_region(phone_param: str, region_param: str, phone: str | None, 
             f"{region_param}: required when {phone_param} is given. Gorelo needs the ISO region code of "
             "the number (for example US or CA) and this tool assumes none"
         )
+
+
+def _region_without_phone(phone_param: str, region_param: str, detail: str = "") -> ValueError:
+    """The refusal of a region code that would reach Gorelo without its phone number. create_contact and update_contact
+    use the same words; update_contact adds `detail`, which says why the contact would have no such phone."""
+    return ValueError(
+        f"{region_param}: Gorelo refuses a region code without its phone number; pass {phone_param} too, or leave "
+        f"{region_param} out{detail}"
+    )
+
+
+def _region_needs_phone(phone_param: str, region_param: str, phone: str | None, region: str | None) -> None:
+    """create_contact: a region code passed without its phone number is a local error naming the region."""
+    if region is not None and phone is None:
+        raise _region_without_phone(phone_param, region_param)
 
 
 @gorelo_tool(toolset="core", kind="read", ops=[LIST_OP], field_map=LIST_FIELD_MAP)
@@ -361,7 +399,9 @@ async def create_contact(
     mobile_region = region_code("mobile_phone_country_code", mobile_phone_country_code)
     office_region = region_code("office_phone_country_code", office_phone_country_code)
     _phone_needs_region("mobile_phone", "mobile_phone_country_code", mobile_phone, mobile_region)
+    _region_needs_phone("mobile_phone", "mobile_phone_country_code", mobile_phone, mobile_region)
     _phone_needs_region("office_phone", "office_phone_country_code", office_phone, office_region)
+    _region_needs_phone("office_phone", "office_phone_country_code", office_phone, office_region)
     body = build_body(
         {
             "client_id": cid,
@@ -403,6 +443,12 @@ def _clear_list(clear_fields: list[str] | None) -> list[str]:
                 "clear_fields: secondary_email is not cleared through clear_fields; pass secondary_email=[] "
                 "to erase the secondary emails"
             )
+        if name == "location_id":
+            raise ValueError(
+                "clear_fields: Gorelo cannot clear a contact's location through the API (leaving it out or sending "
+                "null keeps it; verified 2026-10-24); pass location_id to move the contact to another location of its "
+                "client, or clear it in the Gorelo app"
+            )
         if name not in CLEARABLE_FIELDS:
             raise ValueError(f"clear_fields: unknown field {name!r}; accepted: {', '.join(CLEARABLE_FIELDS)}")
         if name not in names:
@@ -439,24 +485,72 @@ def _changes(values: dict[str, Any], clear: list[str]) -> dict[str, Any]:
 _REQUIRED_LABELS = {"first_name": "first name", "last_name": "last name", "primary_email": "primary email address"}
 
 
+def _cleared_note(cleared: list[tuple[str, str, str]], answer: dict[str, Any]) -> str:
+    """The `note` of an update that left stored region codes out of the command, built from Gorelo's ANSWER and not from
+    what was sent: each region parameter with the code it held. `cleared` holds (phone parameter, region parameter,
+    previous code) in PHONE_PAIRS order. A code is called cleared only when the answer shows that field null or blank;
+    when the answer still shows it (or does not show the field at all) the note says so and points to get_contact, and
+    the tool does not raise: the PATCH was answered 2xx with a record.
+    """
+    gone: list[tuple[str, str, str]] = []
+    kept: list[tuple[str, str, str]] = []
+    unseen: list[tuple[str, str, str]] = []
+    for item in cleared:
+        key = UPDATE_FIELD_MAP[item[1]]
+        if key not in answer:
+            unseen.append(item)
+        elif _empty(answer[key]):
+            gone.append(item)
+        else:
+            kept.append(item)
+
+    def names(group: list[tuple[str, str, str]]) -> str:
+        return " and ".join(f"{region} (was {code})" for _phone, region, code in group)
+
+    sentences: list[str] = []
+    if gone:
+        lacks = " and no ".join(phone.replace("_", " ") for phone, _region, _code in gone)
+        sentences.append(
+            f"{names(gone)} {'was' if len(gone) == 1 else 'were'} cleared because the contact has no {lacks}, and Gorelo "
+            "refuses a region code without its phone number."
+        )
+    for group, shown in ((kept, "still shows"), (unseen, "does not show")):
+        if group:
+            single = len(group) == 1
+            sentences.append(
+                f"{names(group)} {'was' if single else 'were'} left out of the update, but Gorelo's answer {shown} "
+                f"{'it' if single else 'them'}; check with get_contact."
+            )
+    return " ".join(sentences)
+
+
 def _full_command(
     contact_id: int, record: Any, changes: dict[str, Any], addresses: list[str] | None
-) -> dict[str, Any]:
-    """The complete UpdateContactCommand: the contact as Gorelo holds it, with the caller's changes laid over it.
+) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
+    """The complete UpdateContactCommand: the contact as Gorelo holds it, with the caller's changes laid over it, and
+    the region codes it had to leave out.
 
-    PATCH /v1/contacts/{contactId} replaces the whole contact, so every value the contact has must be sent. A value
-    it does not have (null in the record, or cleared through clear_fields) is OMITTED, never sent as an explicit
-    null: an omitted field is stored as null anyway. FirstName, LastName, ClientId and PrimaryEmail are always sent
-    with values. The command carries no contact id: the id is in the path. Refuses (before anything is written) a
-    record that lacks a key it would have to copy: that value would be erased.
+    PATCH /v1/contacts/{contactId} clears the phones, region codes, job title, department, time zone and description
+    it leaves out, so every value the contact has must be sent. A value it does not have (null in the record, or
+    cleared through clear_fields) is OMITTED, never sent as an explicit null: an omitted field is cleared anyway. A
+    LocationId and the SecondaryEmail list that are left out are KEPT (live, 2026-10-24); the record's LocationId is
+    still copied, and SecondaryEmail is sent only when the caller gave it. FirstName, LastName, ClientId and
+    PrimaryEmail are always sent with values. The command carries no contact id: the id is in the path. Refuses
+    (before anything is written) a record that lacks a key it would have to copy: that value would be erased.
+
+    Gorelo refuses a region code without its phone number, and its app can store one on a contact that has no such
+    phone. Once the changes are merged over the record, a pair whose phone is empty (null or blank) and whose region
+    code is filled is settled one of two ways. A code the caller passed in this call is a local error. A code that
+    came from the stored record is left out of the command (with a blank phone), so that Gorelo stores none, and is
+    returned as (phone parameter, region parameter, previous code) for the caller to report.
     """
     record = expect_object(record, GET_OP, tool="update_contact")
     missing = [key for key in ("Id", *COPIED_FIELDS) if key not in changes and key not in record]
     if missing:
         raise GoreloAPIError(
             f"{GET_OP}: the contact record has no {', '.join(missing)}; refusing to send an update built "
-            "from it, because PATCH /v1/contacts/{contactId} replaces the whole contact and would erase every value "
-            "that could not be copied",
+            "from it, because Gorelo clears the phone, region code, job title, department, time zone and description "
+            "fields that an update leaves out, so a record that lacks one of its fields cannot be copied safely",
             status=200, op_key=GET_OP, kind="shape",
         )
     if str(record["Id"]) != str(contact_id):
@@ -476,6 +570,7 @@ def _full_command(
                 f"{param}: contact {contact_id} has no {_REQUIRED_LABELS[param]} in Gorelo and Gorelo's update "
                 f"requires one; pass {param} with the value it should have"
             )
+    cleared: list[tuple[str, str, str]] = []
     for phone, region in PHONE_PAIRS:
         phone_key, region_key = UPDATE_FIELD_MAP[phone], UPDATE_FIELD_MAP[region]
         touched = phone_key in changes or region_key in changes
@@ -489,10 +584,17 @@ def _full_command(
                 f"{region}: {phone} needs an ISO region code (for example US or CA) and contact "
                 f"{contact_id} would have none after this update; {way_out}"
             )
+        if _empty(merged[phone_key]) and _filled(merged[region_key]):
+            if changes.get(region_key) is not None:  # the caller passed this code in this very call
+                raise _region_without_phone(
+                    phone, region, f" (contact {contact_id} would have no {phone} after this update)"
+                )
+            cleared.append((phone, region, merged[region_key].strip()))
+            merged[phone_key] = merged[region_key] = None  # left out below: Gorelo stores neither
     command: dict[str, Any] = {key: value for key, value in merged.items() if value is not None}
     if addresses is not None:
         command["SecondaryEmail"] = addresses
-    return command
+    return command, cleared
 
 
 @gorelo_tool(toolset="core", kind="write", ops=[GET_OP, UPDATE_OP], field_map=UPDATE_TOOL_FIELD_MAP, destructive_hint=True)
@@ -532,20 +634,13 @@ async def update_contact(
     secondary_email: Annotated[
         list[str] | None,
         Field(
-            description="COMPLETE list after this update; replaces ALL existing ones ([] erases). The API cannot show "
-            "them, only the user can see them in the Gorelo app: ask the user."
+            description="COMPLETE list; replaces ALL secondary emails ([] erases them). The API cannot show them but the "
+            "user sees them in the Gorelo app: to change them, ask the user for the complete list. Omit it to keep them."
         ),
     ] = None,
-    clear_secondary_email_ok: Annotated[
-        StrictBool,
-        Field(
-            description="True erases ALL secondary emails when secondary_email is omitted. Ask the user first: the API "
-            "cannot show them, only the user can see them in the Gorelo app."
-        ),
-    ] = False,
 ) -> dict:
     """Update a contact; returns the updated contact record. Pass only the fields to change.
-    Gorelo's PATCH replaces the whole contact, so this tool reads it first and keeps what you did not mention (the client cannot change). The API cannot show a contact's secondary emails (only the user can see them in the Gorelo app): ask the user for the complete list, pass it as secondary_email (replaces ALL existing ones; [] erases), or ask the user before passing clear_secondary_email_ok=true. Without either the call is refused before anything is sent. Side effects: overwrites the contact (visible in the app and on tickets); old values are not kept; an app edit made between the read and the write is lost.
+    Gorelo clears the phones, job title, department, time zone and description an update leaves out, so this tool reads the contact and re-sends them. Location and secondary emails you do not send are kept. The API cannot show the secondary emails, the user sees them in the Gorelo app: to change them ask the user for the complete list; secondary_email REPLACES all ([] erases). The location can be moved, not cleared. A stored region code with no phone is left out; the result's `note` names it. Side effects: overwrites the contact; old values are not kept; an app edit made between the read and the write is lost.
     """
     cid = positive_id("contact_id", contact_id)
     clear = _clear_list(clear_fields)
@@ -573,18 +668,9 @@ async def update_contact(
             "mobile_phone, mobile_phone_country_code, office_phone, office_phone_country_code, job_title, "
             "department, time_zone, description, secondary_email or clear_fields"
         )
-    if addresses is None and clear_secondary_email_ok is not True:
-        raise ValueError(
-            f"secondary_email: refusing to update contact {cid} until the user has decided what happens to its "
-            "secondary emails. Gorelo's PATCH /v1/contacts/{contactId} replaces the whole contact and the API cannot show a "
-            "contact's secondary emails (only the user can see them in the Gorelo app), so this update would "
-            "erase them. Ask the user first, do not retry on your own. Either ask which complete list of "
-            "secondary emails the contact should have afterwards and pass it as secondary_email (it replaces ALL "
-            "existing ones; [] erases them), or ask whether erasing all of them is acceptable and only if the "
-            "user says yes pass clear_secondary_email_ok=true. Nothing has been sent to Gorelo."
-        )
     client = client_of(ctx)
     record = await client.get_one(GET_OP, path_params={"contactId": cid}, tool="update_contact")
-    command = _full_command(cid, record, changes, addresses)
+    command, cleared = _full_command(cid, record, changes, addresses)
     data = await client.patch(UPDATE_OP, path_params={"contactId": cid}, json_body=command, tool="update_contact")
-    return expect_object(data, UPDATE_OP, tool="update_contact")
+    result = expect_object(data, UPDATE_OP, tool="update_contact")  # raises first when the answer is not a record: no note
+    return {**result, "note": _cleared_note(cleared, result)} if cleared else result

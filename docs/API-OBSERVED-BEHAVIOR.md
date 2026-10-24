@@ -8,10 +8,11 @@ production does.
 
 How to read it. Each entry gives the date it was seen (UTC dates; the hour is mostly not
 recorded), what the published spec said at that time, what production did, and what this server
-does about it. Everything here was observed with live calls, except entries 20 and 28, which rest on
-the published text: every write against a test client, and the reads of 2026-10-17 as read-only
-requests. Production can change at any time, so treat this as a log, not a promise. The reasoning
-behind the design is in `docs/why/`, and the tools that result are in `docs/tool-catalog.md`.
+does about it. Everything here was observed with live calls, except entries 5, 7, 17, 18, 20 and 28,
+which rest on the published description, its changelog or its text and say so, and the parts of entries
+23 to 26 that say they rest on the published text. Every write was made against a test client, and the
+reads of 2026-10-17 and 2026-10-24 were read-only requests. Production can change at any time, so
+treat this as a log, not a promise. The reasoning behind the design is in `docs/why/`, and the tools that result are in `docs/tool-catalog.md`.
 
 A caution that applies to all of it: an unchanged spec hash says nothing about live behavior.
 Several entries below were invisible to any spec comparison. Only live calls can find them, so
@@ -87,6 +88,7 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
   (`spec.py`, `spec/live_overrides.json`) and a test forces the entry to be removed once the
   published spec agrees. Earlier (2026-10-01) the contact collection PATCH replaced the whole
   record, wiping unsent fields, so `update_contact` reads the contact and sends the full command.
+  What the path form does with a field that is left out was measured on 2026-10-24 (entry 32).
 
 ## 7. Path placeholders were renamed (2026-10-02)
 
@@ -221,7 +223,8 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
   moves nothing, so the client of a custom asset cannot be changed. There is no read of a single
   custom asset. A custom asset created through the API cannot be deleted through this server.
   Superseded in part on 2026-10-17: the new contract adds a read of one custom asset and says that
-  a PATCH with a new `ClientId` moves the asset (entry 26).
+  a PATCH with a new `ClientId` moves the asset (entry 26; the move worked when it was first
+  tried, on 2026-10-24).
 - This server: `create_custom_asset` and `update_custom_asset` read the result back through the
   list. `update_custom_asset` needs the asset's current `client_id` and clears fields only through
   `clear_fields`. Delete stays forbidden.
@@ -235,8 +238,11 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
   (2026-10-01); the server returns 1 to 6 with labels and notes 7 as unnamed.
 - Deleted ticket comments may still come back with their body (2026-10-01).
 - A deleted catalog item reads as a 404 afterwards (2026-10-04).
-- A key without the `Project` and `Forms` scopes gets HTTP 403 code
-  080203 (2026-10-01); this is why those toolsets are off by default (`docs/why/10-toolsets.txt`).
+- Gorelo answers HTTP 403, code 080203, when the API key lacks the scope that an area needs (for example `Project`,
+  `Forms` or `Documents`); this is why those toolsets are off by default (`docs/why/10-toolsets.txt`).
+- 50 operations read on 2026-10-24 (one record or page each: the core lists and records, agent sub-resources,
+  documents, projects, tasks, comments, invoices, items, contracts, time entries, uptime, alerts, forms) returned
+  exactly the fields of their published schemas: none extra and none missing.
 
 ## 23. The 2026-10-17 contract: documents, deletions and one custom asset (2026-10-17)
 
@@ -245,9 +251,12 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
   `GET /v1/assets/custom/{customAssetId}`. Two comment bodies lost `BodyText`, a custom field
   can say `IsHidden`, and a PATCH of a custom asset with a new `ClientId` moves the asset.
 - Production did: the document reads answered with the published shapes: the list, one document (the fields of the
-  published model), its versions and its related items. No document write, move, archive, restore, version restore,
-  attachment or sharing call has been tried. So it is not known whether a url read from a document
-  is accepted in `Attachments` of an update, whether a changed title or body keeps the attachments,
+  published model), its versions and its related items. The write calls were first run on 2026-10-24, once, against
+  a test client: create, edit, attach a file, move under another document and back, duplicate, list and restore a
+  version, archive and restore, and export the PDF all worked as published, and a changed body kept the attached
+  file. Sharing has not been tried. This record does not claim an answer to the other questions that were open
+  before that run: whether a url read from a document is accepted in `Attachments` of an update, whether a changed
+  title keeps the attachments,
   how far an archive reaches below the document and what a restore does to the documents that were
   archived with it, whether the public link stays the same after it is turned off and on again,
   whether a move resets the sharing flags, whether the PDF export is recorded as an event, and what
@@ -282,7 +291,8 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
 - Spec said: `GET /v1/assets/custom/{customAssetId}` returns one custom asset, and a PATCH with a
   new `ClientId` moves it (its location and contact must belong to the new client).
 - Production did: the read of an id that does not exist answers 404, code 070202, "The requested
-  resource was not found.". The move itself has not been tried.
+  resource was not found.". The move was first run on 2026-10-24 against a test client: an asset moved to a second
+  client and back kept the same `Id`.
 - This server: `get_custom_asset` reads one asset; `create_custom_asset` and `update_custom_asset`
   read the asset back with it; `update_custom_asset` can move an asset and refuses a move that does
   not give a location of the new client.
@@ -302,3 +312,88 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
 - Production did: not probed beyond the published shape; a hidden field has not been tested live.
 - This server: `update_client` confirms a saved hidden field by `IsSet` alone and says that the
   value was not read back.
+
+## 29. The rate limit covers the whole API key (2026-10-24)
+
+- Seen: 2026-10-24, with read-only requests on cheap lists, one after another and at fixed spacings.
+- Spec said: nothing; no operation lists a 429.
+- Production did: one bucket for the whole API key, not one per endpoint. A burst of about 6 requests
+  gets through, then about 1 request per second is let through, and the bucket never holds more than
+  about 6: after 10 or 30 seconds of idle a burst of 6 got through and the seventh was refused. When
+  one endpoint answers 429 the others answer 429 at once. The 429 is not an envelope: it is gateway
+  JSON (`error`, `message`, `retry_after`, `timestamp`) with content type `application/octet-stream`
+  and the header `Retry-After: 1`. Every program that uses the same key draws on the same bucket.
+- This server: the client has one token bucket for all its requests (a burst of 5, then 1 per
+  second, first come first served); every attempt takes a token. A 429 empties the bucket, so every
+  queued request waits together (also a request that already has its token and waits for one of the
+  4 in-flight slots), and the request that got it is retried, for every method, up to 5 times with
+  at most 30 seconds of `Retry-After` waits in all; time spent queued behind other requests is not
+  counted in the 30 seconds. A read that changes nothing is also tried once more, after 2 seconds,
+  when Gorelo answers 502, 503 or 504 or the connection is refused. A write, a multipart upload and
+  the invoice PDF export are never sent again after anything but a 429 (Gorelo did not process a
+  429). A script or a second connector that uses the same key as the server shares its budget.
+
+## 30. An unknown agent id answers success with no record (2026-10-24)
+
+- Spec said: the read of one agent can answer 404, as the other single-record reads do.
+- Production did: `GET /v1/assets/agents/{agentAssetId}` with an agent id that does not exist answers
+  HTTP 200 with `IsSuccess` true and `Data` null. Every other single-record read that was tried answers
+  404, code 070202, "The requested resource was not found." (the apps, hardware and tags of an unknown
+  agent, and a custom asset, ticket, document, script, uptime check, project, contact, client and time
+  entry).
+- This server: `get_agent` says that Gorelo has no agent with that id and points to `list_agents`,
+  instead of reporting an answer it cannot use.
+
+## 31. Limits of the lists that the spec does not state (2026-10-24)
+
+- Spec said: some status filters say "up to 100 values"; the rest of the limits below are not stated.
+- Production did, with read-only requests:
+  - Ids in one filter: 100 are accepted; 101 and 500 are a 400 "A filter accepts at most 100 ids."
+    (also on lists whose text does not say so).
+  - `Query`: 200 characters are accepted; 201 and 1000 are a 400 "Query must be 200 characters or fewer.".
+  - `PageSize` outside 1 to 200 is a 400 "PageSize must be between 1 and 200.".
+  - A URL with a query of 8,000 characters reaches the application; one of 16,000 characters gets a 414
+    from the gateway.
+  - A date without a zone or without a time is read as UTC. A range whose end is before its start, and a
+    date in the future, answer 200 with no rows.
+  - A cursor may be reused with another page size. With another filter, or edited, it is a 400 "The supplied
+    cursor is invalid.".
+  - A query name that no description lists is a 400 every time: 47 such names were tried on 9 lists and
+    every one was refused (code 070101, "This query parameter is not recognized by this endpoint.").
+  - Sort fields: the ticket list takes `updatedOn` or `createdOn` only, the ticket comments `createdOn` only.
+  - Answers carry no compression, no `ETag` and no `Last-Modified`.
+- This server: clamps `PageSize`, checks every query name and refuses an id filter of more than 100 ids before
+  sending (id filters only; the catalog's text filters, skus, vendors and part numbers, are not capped, because
+  their limit has not been measured); any other refusal from Gorelo is passed on with its message, which names
+  the filter and the limit.
+
+## 32. Updating a contact keeps the location and the secondary emails (2026-10-24)
+
+- Seen: live writes on a test client.
+- Spec said: `PATCH /v1/contacts/{contactId}` requires the first name, last name, client and primary
+  email; the text of `LocationId` says "Omit to keep the current location", and that of `SecondaryEmail`
+  "Omit to keep the current secondary emails; send an empty array to clear them".
+- Production did: a request with only the four required fields cleared the job title and the mobile
+  phone it left out (the published text says the other such fields, region codes, department, time zone
+  and description, are cleared too), and kept the location and the secondary emails, as the text says.
+  `LocationId` null kept the location too, so the location of a contact cannot be cleared through the
+  API. `SecondaryEmail` `[]` cleared the secondary emails. A region code without its phone, such as
+  `OfficePhoneCountryCode` without `OfficePhone`, is a 400 (code 070101, "OfficePhone is required when
+  OfficePhoneCountryCode is provided") on create and on update. A read never shows the secondary emails,
+  but the `Query` of the contact list matches them.
+- This server: `update_contact` reads the contact and sends the complete command, sends the secondary
+  emails only when the caller gives the whole list (an empty list clears them; the user can see the
+  secondary emails in the Gorelo app, so the model asks the user for the complete list before changing
+  them), and no longer refuses an update until the user has decided about them. `clear_fields` does not accept `location_id`. A stored
+  region code that has no phone is left out of the update and named in the `note` of the result (the
+  note says the code was cleared only when Gorelo's answer shows it gone, otherwise that the answer still
+  shows it). A region code given without its phone is refused by `create_contact` before any request and
+  by `update_contact` after its read and before any write, when the contact has no such phone.
+
+## 33. Size limits of a document (2026-10-24)
+
+- Spec said: a title is at most 200 characters; no limit is stated for the body.
+- Production did: a title of 201 characters is a 400 "Title can be at most 200 characters."; a body of
+  524,026 characters was saved and read back whole; a body of about two million characters is a 400
+  "Body can be at most 900,000 characters.".
+- This server: checks the title length before sending; for the body it passes Gorelo's refusal on.

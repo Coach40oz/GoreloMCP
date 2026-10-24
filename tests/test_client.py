@@ -53,6 +53,20 @@ CREATE_CLIENT = "POST /v1/clients"
 PDF_OP = "GET /v1/invoices/{invoiceId}/pdf"
 
 
+@pytest.fixture
+def client_factory(client_factory):
+    """conftest's factory, with the clock of every client FROZEN. The token bucket of a client reads a clock, and
+    conftest's fake sleep returns at once without moving time. With a frozen clock the bucket counts time by its own
+    sleeps, so each wait it asks for is exact (a real clock would add microseconds of noise to every one of them).
+    tests/test_client_rate_limit.py is where a clock moves with the sleeps and the bucket itself is tested."""
+
+    def factory(*args, **kwargs):
+        kwargs.setdefault("clock", lambda: 1000.0)
+        return client_factory(*args, **kwargs)
+
+    return factory
+
+
 def renamed(op_key, name="id"):
     """The same operation with every path placeholder called `name`: what a future spec rename would produce."""
     return re.sub(r"\{[^{}]*\}", "{" + name + "}", op_key)
@@ -1414,6 +1428,11 @@ def too_many(retry_after=None, body=None):
     return httpx.Response(429, json=body if body is not None else {"Message": "slow down"}, headers=headers)
 
 
+# A 429 empties the client's token bucket, so a retry waits for the longer of the Retry-After and the next token, which
+# is one second away at the default of 1 request per second. (tests/test_client_rate_limit.py tests the bucket itself.)
+NEXT_TOKEN = 1.0
+
+
 async def test_a_429_with_retry_after_seconds_is_retried_after_that_wait(client_factory, mock_gorelo, fake_sleep):
     mock_gorelo.on("GET", "/v1/clients/7", in_order(too_many(2), envelope({"Id": 7})))
     async with client_factory() as client:
@@ -1429,12 +1448,15 @@ async def test_retry_after_may_be_an_http_date(client_factory, mock_gorelo, fake
     assert fake_sleep.delays == [3.0]
 
 
-async def test_a_retry_after_date_in_the_past_means_retry_now(client_factory, mock_gorelo, fake_sleep, monkeypatch):
+async def test_a_retry_after_date_in_the_past_adds_no_wait_of_its_own(client_factory, mock_gorelo, fake_sleep, monkeypatch):
+    # "retry now" (a wait of 0 s). A 429 empties the client's token bucket, though, so the retry still waits for the
+    # next token: one second at the default of 1 request per second.
     monkeypatch.setattr(gorelo_client, "_now_utc", lambda: datetime(2026, 10, 1, 12, 0, 0, tzinfo=timezone.utc))
     mock_gorelo.on("GET", "/v1/clients/7", in_order(too_many("Thu, 01 Oct 2026 11:00:00 GMT"), envelope({"Id": 7})))
     async with client_factory() as client:
         await client.get_one(CLIENT_OP, path_params={"clientId": 7}, tool="t")
-    assert fake_sleep.delays == [0.0]
+    assert fake_sleep.delays == [NEXT_TOKEN]
+
 
 
 @pytest.mark.parametrize(
@@ -1460,7 +1482,7 @@ async def test_retry_after_in_the_body(client_factory, mock_gorelo, fake_sleep, 
     mock_gorelo.on("GET", "/v1/clients/7", in_order(too_many(body=body), envelope({"Id": 7})))
     async with client_factory() as client:
         await client.get_one(CLIENT_OP, path_params={"clientId": 7}, tool="t")
-    assert fake_sleep.delays == [expected]
+    assert fake_sleep.delays == [max(expected, NEXT_TOKEN)]  # `expected` is the Retry-After that was read
 
 
 async def test_a_429_with_no_hint_waits_one_second(client_factory, mock_gorelo, fake_sleep):
@@ -1495,7 +1517,7 @@ async def test_429_gives_up_after_the_retry_limit(client_factory, mock_gorelo, f
             await client.get_one(CLIENT_OP, path_params={"clientId": 7}, tool="get_client")
     err = info.value
     assert err.kind == "rate_limit" and err.status == 429 and err.write_unconfirmed is False
-    assert len(mock_gorelo.requests) == 4 and fake_sleep.delays == [1.0, 1.0, 1.0]
+    assert len(mock_gorelo.requests) == 6 and fake_sleep.delays == [1.0] * 5  # the default is 5 retries
 
 
 async def test_429_gives_up_when_the_total_wait_would_pass_the_budget(client_factory, mock_gorelo, fake_sleep):
@@ -1544,7 +1566,8 @@ async def test_the_semaphore_is_free_while_a_429_wait_sleeps(client_factory, moc
 
 
 # --------------------------------------------------------------------------
-# Timeouts and connection errors: never retried, writes flagged unconfirmed
+# Timeouts and connection errors: a write is never retried and is flagged unconfirmed; a read is retried once only when
+# its connection was never established (and after a 502, 503 or 504)
 # --------------------------------------------------------------------------
 
 
@@ -1558,13 +1581,14 @@ async def test_a_get_timeout_is_reported_and_not_retried(client_factory, mock_go
     assert len(mock_gorelo.requests) == 1 and fake_sleep.delays == []
 
 
-async def test_a_get_connection_error_is_a_transport_error(client_factory, mock_gorelo):
+async def test_a_get_connection_error_is_a_transport_error(client_factory, mock_gorelo, fake_sleep):
+    # a connection that is never established is the one failure of a read that is sent once more (after 2.0 s)
     mock_gorelo.on("GET", "/v1/clients/7", httpx.ConnectError("refused"))
     async with client_factory() as client:
         with pytest.raises(GoreloAPIError) as info:
             await client.get_one(CLIENT_OP, path_params={"clientId": 7}, tool="t")
     assert info.value.kind == "transport" and info.value.write_unconfirmed is False
-    assert len(mock_gorelo.requests) == 1
+    assert len(mock_gorelo.requests) == 2 and fake_sleep.delays == [2.0]
 
 
 async def test_a_post_timeout_is_not_retried_and_is_marked_write_unconfirmed(client_factory, mock_gorelo, fake_sleep):
@@ -1630,7 +1654,7 @@ FAILURES = {
 async def test_a_failed_post_patch_or_delete_is_sent_exactly_once_and_never_waits(
     client_factory, mock_gorelo, fake_sleep, method, failure_name
 ):
-    # Only a 429 is retried. A timeout, a lost connection and even a 503 that says Retry-After may have
+    # A write is retried on a 429 only. A timeout, a lost connection and even a 503 that says Retry-After may have
     # reached Gorelo, so repeating the write could apply it twice.
     path, call = WRITE_CALLS[method]
     failure, kind = FAILURES[failure_name]
@@ -1643,15 +1667,24 @@ async def test_a_failed_post_patch_or_delete_is_sent_exactly_once_and_never_wait
     assert fake_sleep.delays == []
 
 
+# A read is sent once more, after 2.0 s, when the gateway answers 502, 503 or 504 or the connection is never established.
+# A timeout is never retried. (tests/test_client_rate_limit.py covers the rule in full.)
+RETRIED_ONCE = {"transport", "503-with-retry-after-header", "503-with-retry-after-in-the-body"}
+
+
 @pytest.mark.parametrize("failure_name", sorted(FAILURES))
-async def test_a_failed_read_is_not_retried_either(client_factory, mock_gorelo, fake_sleep, failure_name):
-    failure, _ = FAILURES[failure_name]
+async def test_a_failed_read_is_sent_once_more_only_after_a_gateway_failure_or_a_lost_connection(
+    client_factory, mock_gorelo, fake_sleep, failure_name
+):
+    failure, kind = FAILURES[failure_name]
     mock_gorelo.on("GET", "/v1/clients/7", failure)
     async with client_factory() as client:
         with pytest.raises(GoreloAPIError) as info:
             await client.get_one(CLIENT_OP, path_params={"clientId": 7}, tool="get_client")
-    assert info.value.write_unconfirmed is False
-    assert len(mock_gorelo.requests) == 1 and fake_sleep.delays == []
+    assert info.value.write_unconfirmed is False and info.value.kind == kind
+    retried = failure_name in RETRIED_ONCE
+    assert len(mock_gorelo.requests) == (2 if retried else 1)
+    assert fake_sleep.delays == ([2.0] if retried else [])
 
 
 # --------------------------------------------------------------------------
@@ -2268,7 +2301,7 @@ async def test_log_lines_for_failures_and_retries(client_factory, mock_gorelo, c
     records = [r for r in caplog.records if r.name == "gorelo_client"]
     warnings = [r.getMessage() for r in records if r.levelno == logging.WARNING]
     infos = [r.getMessage() for r in records if r.levelno == logging.INFO]
-    assert len(warnings) == 1 and "429" in warnings[0] and "waiting 2.0s" in warnings[0] and "retry 1 of 3" in warnings[0]
+    assert len(warnings) == 1 and "429" in warnings[0] and "waiting 2.0s" in warnings[0] and "retry 1 of 5" in warnings[0]
     assert len(infos) == 3
     assert "status=200" in infos[0] and "attempts=2" in infos[0]
     assert "status=404" in infos[1] and "path=/v1/clients/2" in infos[1]

@@ -265,7 +265,6 @@ async def test_every_integer_id_parameter_is_strict_so_true_and_text_and_decimal
 
 async def test_the_only_core_tools_with_a_strict_flag_or_level_refuse_text_and_numbers(server, mock_gorelo):
     for name, arguments, param in (
-        ("update_contact", {"contact_id": 5, "job_title": "X", "clear_secondary_email_ok": "true"}, "clear_secondary_email_ok"),
         ("post_alert", {"name": "n", "client_id": 1, "resource": "r", "severity": True}, "severity"),
     ):
         text = await call_tool_error(server, name, arguments)
@@ -281,6 +280,9 @@ TYPICAL_DESCRIPTION = 700
 TYPICAL_PARAMETER = 160
 # update_client carries the 1.4.0 group_ids guidance (read GroupIds first, [9] drops the rest, who sees the client): 795 measured
 DESCRIPTION_OVERRIDES = {"update_client": 810}
+# update_contact.secondary_email says that the API cannot show the list, that the user sees it in the Gorelo app, and so that the
+# model asks the user for the complete list before it replaces it: 203 measured
+PARAMETER_OVERRIDES = {("update_contact", "secondary_email"): 205}
 
 
 async def core_tools(server):
@@ -294,7 +296,7 @@ async def test_every_core_tool_and_parameter_description_stays_within_the_size_l
         assert 40 < len(tool.description) <= MAX_DESCRIPTION, tool.name
         assert len(tool.description) <= DESCRIPTION_OVERRIDES.get(tool.name, TYPICAL_DESCRIPTION), tool.name
         for pname, prop in tool.inputSchema.get("properties", {}).items():
-            assert 0 < len(prop["description"]) <= TYPICAL_PARAMETER, f"{tool.name}.{pname}"
+            assert 0 < len(prop["description"]) <= PARAMETER_OVERRIDES.get((tool.name, pname), TYPICAL_PARAMETER), f"{tool.name}.{pname}"
             assert len(prop["description"]) <= MAX_PARAMETER, f"{tool.name}.{pname}"
 
 
@@ -304,6 +306,7 @@ async def test_every_core_tool_and_parameter_description_stays_within_the_size_l
 # Measured 24_910 bytes for 1.3.0; the limit was 25_300, which left 390 bytes. The eight 1.4.0 tools (contract 05200951c89e: six
 # agent and asset type reads, list_scripts, get_script) add 6_301 bytes and the new 1.4.0 parameters of list_clients, update_client,
 # list_alerts and post_alert 1_630 more: 32_841 measured, the limit is that plus about 1 percent rounded up to the next 100.
+# For 1.4.2 the group measures 32_890 bytes (64 more, the update_contact texts about the secondary emails); the limit is unchanged.
 CORE_BUDGET_BYTES = 33_200
 
 

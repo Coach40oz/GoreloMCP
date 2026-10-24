@@ -41,7 +41,8 @@ LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-late
 # are compacted centrally (server.compact_input_schema), so what the modules still control is their descriptions.
 # Measured 16185 bytes (descriptions are 7685 of them); the limit is that plus 10 percent, rounded up to the next 100.
 # 16727 bytes after the shape text of 2026-10-03 (the list and get descriptions name the User, Ticket and Task objects);
-# the limit did not move.
+# the limit did not move. 17118 bytes before the closed ticket sentence of create_time_entry and 17229 after it
+# (111 bytes); the limit did not move.
 MODULE_BUDGET_BYTES = 17900
 VERIFY_AFTER_SHAPE = "the write may have been applied, so verify it with a read before repeating it"
 
@@ -319,6 +320,64 @@ async def test_the_descriptions_carry_what_the_documentation_requires(server_fac
     ):
         assert fragment in delete, fragment
     assert "Must be true to delete" in param("delete_time_entry", "confirm")
+
+
+# Two 409s that Gorelo gives: create_time_entry when the ticket is closed and update_time_entry when the entry is invoiced.
+# create_time_entry says the first one before the call, so the model stops asking Gorelo for it. update_time_entry and delete_time_entry already said the second one, so they got no new sentence.
+CLOSED_TICKET_SENTENCE = (
+    "Gorelo refuses time on a closed ticket (409), so log time before closing, or ask the user before reopening it."
+)
+INVOICED_UPDATE_SENTENCE = "Approved, completed, invoiced and void entries are refused (409)."
+INVOICED_DELETE_SENTENCE = (
+    "Approved, completed, invoiced and void entries, and entries on a closed ticket (reopen it first), are refused (409)."
+)
+
+
+async def test_create_time_entry_carries_the_closed_ticket_409_fact_and_the_others_keep_their_invoiced_sentence(server_factory):
+    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
+    text = {name: " ".join(tool.description.split()) for name, tool in listed.items()}
+    create = text["create_time_entry"]
+    assert create.count(CLOSED_TICKET_SENTENCE) == 1  # once: added, never stacked
+    # the template order: what to know before the call comes before "Side effects:"
+    assert create.index(CLOSED_TICKET_SENTENCE) < create.index("Side effects:")
+    # no other tool repeats it (the default tool list has a byte budget)
+    assert [name for name, tool_text in text.items() if CLOSED_TICKET_SENTENCE in tool_text] == ["create_time_entry"]
+    # update and delete already said that an invoiced entry is refused (409), and got no second sentence for it
+    assert text["update_time_entry"].count(INVOICED_UPDATE_SENTENCE) == 1
+    assert text["delete_time_entry"].count(INVOICED_DELETE_SENTENCE) == 1
+    for name in ("update_time_entry", "delete_time_entry"):
+        assert "An invoiced entry cannot be" not in text[name], name
+        assert text[name].count("invoiced") == 1, name
+    # the delete text has its own words for a closed ticket, so the create sentence is not repeated there
+    assert "ask the user before reopening it" not in text["delete_time_entry"]
+    for name in ("create_time_entry", "update_time_entry", "delete_time_entry"):
+        assert len(listed[name].description) <= DESCRIPTION_MAX, (name, len(listed[name].description))
+        for param_name, schema in listed[name].inputSchema["properties"].items():
+            assert len(schema["description"]) <= PARAM_DESCRIPTION_MAX, (name, param_name)
+
+
+def test_the_closed_ticket_sentence_is_short():
+    # the default tools/list has a measured byte budget (tests/test_integration.py): the sentence costs its length in every conversation
+    assert len(CLOSED_TICKET_SENTENCE) <= 110
+    assert EM_DASH not in CLOSED_TICKET_SENTENCE and EN_DASH not in CLOSED_TICKET_SENTENCE
+
+
+def test_the_module_documents_the_two_409_refusals():
+    doc = " ".join(time_entries.__doc__.split())
+    assert "Two 409 refusals that Gorelo gives (plain refusals, Gorelo wrote nothing)" in doc
+    assert "create_time_entry (" in doc and "update_time_entry (" in doc
+    assert "times" not in doc.split("Two 409 refusals")[1].split("Shape of a record")[0]  # the module text carries no counts
+    assert "Time entry cannot be created because ticket <id> is closed. Reopen the ticket first." in doc
+    assert (
+        "Time entry <id> cannot be changed because it has already been invoiced. "
+        "Only a time entry that is still open can be changed."
+    ) in doc
+    assert "Gorelo's own 409 text still reaches the model unchanged" in doc
+    assert "The descriptions of update_time_entry and delete_time_entry already say that an invoiced entry is refused (409)" in doc
+    # the two Gorelo codes are kept by the tests (the tool modules carry no number of 3 or more digits in their text, see
+    # tests/test_tools_tickets.py), so the module text does not repeat them
+    assert "070205" not in doc and "070206" not in doc
+    assert "The tests keep the Gorelo codes of those two answers." in doc
 
 
 async def test_the_package_tool_list_stays_within_its_budget(server_factory):
@@ -997,6 +1056,17 @@ async def test_create_time_entry_reports_a_409_with_gorelos_reason(server, mock_
     assert len(mock_gorelo.requests) == 1
 
 
+async def test_create_time_entry_shows_the_409_for_a_closed_ticket_as_a_plain_refusal(server, mock_gorelo):
+    # Gorelo's own answer for a closed ticket (the ticket id here is invented)
+    message = f"Time entry cannot be created because ticket {uid(1)} is closed. Reopen the ticket first."
+    mock_gorelo.on("POST", "/v1/time-entries", error_envelope(409, [("070205", message)]))
+    text = await call_tool_error(server, "create_time_entry", CREATE_BASE)
+    assert text == rejected("create_time_entry", 409, "070205", message)
+    # Gorelo refused, so nothing was written: no "verify with a read" advice, no retry, no re-read
+    assert "may have been applied" not in text and "Verify" not in text and "did not confirm" not in text
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("POST", "/v1/time-entries")]
+
+
 async def test_create_time_entry_reports_an_unknown_ticket_404(server, mock_gorelo):
     mock_gorelo.on("POST", "/v1/time-entries", error_envelope(404, [("070404", "Ticket not found.", "TicketId")]))
     text = await call_tool_error(server, "create_time_entry", CREATE_BASE)
@@ -1263,6 +1333,19 @@ async def test_update_time_entry_reports_the_409_for_an_entry_that_is_not_open(s
     mock_gorelo.on("PATCH", "/v1/time-entries/55", error_envelope(409, [("070901", message)]))
     text = await call_tool_error(server, "update_time_entry", {"time_entry_id": 55, "comment": "x"})
     assert text == rejected("update_time_entry", 409, "070901", message)
+
+
+async def test_update_time_entry_shows_the_409_for_an_invoiced_entry_as_a_plain_refusal(server, mock_gorelo):
+    # Gorelo's own answer for an invoiced entry (the entry id here is invented)
+    message = (
+        "Time entry 55 cannot be changed because it has already been invoiced. "
+        "Only a time entry that is still open can be changed."
+    )
+    mock_gorelo.on("PATCH", "/v1/time-entries/55", error_envelope(409, [("070206", message)]))
+    text = await call_tool_error(server, "update_time_entry", {"time_entry_id": 55, "comment": "x"})
+    assert text == rejected("update_time_entry", 409, "070206", message)
+    assert "may have been applied" not in text and "Verify" not in text and "did not confirm" not in text
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("PATCH", "/v1/time-entries/55")]
 
 
 async def test_update_time_entry_reports_a_404_for_the_id(server, mock_gorelo):

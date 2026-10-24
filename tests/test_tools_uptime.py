@@ -1031,7 +1031,9 @@ async def test_a_failed_read_before_a_target_change_sends_no_patch(server, mock_
     mock_gorelo.on("GET", CHECK_PATH, failure)
     text = await call_tool_error(server, "update_uptime_check", {"check_id": CHECK_ID, "port": 8443})
     assert expected in text
-    assert mock_gorelo.calls("PATCH") == [] and len(mock_gorelo.calls("GET")) == 1  # nothing written, nothing retried
+    # nothing written; the read is asked once more only after a refused connection (1.4.2)
+    assert mock_gorelo.calls("PATCH") == []
+    assert len(mock_gorelo.calls("GET")) == (2 if isinstance(failure, httpx.ConnectError) else 1)
 
 
 @pytest.mark.parametrize(

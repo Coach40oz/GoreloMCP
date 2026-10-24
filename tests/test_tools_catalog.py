@@ -590,6 +590,30 @@ async def test_list_items_local_errors_name_the_param_and_send_nothing(server, m
     assert mock_gorelo.requests == []
 
 
+@pytest.mark.parametrize("param, wire", [("skus", "Skus"), ("vendors", "Vendors"), ("part_numbers", "PartNumbers")])
+async def test_a_text_filter_of_101_values_is_sent_because_its_limit_was_not_measured(server, mock_gorelo, param, wire):
+    # Gorelo's 100 was measured on ID filters only: a text filter is not capped here, Gorelo answers for itself
+    mock_gorelo.on("GET", ITEMS, paged_envelope([]))
+    values = [f"{param}-{n}" for n in range(1, 102)]
+    result = await call_tool(server, "list_items", {param: values})
+    assert mock_gorelo.last.query[wire] == ",".join(values)
+    assert result["filters"] == {param: values}
+
+
+@pytest.mark.parametrize("param", ["category_ids", "subcategory_ids", "client_ids"])
+async def test_an_id_filter_of_101_ids_is_refused_before_any_http_call(server, mock_gorelo, param):
+    error = await call_tool_error(server, "list_items", {param: list(range(1, 102))})
+    assert f"{param}: Gorelo accepts at most 100 ids in one filter, got 101" in error
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("param, wire", [("category_ids", "CategoryIds"), ("subcategory_ids", "SubcategoryIds"), ("client_ids", "ClientIds")])
+async def test_an_id_filter_of_exactly_100_ids_is_sent(server, mock_gorelo, param, wire):
+    mock_gorelo.on("GET", ITEMS, paged_envelope([]))
+    await call_tool(server, "list_items", {param: list(range(1, 101))})
+    assert mock_gorelo.last.query[wire] == ",".join(str(n) for n in range(1, 101))
+
+
 async def test_query_of_exactly_200_characters_is_accepted(server, mock_gorelo):
     mock_gorelo.on("GET", ITEMS, paged_envelope([]))
     await call_tool(server, "list_items", {"query": "x" * 200})
