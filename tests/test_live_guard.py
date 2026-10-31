@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from conftest import TEST_API_KEY, call_tool, call_tool_error, call_tool_raw, envelope, paged_envelope, path_params_for, uid
+from conftest import TEST_API_KEY, call_tool, call_tool_error, call_tool_raw, envelope, in_order, paged_envelope, path_params_for, uid
 from site_helper import REAL_VERIFY, site_config_env  # noqa: F401  (autouse: points GORELO_SITE_CONFIG at invented values)
 
 from gorelo_client import normalize_op_key
@@ -61,6 +61,7 @@ OTHER_TASK_SIDE, OTHER_TASK_APPROVAL = 712, uid(87)
 STRANGER_SIDE, STRANGER_APPROVAL = 799, uid(98)  # conversations of a customer's ticket: this run never created them
 FOREIGN = uid(99)  # a customer's record: this run never created it
 APPROVED_LABEL = f"{RUN} approved invoice"  # the label of the one Approved invoice a run announces
+APPROVED_TAX = 7  # the id of the one tax-exempt rate (Percentage 0) the run picked from list_taxes and recorded in the intent
 DROP = object()
 
 
@@ -124,7 +125,7 @@ def option_cleanup_guard(manifest) -> LiveGuard:
 def approved_manifest(tmp_path: Path) -> Manifest:
     """The manifest of a run that announced its one Approved invoice and has created nothing yet."""
     run = Manifest(RUN, tmp_path / "approved.json")
-    run.intent("invoice", APPROVED_LABEL, {"status_id": 5})
+    run.intent("invoice", APPROVED_LABEL, {"status_id": 5, "tax_id": APPROVED_TAX, "tax_percentage": 0})
     return run
 
 
@@ -1360,6 +1361,9 @@ def test_post_time_entries_allows_a_run_ticket_or_task_and_the_operator_user(gua
         ({"UserId": str(OPERATOR_USER)}, "UserId must be a JSON integer"),
         ({"UserId": float(OPERATOR_USER)}, "UserId must be a JSON integer"),
         ({"Comment": "mail bob@example.com"}, "email address that is not allowed"),
+        # a backdated entry (the spec's CreatedOn) is never made by the live harness
+        ({"CreatedOn": "2026-01-01T10:00:00Z"}, "CreatedOn may not be sent on a time entry"),
+        ({"CreatedOn": None}, "CreatedOn may not be sent on a time entry"),
     ],
 )
 def test_post_time_entries_blocks_other_tickets_and_users(guard, overrides, match):
@@ -1928,7 +1932,7 @@ def test_invoice_ids_are_matched_by_what_they_name_not_by_how_they_are_spelled(m
 # the one Approved invoice (allow_approved_invoice): off by default, and then only under strict rules
 # --------------------------------------------------------------------------
 
-APPROVED_LINE = {"ItemId": INVOICE_ITEM, "Quantity": 1, "Description": APPROVED_LABEL, "UnitPrice": 1.0, "TaxId": None}
+APPROVED_LINE = {"ItemId": INVOICE_ITEM, "Quantity": 1, "Description": APPROVED_LABEL, "UnitPrice": 1.0, "TaxId": APPROVED_TAX}
 # exactly the body create_approved_invoice sends for the matrix's approved invoice (a test below compares it with the real tool)
 APPROVED_BODY = {"ClientId": TEST_CLIENT, "StatusId": 5, "Reference": APPROVED_LABEL, "LineItems": [APPROVED_LINE]}
 DRAFT_OR_APPROVED = "StatusId must be exactly the JSON integer 1 \\(Draft\\) or 5 \\(Approved\\), not "
@@ -2053,16 +2057,22 @@ def test_a_draft_is_still_allowed_with_the_option_under_the_old_rules(approved_m
         ({"LineItems": [make(APPROVED_LINE, BillableStatusId=True)]}, "BillableStatusId must be absent or exactly the JSON integer 1"),
         ({"LineItems": [make(APPROVED_LINE, BillableStatusId="1")]}, "BillableStatusId must be absent or exactly the JSON integer 1"),
         ({"LineItems": [make(APPROVED_LINE, BillableStatusId=1.0)]}, "BillableStatusId must be absent or exactly the JSON integer 1"),
-        # no tax: TaxId present and exactly null, so Gorelo can neither fall back to the item's own tax nor pick one
-        ({"LineItems": [make(APPROVED_LINE, TaxId=DROP)]}, "LineItems\\[0\\].TaxId must be given explicitly as null"),
-        ({"LineItems": [make(APPROVED_LINE, TaxId=5)]}, "LineItems\\[0\\].TaxId must be given explicitly as null"),
-        ({"LineItems": [make(APPROVED_LINE, TaxId=1)]}, "LineItems\\[0\\].TaxId must be given explicitly as null"),
-        ({"LineItems": [make(APPROVED_LINE, TaxId=0)]}, "LineItems\\[0\\].TaxId must be given explicitly as null"),
-        ({"LineItems": [make(APPROVED_LINE, TaxId=False)]}, "LineItems\\[0\\].TaxId must be given explicitly as null"),
-        ({"LineItems": [make(APPROVED_LINE, TaxId="")]}, "LineItems\\[0\\].TaxId must be given explicitly as null"),
-        ({"LineItems": [make(APPROVED_LINE, TaxId="5")]}, "LineItems\\[0\\].TaxId must be given explicitly as null"),
-        ({"LineItems": [make(APPROVED_LINE, TaxId=[])]}, "LineItems\\[0\\].TaxId must be given explicitly as null"),
-        ({"LineItems": [make(APPROVED_LINE, TaxId={})]}, "LineItems\\[0\\].TaxId must be given explicitly as null"),
+        # no tax: TaxId is the JSON integer id of the tax-exempt rate: a null or an omitted TaxId applies the item's own tax (Gorelo's text)
+        ({"LineItems": [make(APPROVED_LINE, TaxId=DROP)]}, "LineItems\\[0\\].TaxId must be the JSON integer id of the tax-exempt rate"),
+        ({"LineItems": [make(APPROVED_LINE, TaxId=None)]}, "LineItems\\[0\\].TaxId must be the JSON integer id of the tax-exempt rate"),
+        ({"LineItems": [make(APPROVED_LINE, TaxId=0)]}, "LineItems\\[0\\].TaxId must be the JSON integer id of the tax-exempt rate"),
+        ({"LineItems": [make(APPROVED_LINE, TaxId=-7)]}, "LineItems\\[0\\].TaxId must be the JSON integer id of the tax-exempt rate"),
+        ({"LineItems": [make(APPROVED_LINE, TaxId=False)]}, "LineItems\\[0\\].TaxId must be the JSON integer id of the tax-exempt rate"),
+        ({"LineItems": [make(APPROVED_LINE, TaxId=True)]}, "LineItems\\[0\\].TaxId must be the JSON integer id of the tax-exempt rate"),
+        ({"LineItems": [make(APPROVED_LINE, TaxId=7.0)]}, "LineItems\\[0\\].TaxId must be the JSON integer id of the tax-exempt rate"),
+        ({"LineItems": [make(APPROVED_LINE, TaxId="")]}, "LineItems\\[0\\].TaxId must be the JSON integer id of the tax-exempt rate"),
+        ({"LineItems": [make(APPROVED_LINE, TaxId="7")]}, "LineItems\\[0\\].TaxId must be the JSON integer id of the tax-exempt rate"),
+        ({"LineItems": [make(APPROVED_LINE, TaxId=[])]}, "LineItems\\[0\\].TaxId must be the JSON integer id of the tax-exempt rate"),
+        ({"LineItems": [make(APPROVED_LINE, TaxId={})]}, "LineItems\\[0\\].TaxId must be the JSON integer id of the tax-exempt rate"),
+        # an integer that is not the recorded rate picks a tax the run never proved exempt
+        ({"LineItems": [make(APPROVED_LINE, TaxId=5)]}, "TaxId \\(5\\) is not the tax-exempt rate the run recorded in the intent \\(tax_id 7, Percentage 0\\)"),
+        ({"LineItems": [make(APPROVED_LINE, TaxId=1)]}, "TaxId \\(1\\) is not the tax-exempt rate the run recorded"),
+        ({"LineItems": [make(APPROVED_LINE, TaxId=APPROVED_TAX + 1)]}, "is not the tax-exempt rate the run recorded"),
         # the $1 the harness allows, and no more
         ({"LineItems": [make(APPROVED_LINE, Quantity=2)]}, "the line bills more than 1"),
         ({"LineItems": [make(APPROVED_LINE, UnitPrice=1.01)]}, "the line bills more than 1"),
@@ -2099,22 +2109,53 @@ def test_a_refused_attempt_does_not_use_up_the_one_approved_invoice(approved_gua
     assert approved_guard.allowed_count == 1
 
 
-def test_an_approved_invoice_needs_no_tax_asked_for_explicitly_and_a_refusal_for_it_keeps_the_one_create(approved_guard):
-    # the cap on Quantity x UnitPrice is before tax, so the line must say TaxId null itself: an omitted TaxId
-    # falls back to the item's own tax (Gorelo's text) and a number picks a tax, and either would bill more than $1
-    for taxed in (make(APPROVED_LINE, TaxId=DROP), make(APPROVED_LINE, TaxId=5)):
-        error = refused(approved_guard, approved_request(LineItems=[taxed]), "TaxId must be given explicitly as null")
+def test_an_approved_invoice_needs_the_recorded_tax_exempt_rate_and_a_refusal_for_it_keeps_the_one_create(approved_guard):
+    # the cap on Quantity x UnitPrice is before tax, so the line must carry the tax-exempt rate itself: an omitted or null TaxId applies
+    # the item's own tax (Gorelo's 2026-10-29 create text) and another number picks a tax the run never proved exempt
+    for taxed in (make(APPROVED_LINE, TaxId=DROP), make(APPROVED_LINE, TaxId=None)):
+        error = refused(approved_guard, approved_request(LineItems=[taxed]), "TaxId must be the JSON integer id of the tax-exempt rate")
         assert error.label == "POST /invoices" and "the harness limits the one Approved invoice to $1 with no tax" in str(error)
-        assert "omitted TaxId falls back to the item's own tax" in str(error)
+        assert "null or an omitted TaxId applies the item's own tax" in str(error)
+    error = refused(approved_guard, approved_request(LineItems=[make(APPROVED_LINE, TaxId=5)]), "is not the tax-exempt rate the run recorded")
+    assert "the harness limits the one Approved invoice to $1 with no tax" in str(error)
     assert approved_guard.allowed_count == 0 and len(approved_guard.manifest.unresolved_intents()) == 1
-    approved_guard.check(approved_request())  # TaxId null, the line the matrix sends: the one create is still there
+    approved_guard.check(approved_request())  # TaxId the recorded rate, the line the matrix sends: the one create is still there
     assert approved_guard.allowed_count == 1
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        pytest.param({"status_id": 5}, id="no-tax-recorded"),
+        pytest.param({"status_id": 5, "tax_id": APPROVED_TAX}, id="no-percentage-recorded"),
+        pytest.param({"status_id": 5, "tax_id": APPROVED_TAX, "tax_percentage": 8.5}, id="a-rate-above-zero"),
+        pytest.param({"status_id": 5, "tax_id": APPROVED_TAX, "tax_percentage": None}, id="percentage-null"),
+        pytest.param({"status_id": 5, "tax_id": APPROVED_TAX, "tax_percentage": False}, id="percentage-boolean"),
+        pytest.param({"status_id": 5, "tax_id": None, "tax_percentage": 0}, id="tax-id-null"),
+        pytest.param({"status_id": 5, "tax_id": True, "tax_percentage": 0}, id="tax-id-boolean"),
+        pytest.param({"status_id": 5, "tax_id": str(APPROVED_TAX), "tax_percentage": 0}, id="tax-id-text"),
+    ],
+)
+def test_an_approved_invoice_is_refused_when_the_intent_did_not_record_a_tax_exempt_rate_first(tmp_path, details):
+    run = Manifest(RUN, tmp_path / "untaxed.json")
+    run.intent("invoice", APPROVED_LABEL, details)
+    guard = LiveGuard("write", run, allow_approved_invoice=True)
+    refused(guard, approved_request(), "must record tax_id \\(a whole number\\) and tax_percentage exactly 0 in its details before the create")
+    assert guard.allowed_count == 0 and len(run.unresolved_intents()) == 1
+
+
+def test_a_recorded_tax_percentage_of_zero_may_be_an_integer_or_a_float(tmp_path):
+    for index, percentage in enumerate((0, 0.0)):
+        run = Manifest(RUN, tmp_path / f"zero{index}.json")
+        run.intent("invoice", APPROVED_LABEL, {"status_id": 5, "tax_id": APPROVED_TAX, "tax_percentage": percentage})
+        LiveGuard("write", run, allow_approved_invoice=True).check(approved_request())
 
 
 def test_the_tax_rule_is_for_the_approved_invoice_only_a_draft_may_leave_its_tax_to_the_item(guard, cleanup_guard):
     for subject in (guard, cleanup_guard):
         subject.check(build("POST", "/invoices", make(INVOICE_BODY, LineItems=[make(APPROVED_LINE, TaxId=DROP)])))
         subject.check(build("POST", "/invoices", make(INVOICE_BODY, LineItems=[make(APPROVED_LINE, TaxId=5)])))
+        subject.check(build("POST", "/invoices", make(INVOICE_BODY, LineItems=[make(APPROVED_LINE, TaxId=None)])))
 
 
 def test_a_second_approved_invoice_is_refused_by_the_guard_that_allowed_the_first(approved_guard):
@@ -2139,7 +2180,7 @@ def test_the_approved_invoice_needs_an_open_intent_of_kind_invoice_with_status_i
         refused(guard, request, none)
     manifest.intent("invoice", APPROVED_LABEL)  # no details at all
     refused(guard, request, none)
-    seq = manifest.intent("invoice", APPROVED_LABEL, {"status_id": 5})
+    seq = manifest.intent("invoice", APPROVED_LABEL, {"status_id": 5, "tax_id": APPROVED_TAX, "tax_percentage": 0})
     guard.check(request)
     other = LiveGuard("write", manifest, allow_approved_invoice=True)
     manifest.intent_failed(seq, "Gorelo answered 400")  # a settled intent is no longer open
@@ -2147,7 +2188,7 @@ def test_the_approved_invoice_needs_an_open_intent_of_kind_invoice_with_status_i
 
 
 def test_two_open_approved_intents_are_refused_because_one_of_them_may_already_exist(approved_manifest):
-    approved_manifest.intent("invoice", approved_manifest.label("approved invoice 2"), {"status_id": 5})
+    approved_manifest.intent("invoice", approved_manifest.label("approved invoice 2"), {"status_id": 5, "tax_id": APPROVED_TAX, "tax_percentage": 0})
     guard = LiveGuard("write", approved_manifest, allow_approved_invoice=True)
     refused(guard, approved_request(), "2 open invoice intents hold status_id 5")
 
@@ -2157,7 +2198,7 @@ def test_an_invoice_record_that_is_not_a_draft_stops_a_second_approved_invoice(a
     # the first approved invoice was created and recorded (its intent is settled); a second one is announced
     approved_manifest.created("invoice", uid(70), APPROVED_LABEL, {"status_id": status, "number": 1043})
     second = approved_manifest.label("second approved invoice")
-    approved_manifest.intent("invoice", second, {"status_id": 5})
+    approved_manifest.intent("invoice", second, {"status_id": 5, "tax_id": APPROVED_TAX, "tax_percentage": 0})
     guard = LiveGuard("write", approved_manifest, allow_approved_invoice=True)
     error = refused(guard, approved_request(Reference=second), "no other approved invoice may be created in this run")
     assert "already holds 1 invoice record(s) that are not a Draft" in str(error)
@@ -2294,16 +2335,18 @@ def test_the_approved_invoice_option_opens_nothing_else(option_guard, option_cle
 def test_the_rule_table_of_a_guard_with_the_option_says_what_the_option_adds(guard, option_guard):
     plain, extended = guard.rule_table(), option_guard.rule_table()
     changed = sorted(key for key in plain if plain[key] != extended[key])
-    assert changed == ["DELETE /v1/invoices/{invoiceId}", "POST /v1/invoices"]
+    assert changed == ["DELETE /v1/invoices/{invoiceId}", "PATCH /v1/invoices/{invoiceId}", "POST /v1/invoices"]
     for key in changed:  # the text of the default guard is untouched; the option adds one clause
         assert extended[key].startswith(plain[key] + "; with allow_approved_invoice also "), key
     assert "StatusId exactly 5 (Approved) for the one announced approved invoice" in extended["POST /v1/invoices"]
     assert "at most 1 in all" in extended["POST /v1/invoices"] and "never from a cleanup" in extended["POST /v1/invoices"]
-    assert "TaxId present and null (no tax)" in extended["POST /v1/invoices"]  # the line must ask for no tax itself
+    assert "TaxId the id of the tax-exempt rate (Percentage 0) the intent recorded as tax_id" in extended["POST /v1/invoices"]
     assert "invoice recorded with status_id 5, which is voided (StatusId 4, still listed)" in extended["DELETE /v1/invoices/{invoiceId}"]
     assert "Paid (3), Void (4) and an invoice with no recorded status are never deleted" in extended["DELETE /v1/invoices/{invoiceId}"]
     assert "does only with allow_approved_invoice" in plain["DELETE /v1/invoices/{invoiceId}"]
     assert extended["GET /v1/invoices/{invoiceId}/pdf"] == plain["GET /v1/invoices/{invoiceId}/pdf"]  # the export is Draft only
+    assert "the body exactly {StatusId: 5} (approve_invoice)" in extended["PATCH /v1/invoices/{invoiceId}"]  # the update approves too
+    assert "approve_via_update true" in extended["PATCH /v1/invoices/{invoiceId}"] and "never from a cleanup" in extended["PATCH /v1/invoices/{invoiceId}"]
 
 
 def test_every_write_operation_of_the_spec_is_blocked_for_a_stranger_with_the_option_too(option_guard, option_cleanup_guard):
@@ -2324,7 +2367,9 @@ def test_the_guard_docstring_describes_the_approved_invoice_rules():
     assert "set only by write_matrix --with-approved-invoice" not in text
     for said in (
         "`allow_approved_invoice=True` (off by default; only write_matrix --with-approved-invoice and cleanup --void-approved set it)",
-        "with a TaxId that is present and exactly null (the line's no_tax: Gorelo falls back to the item's own tax when TaxId is omitted",
+        "with a TaxId that is a JSON integer equal to the `tax_id` the run recorded in the details of that same open intent",
+        "which must also hold `tax_percentage` exactly 0",
+        "so null, an omitted TaxId and any other number are refused",
         "Only with allow_approved_invoice=True is StatusId exactly the JSON integer 5 allowed too",
         "the body has no RecipientEmails key at all (not even null or empty)",
         "Reference is the label of an open manifest intent of kind \"invoice\" whose details hold status_id 5",
@@ -2641,7 +2686,7 @@ def contact_record(ident, **extra):
         "Id": ident, "FirstName": "MCPTEST", "LastName": "Contact", "ClientId": TEST_CLIENT, "LocationId": None,
         "PrimaryEmail": "mcptest-20991002101500@example.invalid", "MobilePhone": "5555550142", "MobilePhoneCountryCode": "US",
         "OfficePhone": None, "OfficePhoneCountryCode": None, "JobTitle": None, "Department": None, "TimeZone": None,
-        "Description": None, "Alias": None, "Status": {"Id": 1, "Name": "Active"}, "IsTemporaryContact": False,
+        "Description": None, "Alias": None, "Status": {"Id": 1, "Name": "Active"}, "IsTemporaryContact": False, "TagIds": [],
     }
     record.update(extra)
     return record
@@ -2789,7 +2834,7 @@ async def test_export_invoice_pdf_goes_through_the_guard_for_a_run_created_invoi
 
 APPROVED_ARGUMENTS = {
     "client_id": TEST_CLIENT,
-    "line_items": [{"item_id": INVOICE_ITEM, "quantity": 1, "unit_price": 1.0, "description": APPROVED_LABEL, "no_tax": True}],
+    "line_items": [{"item_id": INVOICE_ITEM, "quantity": 1, "unit_price": 1.0, "description": APPROVED_LABEL, "tax_id": APPROVED_TAX}],
     "reference": APPROVED_LABEL,
     "confirm": True,
 }
@@ -2816,20 +2861,60 @@ async def test_the_create_approved_invoice_tool_sends_exactly_the_body_the_appro
 
 
 @pytest.mark.parametrize(
-    "tax",
-    [pytest.param({}, id="no-tax-choice"), pytest.param({"tax_id": 5}, id="a-tax-picked"), pytest.param({"no_tax": False}, id="no-tax-false")],
+    ("tax", "message"),
+    [
+        pytest.param({}, "blocked POST /invoices: LineItems[0].TaxId must be the JSON integer id of the tax-exempt rate", id="no-tax-choice"),
+        pytest.param({"no_tax": False}, "blocked POST /invoices: LineItems[0].TaxId must be the JSON integer id of the tax-exempt rate", id="no-tax-false"),
+        pytest.param({"tax_id": 5}, "blocked POST /invoices: LineItems[0].TaxId (5) is not the tax-exempt rate the run recorded", id="another-tax"),
+    ],
 )
-async def test_an_approved_invoice_line_that_does_not_ask_for_no_tax_is_stopped_before_a_request_leaves(
-    server_factory, mock_gorelo, approved_manifest, tax
+async def test_an_approved_invoice_line_without_the_recorded_tax_exempt_rate_is_stopped_before_a_request_leaves(
+    server_factory, mock_gorelo, approved_manifest, tax, message
 ):
     guard = LiveGuard("write", approved_manifest, require_intents=True, allow_approved_invoice=True)
     server = server_factory(event_hooks={"request": [guard]}, destructive=True)
     mock_gorelo.on("POST", "/v1/invoices", envelope({"Id": uid(70)}))
     line = {"item_id": INVOICE_ITEM, "quantity": 1, "unit_price": 1.0, "description": APPROVED_LABEL, **tax}
     text = await call_tool_error(server, "create_approved_invoice", {**APPROVED_ARGUMENTS, "line_items": [line]})
-    assert "blocked POST /invoices: LineItems[0].TaxId must be given explicitly as null" in text
-    assert mock_gorelo.requests == [] and guard.tripped and guard.allowed_count == 0
+    assert message in text
+    assert mock_gorelo.requests == [] and guard.allowed_count == 0
     assert len(approved_manifest.unresolved_intents()) == 1  # nothing was used up: the matrix's own line still goes through
+
+
+TAX_ROWS = [
+    {"Id": APPROVED_TAX + 1, "Name": "Sales tax", "Code": "ST", "Percentage": 8.5, "IsDefault": True, "SubTaxes": []},
+    {"Id": APPROVED_TAX, "Name": "Tax Exempt TAX", "Code": "Tax Exempt", "Percentage": 0.0, "IsDefault": False, "SubTaxes": []},
+]
+
+
+async def test_no_tax_on_the_approved_tool_looks_the_exempt_rate_up_and_sends_the_id_the_run_recorded(
+    server_factory, mock_gorelo, approved_manifest
+):
+    guard = LiveGuard("write", approved_manifest, require_intents=True, allow_approved_invoice=True)
+    server = server_factory(event_hooks={"request": [guard]}, destructive=True)
+    new = uid(70)
+    mock_gorelo.on("GET", "/v1/taxes", envelope(TAX_ROWS))
+    mock_gorelo.on("POST", "/v1/invoices", envelope({"Id": new}))
+    mock_gorelo.on("GET", f"/v1/invoices/{new}", envelope(invoice_record(new, Status={"Id": 5, "Name": "Approved"}, Reference=APPROVED_LABEL)))
+    line = {"item_id": INVOICE_ITEM, "quantity": 1, "unit_price": 1.0, "description": APPROVED_LABEL, "no_tax": True}
+    result = await call_tool(server, "create_approved_invoice", {**APPROVED_ARGUMENTS, "line_items": [line]})
+    assert result["Id"] == new and not guard.tripped and f"tax id {APPROVED_TAX}" in result["note"]
+    assert [(r.method, r.path) for r in mock_gorelo.requests][:2] == [("GET", "/v1/taxes"), ("POST", "/v1/invoices")]
+    assert mock_gorelo.calls("POST")[0].json == APPROVED_BODY  # the very body of tax_id=7: the guard compared TaxId with the recorded id
+
+
+async def test_no_tax_on_the_approved_tool_is_stopped_by_the_guard_when_the_rate_is_not_the_one_recorded(
+    server_factory, mock_gorelo, approved_manifest
+):
+    guard = LiveGuard("write", approved_manifest, require_intents=True, allow_approved_invoice=True)
+    server = server_factory(event_hooks={"request": [guard]}, destructive=True)
+    other = [{**TAX_ROWS[1], "Id": APPROVED_TAX + 5}]  # the tenant's exempt rate is not the id the intent recorded
+    mock_gorelo.on("GET", "/v1/taxes", envelope(other))
+    mock_gorelo.on("POST", "/v1/invoices", envelope({"Id": uid(70)}))
+    line = {"item_id": INVOICE_ITEM, "quantity": 1, "unit_price": 1.0, "description": APPROVED_LABEL, "no_tax": True}
+    text = await call_tool_error(server, "create_approved_invoice", {**APPROVED_ARGUMENTS, "line_items": [line]})
+    assert f"LineItems[0].TaxId ({APPROVED_TAX + 5}) is not the tax-exempt rate the run recorded" in text
+    assert mock_gorelo.calls("POST") == [] and guard.tripped and guard.allowed_count == 1  # only the plain read left
 
 
 async def test_a_recipient_makes_the_tool_call_stop_before_a_request_leaves_even_with_the_option(
@@ -2959,6 +3044,7 @@ NEVER_OPS = {
     "DELETE /v1/contracts/{contractId}",
     "POST /v1/payments",
     "DELETE /v1/payments/{paymentId}",
+    "PATCH /v1/assets/agents/{agentAssetId}",
 }
 # a GET that is not a plain read: write mode lets it through only for a run-created invoice
 CONDITIONAL_GETS = {"GET /v1/invoices/{invoiceId}/pdf"}
@@ -3117,7 +3203,10 @@ def test_no_operation_is_spelled_two_ways_across_the_exact_keyed_tables():
     renamed = {key.replace("{invoiceId}", "{invoiceID}"): name for key, name in guard_module._HANDLER_NAMES.items()}
     assert "DELETE /v1/invoices/{invoiceID}" in renamed
     conflicts = guard_module._spelling_conflicts(guard_module._PATH_KINDS, renamed)
-    assert conflicts == {"DELETE /v1/invoices/{}": ["DELETE /v1/invoices/{invoiceID}", "DELETE /v1/invoices/{invoiceId}"]}
+    assert conflicts == {  # the PATCH of an invoice (1.5.0) has a path rule and a handler too
+        "DELETE /v1/invoices/{}": ["DELETE /v1/invoices/{invoiceID}", "DELETE /v1/invoices/{invoiceId}"],
+        "PATCH /v1/invoices/{}": ["PATCH /v1/invoices/{invoiceID}", "PATCH /v1/invoices/{invoiceId}"],
+    }
     with pytest.raises(RuntimeError, match="spells an operation two ways") as caught:
         guard_module._check_one_spelling_per_operation(guard_module._PATH_KINDS, renamed)
     assert "DELETE /v1/invoices/{invoiceID} and DELETE /v1/invoices/{invoiceId}" in str(caught.value)
@@ -4267,3 +4356,851 @@ def test_the_facts_of_a_client_are_active_only_for_status_1_matched_by_the_id():
     assert facts(None, None).shown() == "of a status that could not be read"
     assert facts(4, "Arch<script>").shown() == "in status 4"  # a name that is not plain text is not repeated
     assert facts(4, None).shown() == "in status 4"
+
+
+# --------------------------------------------------------------------------
+# release 1.5.0 (contract 6c30770dffc0): the opt-in areas and the new rules
+# --------------------------------------------------------------------------
+
+ALERT, ALERT_SECOND, ALERT_UNRECORDED = uid(201), uid(202), uid(203)
+ASSET_TYPE, LOCATION, DOMAIN, CHARGE, CONTRACT = 4101, 4201, 4301, 4401, 4501
+INVOICE_TO_APPROVE, INVOICE_OTHER_DRAFT = uid(204), uid(205)
+TASK_COMMENT = uid(206)
+RUN_DOMAIN = RUN.lower() + ".example"
+ALL_AREAS = ("alert_status", "asset_types", "client_locations", "client_domains", "product_charges", "invoice_update", "contracts")
+
+
+@pytest.fixture
+def area_manifest(manifest) -> Manifest:
+    """The manifest of a run that recorded one record of every kind the 1.5.0 areas write."""
+    label = manifest.label
+    manifest.created("alert", ALERT, label("alert"), {"client_id": TEST_CLIENT, "status_before": 1})
+    manifest.created("alert", ALERT_SECOND, label("alert"), {"client_id": SECOND, "status_before": 1})  # recorded, but not the test client's
+    manifest.created("asset_type", ASSET_TYPE, label("asset type"))
+    manifest.created("client_location", LOCATION, label("location"), {"client_id": TEST_CLIENT})
+    manifest.created("client_domain", DOMAIN, label("domain"), {"client_id": TEST_CLIENT, "name": RUN_DOMAIN})
+    manifest.created("product_charge", CHARGE, label("product charge"), {"ticket_id": TICKET_NONE, "client_id": TEST_CLIENT})
+    manifest.created("contract", CONTRACT, label("contract"), {"client_id": TEST_CLIENT})
+    manifest.created(
+        "invoice", INVOICE_TO_APPROVE, label("invoice"),
+        {"status_id": 1, "number": 1050, "approve_via_update": True, "total": 1.0, "total_tax": 0.0},
+    )
+    manifest.created("invoice", INVOICE_OTHER_DRAFT, label("other invoice"), {"status_id": 1, "number": 1051})
+    manifest.created("project_comment", TASK_COMMENT, label("task comment"), {"project_id": PROJECT, "task_id": TASK})
+    return manifest
+
+
+def area_guard(manifest, *areas, **options) -> LiveGuard:
+    return LiveGuard("write", manifest, allow_areas=areas, **options)
+
+
+@pytest.fixture
+def full_guard(area_manifest) -> LiveGuard:
+    return area_guard(area_manifest, *ALL_AREAS)
+
+
+@pytest.fixture
+def closed_guard(area_manifest) -> LiveGuard:
+    """A guard that enabled no area: every rule of an area is closed."""
+    return LiveGuard("write", area_manifest)
+
+
+@pytest.fixture
+def area_cleanup_guard(area_manifest) -> LiveGuard:
+    return LiveGuard("write", area_manifest, cleanup=True)
+
+
+def test_allow_areas_names_only_the_known_areas_in_write_mode_and_never_a_cleanup(manifest):
+    assert guard_module.OPT_IN_AREAS == ALL_AREAS
+    assert LiveGuard("write", manifest).allow_areas == frozenset()
+    assert LiveGuard("write", manifest, allow_areas=["contracts", "alert_status"]).allow_areas == {"contracts", "alert_status"}
+    with pytest.raises(ValueError, match="unknown allow_areas \\['payments'\\]"):
+        LiveGuard("write", manifest, allow_areas=["payments"])
+    with pytest.raises(ValueError, match="allow_areas only makes sense in write mode"):
+        LiveGuard("read", None, allow_areas=["contracts"])
+    with pytest.raises(ValueError, match="a cleanup guard takes no allow_areas"):
+        LiveGuard("write", manifest, cleanup=True, allow_areas=["contracts"])
+
+
+def test_the_agent_patch_is_never_allowed_in_any_mode(full_guard, closed_guard, area_cleanup_guard, read_guard):
+    request = build("PATCH", f"/assets/agents/{uid(5)}", {"Description": "x"})
+    for subject in (full_guard, closed_guard, area_cleanup_guard, read_guard):
+        with pytest.raises(GuardViolation):
+            subject.check(request)
+    assert full_guard.rule_table()["PATCH /v1/assets/agents/{agentAssetId}"].startswith("never: the live harness has no agent writes")
+    assert guard_module._never_reason("PATCH /v1/assets/agents/{id}") is not None
+
+
+def test_every_rule_of_an_area_is_closed_without_the_area_and_in_a_cleanup(closed_guard, area_cleanup_guard):
+    requests = [
+        build("PATCH", "/alerts", {"AlertIds": [ALERT], "StatusId": 2}),
+        build("PATCH", f"/alerts/{ALERT}", {"StatusId": 2}),
+        build("POST", "/assets/types", {"Name": f"{RUN} type"}),
+        build("PATCH", f"/assets/types/{ASSET_TYPE}", {"Name": f"{RUN} renamed"}),
+        build("POST", f"/clients/{TEST_CLIENT}/locations", {"Name": f"{RUN} location"}),
+        build("PATCH", f"/clients/{TEST_CLIENT}/locations/{LOCATION}", {"Name": f"{RUN} location 2"}),
+        build("POST", f"/clients/{TEST_CLIENT}/domains", {"Name": RUN_DOMAIN, "ExpirationDate": "2030-01-01"}),
+        build("PATCH", f"/clients/{TEST_CLIENT}/domains/{DOMAIN}", {"ExpirationDate": "2031-01-01"}),
+        build("POST", "/product-charges", {"TicketId": TICKET_NONE, "ItemId": INVOICE_ITEM, "Quantity": 1, "BillableStatusId": 2}),
+        build("PATCH", f"/product-charges/{CHARGE}", {"Quantity": 2}),
+        build("PATCH", f"/invoices/{INVOICE_OTHER_DRAFT}", {"Reference": f"{RUN} ref"}),
+        build("POST", "/contracts", {"ClientId": TEST_CLIENT, "Name": f"{RUN} contract", "ServiceLines": [{"Name": "x", "LaborTermsId": 2}]}),
+        build("PATCH", f"/contracts/{CONTRACT}", {"Name": f"{RUN} contract 2"}),
+    ]
+    for request in requests:
+        with pytest.raises(GuardViolation, match="is closed unless the run enabled the|cleanup only restores|a cleanup only archives"):
+            closed_guard.check(request)
+        with pytest.raises(GuardViolation, match="is closed unless the run enabled the|cleanup only restores|a cleanup only archives"):
+            area_cleanup_guard.check(request)
+
+
+# -- alerts ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", [1, 2])
+def test_an_alert_the_manifest_recorded_for_the_test_client_may_be_dismissed_or_restored(full_guard, status):
+    full_guard.check(build("PATCH", "/alerts", {"AlertIds": [ALERT], "StatusId": status}))
+    full_guard.check(build("PATCH", "/alerts", {"AlertIds": [ALERT.upper()], "StatusId": status}))  # spelled in capitals: the same alert
+    full_guard.check(build("PATCH", f"/alerts/{ALERT}", {"StatusId": status}))
+    assert not full_guard.tripped
+
+
+@pytest.mark.parametrize(
+    "body, match",
+    [
+        ({"AlertIds": [ALERT], "StatusId": 3, "TicketId": TICKET_NONE}, "StatusId must be exactly the JSON integer 1 .* or 2"),
+        ({"AlertIds": [ALERT], "StatusId": 3}, "3 \\(Ticketed\\) links a ticket and is final"),
+        ({"AlertIds": [ALERT], "StatusId": 2, "TicketId": TICKET_NONE}, "never links an alert to a ticket"),
+        ({"AlertIds": [ALERT]}, "StatusId must be exactly"),
+        ({"AlertIds": [ALERT], "StatusId": True}, "StatusId must be exactly"),
+        ({"AlertIds": [ALERT], "StatusId": "2"}, "StatusId must be exactly"),
+        ({"AlertIds": [ALERT], "StatusId": 2.0}, "StatusId must be exactly"),
+        ({"AlertIds": [ALERT_UNRECORDED], "StatusId": 2}, "is not a alert created by this run"),
+        ({"AlertIds": [ALERT_SECOND], "StatusId": 2}, "is not recorded as an alert of the test client 9501"),
+        ({"AlertIds": [ALERT, ALERT_UNRECORDED], "StatusId": 2}, "AlertIds\\[1\\] .* is not a alert created by this run"),
+        ({"AlertIds": [], "StatusId": 2}, "AlertIds must be a list of 1 to 100"),
+        ({"AlertIds": [ALERT] * 101, "StatusId": 2}, "AlertIds must be a list of 1 to 100"),
+        ({"AlertIds": ALERT, "StatusId": 2}, "AlertIds must be a list of 1 to 100"),
+        ({"AlertIds": ["not-a-uuid"], "StatusId": 2}, "AlertIds\\[0\\] must be a UUID string"),
+        ({"AlertIds": [7], "StatusId": 2}, "AlertIds\\[0\\] must be a UUID string"),
+        ({"StatusId": 2}, "AlertIds must be a list"),
+    ],
+)
+def test_an_alert_change_outside_the_rules_is_refused(full_guard, body, match):
+    refused(full_guard, build("PATCH", "/alerts", body), match)
+
+
+def test_the_single_alert_patch_follows_the_same_rules(full_guard):
+    refused(full_guard, build("PATCH", f"/alerts/{ALERT_UNRECORDED}", {"StatusId": 2}), "is not a alert created by this run")
+    refused(full_guard, build("PATCH", f"/alerts/{ALERT_SECOND}", {"StatusId": 2}), "not recorded as an alert of the test client")
+    refused(full_guard, build("PATCH", f"/alerts/{ALERT}", {"StatusId": 3, "TicketId": TICKET_NONE}), "StatusId must be exactly")
+    refused(full_guard, build("PATCH", "/alerts/not-a-uuid", {"StatusId": 2}), "not a valid alert id")
+
+
+def test_a_cleanup_restores_a_recorded_alert_to_new_and_does_nothing_else_to_it(area_cleanup_guard):
+    area_cleanup_guard.check(build("PATCH", "/alerts", {"AlertIds": [ALERT], "StatusId": 1}))
+    area_cleanup_guard.check(build("PATCH", f"/alerts/{ALERT}", {"StatusId": 1}))
+    refused(area_cleanup_guard, build("PATCH", "/alerts", {"AlertIds": [ALERT], "StatusId": 2}), "a cleanup only restores")
+    refused(area_cleanup_guard, build("PATCH", "/alerts", {"AlertIds": [ALERT_UNRECORDED], "StatusId": 1}), "not a alert created by this run")
+    refused(area_cleanup_guard, build("PATCH", "/alerts", {"AlertIds": [ALERT_SECOND], "StatusId": 1}), "not recorded as an alert of the test client")
+
+
+def test_an_alert_is_never_posted_even_with_every_area(full_guard):
+    refused(full_guard, build("POST", "/alerts", {"ClientId": TEST_CLIENT, "Name": "x", "Resource": "y", "Severity": 3}), "never posts alerts")
+
+
+# -- asset types ---------------------------------------------------------------
+
+
+def test_an_asset_type_is_created_renamed_and_deleted_only_when_it_is_the_runs_own(full_guard, area_cleanup_guard):
+    full_guard.check(build("POST", "/assets/types", {"Name": f"{RUN} type"}))
+    full_guard.check(build("PATCH", f"/assets/types/{ASSET_TYPE}", {"Name": f"{RUN} renamed"}))
+    full_guard.check(build("DELETE", f"/assets/types/{ASSET_TYPE}"))
+    area_cleanup_guard.check(build("DELETE", f"/assets/types/{ASSET_TYPE}"))  # a cleanup deletes what a stopped run left
+    refused(full_guard, build("POST", "/assets/types", {"Name": "Laptop"}), "Name must start with the run id")
+    refused(full_guard, build("POST", "/assets/types", {"Name": "MCPTEST-20000101000000 type"}), "Name must start with the run id")
+    refused(full_guard, build("POST", "/assets/types", {}), "Name is required")
+    refused(full_guard, build("PATCH", f"/assets/types/{ASSET_TYPE}", {"Name": "Laptop"}), "Name must start with the run id")
+    refused(full_guard, build("PATCH", "/assets/types/3", {"Name": f"{RUN} x"}), "is not a asset type created by this run")
+    refused(full_guard, build("DELETE", "/assets/types/3"), "is not a asset type created by this run")
+    refused(area_cleanup_guard, build("DELETE", "/assets/types/3"), "is not a asset type created by this run")
+    refused(area_cleanup_guard, build("POST", "/assets/types", {"Name": f"{RUN} type"}), "is closed unless the run enabled the asset_types")
+
+
+@pytest.mark.parametrize(
+    "method, path",
+    [
+        ("POST", f"/assets/types/{ASSET_TYPE}"),
+        ("PATCH", "/assets/types"),
+        ("DELETE", "/assets/types"),
+        ("PATCH", f"/assets/types/{ASSET_TYPE}/x"),
+        ("POST", "/assets/tags"),
+        ("PATCH", f"/assets/policies/{ASSET_TYPE}"),
+    ],
+)
+def test_nothing_else_under_assets_is_opened_by_the_asset_type_rules(full_guard, area_cleanup_guard, method, path):
+    for subject in (full_guard, area_cleanup_guard):
+        with pytest.raises(GuardViolation):
+            subject.check(build(method, path, {"Name": f"{RUN} x"} if method != "DELETE" else None))
+
+
+# -- client locations and domains -----------------------------------------------
+
+
+LOCATION_BODY = {"Name": f"{RUN} location", "Address1": "1 Test Street", "City": "Seattle", "Phone": "2025550142", "PhoneCountryCode": "US"}
+
+
+def test_a_location_of_the_test_client_with_the_run_name_may_be_created_changed_and_deleted(full_guard, area_cleanup_guard):
+    full_guard.check(build("POST", f"/clients/{TEST_CLIENT}/locations", LOCATION_BODY))
+    full_guard.check(build("POST", f"/clients/{TEST_CLIENT}/locations", make(LOCATION_BODY, IsDefault=False, BillingContactIds=[])))
+    full_guard.check(build("PATCH", f"/clients/{TEST_CLIENT}/locations/{LOCATION}", {"City": "Tacoma"}))
+    full_guard.check(build("PATCH", f"/clients/{TEST_CLIENT}/locations/{LOCATION}", {"Name": f"{RUN} renamed", "Phone": None}))
+    full_guard.check(build("DELETE", f"/clients/{TEST_CLIENT}/locations/{LOCATION}"))
+    area_cleanup_guard.check(build("DELETE", f"/clients/{TEST_CLIENT}/locations/{LOCATION}"))
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        ({"Name": "HQ"}, "Name must be text that starts with the run id"),
+        ({"Name": DROP}, "Name must be text that starts with the run id"),
+        ({"IsDefault": True}, "IsDefault must be absent, null or false"),
+        ({"IsDefaultBilling": True}, "IsDefaultBilling must be absent, null or false"),
+        ({"PrimaryContactId": RUN_CONTACT}, "PrimaryContactId must be absent or null"),
+        ({"BillingContactIds": [RUN_CONTACT]}, "BillingContactIds must be absent, null or empty"),
+        ({"BillingContactIds": f"{RUN_CONTACT}"}, "BillingContactIds must be absent, null or empty"),
+    ],
+)
+def test_a_location_with_another_name_or_a_default_flag_or_a_contact_is_refused(full_guard, overrides, match):
+    refused(full_guard, build("POST", f"/clients/{TEST_CLIENT}/locations", make(LOCATION_BODY, **overrides)), match)
+
+
+def test_locations_and_domains_are_never_written_on_another_client_or_for_a_record_the_run_did_not_make(full_guard, area_cleanup_guard):
+    for other in (SECOND, RUN_CLIENT, 7001):
+        refused(full_guard, build("POST", f"/clients/{other}/locations", LOCATION_BODY), "the path clientId must be 9501")
+        refused(full_guard, build("POST", f"/clients/{other}/domains", {"Name": RUN_DOMAIN}), "the path clientId must be 9501")
+        refused(full_guard, build("PATCH", f"/clients/{other}/locations/{LOCATION}", {"City": "x"}), "the path clientId must be 9501")
+        refused(full_guard, build("PATCH", f"/clients/{other}/domains/{DOMAIN}", {"ExpirationDate": "2031-01-01"}), "the path clientId must be 9501")
+        for subject in (full_guard, area_cleanup_guard):
+            refused(subject, build("DELETE", f"/clients/{other}/locations/{LOCATION}"), "the path clientId must be 9501")
+            refused(subject, build("DELETE", f"/clients/{other}/domains/{DOMAIN}"), "the path clientId must be 9501")
+    for subject in (full_guard, area_cleanup_guard):
+        refused(subject, build("DELETE", f"/clients/{TEST_CLIENT}/locations/777"), "is not a client location created by this run")
+        refused(subject, build("DELETE", f"/clients/{TEST_CLIENT}/domains/777"), "is not a client domain created by this run")
+    refused(full_guard, build("PATCH", f"/clients/{TEST_CLIENT}/locations/777", {"City": "x"}), "is not a client location created by this run")
+
+
+def test_a_record_the_run_made_on_another_client_is_not_written_or_deleted_on_the_test_client(area_manifest):
+    area_manifest.created("client_location", 4202, area_manifest.label("elsewhere"), {"client_id": SECOND})
+    area_manifest.created("client_domain", 4302, area_manifest.label("elsewhere"), {"client_id": SECOND})
+    guard = area_guard(area_manifest, *ALL_AREAS)
+    refused(guard, build("PATCH", f"/clients/{TEST_CLIENT}/locations/4202", {"City": "x"}), "location 4202 is not recorded for the test client")
+    refused(guard, build("DELETE", f"/clients/{TEST_CLIENT}/locations/4202"), "location 4202 is not recorded for the test client")
+    refused(guard, build("PATCH", f"/clients/{TEST_CLIENT}/domains/4302", {"ExpirationDate": "2031-01-01"}), "domain 4302 is not recorded")
+    refused(guard, build("DELETE", f"/clients/{TEST_CLIENT}/domains/4302"), "domain 4302 is not recorded")
+
+
+@pytest.mark.parametrize("name", [RUN_DOMAIN, RUN_DOMAIN.upper(), f"{RUN.lower()}-2.example"])
+def test_a_domain_under_the_reserved_example_tld_with_the_run_id_is_allowed(full_guard, name):
+    full_guard.check(build("POST", f"/clients/{TEST_CLIENT}/domains", {"Name": name, "ExpirationDate": "2030-01-01"}))
+    full_guard.check(build("PATCH", f"/clients/{TEST_CLIENT}/domains/{DOMAIN}", {"Name": name}))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "example.com", "customer.example.net", f"{RUN.lower()}.example.com", f"{RUN.lower()}.example.net", f"{RUN.lower()}.invalid", "mcptest-1.example",
+        f"x{RUN.lower()}.example", f"{RUN.lower()}.sub.example", f"{RUN.lower()}.example.", f"{RUN.lower()} .example", f"{RUN.lower()}é.example",
+        None, 7, "",
+    ],
+)
+def test_a_domain_that_is_not_the_run_id_under_example_is_refused(full_guard, name):
+    refused(full_guard, build("POST", f"/clients/{TEST_CLIENT}/domains", {"Name": name}), "Name must be a domain under the reserved .example TLD")
+    refused(full_guard, build("PATCH", f"/clients/{TEST_CLIENT}/domains/{DOMAIN}", {"Name": name}), "Name must be a domain under the reserved")
+
+
+def test_a_domain_update_that_leaves_the_name_alone_is_allowed(full_guard):
+    full_guard.check(build("PATCH", f"/clients/{TEST_CLIENT}/domains/{DOMAIN}", {"ExpirationDate": "2032-05-05"}))
+    full_guard.check(build("PATCH", f"/clients/{TEST_CLIENT}/domains/{DOMAIN}", {"ExpirationDate": None}))  # reset
+
+
+# -- product charges -------------------------------------------------------------
+
+CHARGE_BODY = {"TicketId": TICKET_NONE, "ItemId": INVOICE_ITEM, "Quantity": 1, "UnitPrice": 1.0, "BillableStatusId": 2}
+
+
+def test_a_no_charge_product_on_a_run_ticket_of_the_test_client_may_be_created_changed_and_deleted(full_guard, area_cleanup_guard):
+    full_guard.check(build("POST", "/product-charges", CHARGE_BODY))
+    full_guard.check(build("PATCH", f"/product-charges/{CHARGE}", {"Quantity": 2, "Description": None}))
+    full_guard.check(build("PATCH", f"/product-charges/{CHARGE}", {"BillableStatusId": 2}))
+    full_guard.check(build("DELETE", f"/product-charges/{CHARGE}"))
+    area_cleanup_guard.check(build("DELETE", f"/product-charges/{CHARGE}"))
+    refused(area_cleanup_guard, build("DELETE", "/product-charges/777"), "is not a product charge created by this run")
+    refused(full_guard, build("DELETE", "/product-charges/777"), "is not a product charge created by this run")
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        ({"TicketId": FOREIGN}, "TicketId .* is not a ticket created by this run"),
+        ({"TicketId": TICKET_OPERATOR}, "is not recorded as a ticket of the test client"),  # a run ticket of the SECOND client
+        ({"TicketId": DROP}, "TicketId must be a UUID string"),
+        ({"TicketId": None}, "TicketId must be a UUID string"),
+        ({"TaskId": TASK}, "TaskId must be absent or null"),
+        ({"ItemId": DROP}, "ItemId must be a UUID string"),
+        ({"ItemId": "1"}, "ItemId must be a UUID string"),
+        ({"BillableStatusId": 1}, "BillableStatusId must be exactly the JSON integer 2"),
+        ({"BillableStatusId": DROP}, "BillableStatusId must be exactly the JSON integer 2"),
+        ({"BillableStatusId": True}, "BillableStatusId must be exactly the JSON integer 2"),
+        ({"BillableStatusId": "2"}, "BillableStatusId must be exactly the JSON integer 2"),
+    ],
+)
+def test_a_product_charge_outside_the_rules_is_refused(full_guard, overrides, match):
+    refused(full_guard, build("POST", "/product-charges", make(CHARGE_BODY, **overrides)), match)
+
+
+def test_a_product_charge_may_not_be_switched_to_billable_and_must_be_the_runs(full_guard):
+    refused(full_guard, build("PATCH", f"/product-charges/{CHARGE}", {"BillableStatusId": 1}), "BillableStatusId must be exactly")
+    refused(full_guard, build("PATCH", "/product-charges/777", {"Quantity": 2}), "is not a product charge created by this run")
+
+
+# -- invoice update and approval by update -------------------------------------------
+
+
+def test_a_run_created_draft_may_be_updated_with_the_area(full_guard):
+    path = f"/invoices/{INVOICE_OTHER_DRAFT}"
+    full_guard.check(build("PATCH", path, {"Reference": f"{RUN} reference", "InvoiceDate": "2026-10-02", "DueDate": "2026-10-20"}))
+    full_guard.check(build("PATCH", path, {"Reference": None}))
+    full_guard.check(build("PATCH", path, {"LineItems": [{"Id": uid(31)}, {"ItemId": INVOICE_ITEM, "Quantity": 1}]}))
+    full_guard.check(build("PATCH", path, {"LineItems": [{"Id": uid(31), "Quantity": 2, "UnitPrice": 3.0, "TaxId": None}]}))
+    # no_tax sends an integer TaxId (the Tax Exempt rate) since 1.5.0: a line of an update or a new line may carry it
+    full_guard.check(build("PATCH", path, {"LineItems": [{"Id": uid(31), "TaxId": 202}, {"ItemId": INVOICE_ITEM, "Quantity": 1, "TaxId": 202}]}))
+
+
+@pytest.mark.parametrize(
+    "body, match",
+    [
+        ({}, "the body names nothing to change"),
+        ({"Reference": "customer ref"}, "Reference must be text that starts with the run id"),
+        ({"Reference": 7}, "Reference must be text that starts with the run id"),
+        ({"InvoiceDate": 20261002}, "InvoiceDate must be a date text"),
+        ({"DueDate": True}, "DueDate must be a date text"),
+        ({"InvoiceTemplateId": 5}, "may not be changed"),
+        ({"InvoiceEmailTemplateId": 5}, "may not be changed"),
+        ({"BrandingThemeId": uid(7)}, "may not be changed"),
+        ({"LineItems": []}, "LineItems must be a non-empty list"),
+        ({"LineItems": "x"}, "LineItems must be a non-empty list"),
+        ({"LineItems": [7]}, "LineItems\\[0\\] must be an object"),
+        ({"LineItems": [{"Quantity": 1}]}, "has no Id, so it is a new line and its ItemId must be a UUID string"),
+        ({"LineItems": [{"ItemId": "x", "Quantity": 1}]}, "has no Id, so it is a new line"),
+        ({"LineItems": [{"Id": "x"}]}, "LineItems\\[0\\].Id must be a UUID string"),
+        ({"LineItems": [{"Id": uid(31), "ItemId": 4}]}, "LineItems\\[0\\].ItemId must be a UUID string"),
+        ({"StatusId": 1}, "StatusId 5 \\(Approved\\) is not allowed"),
+        ({"StatusId": None}, "StatusId 5 \\(Approved\\) is not allowed"),
+        ({"StatusId": 4}, "StatusId 5 \\(Approved\\) is not allowed"),
+    ],
+)
+def test_an_invoice_update_outside_the_rules_is_refused(full_guard, body, match):
+    refused(full_guard, build("PATCH", f"/invoices/{INVOICE_OTHER_DRAFT}", body), match)
+
+
+def test_only_a_run_created_draft_is_updated(full_guard):
+    refused(full_guard, build("PATCH", f"/invoices/{FOREIGN}", {"Reference": f"{RUN} r"}), "is not a test invoice created by this run")
+    refused(full_guard, build("PATCH", f"/invoices/{INVOICE_APPROVED}", {"Reference": f"{RUN} r"}), "is not recorded as a Draft")
+    refused(full_guard, build("PATCH", f"/invoices/{INVOICE_NO_STATUS}", {"Reference": f"{RUN} r"}), "is not recorded as a Draft")
+    refused(full_guard, build("PATCH", f"/invoices/{INVOICE_ITEM}", {"Reference": f"{RUN} r"}), "is not a test invoice created by this run")
+
+
+def test_the_approval_by_update_is_closed_without_allow_approved_invoice_whatever_the_areas(full_guard, area_cleanup_guard):
+    body = {"StatusId": 5}
+    refused(full_guard, build("PATCH", f"/invoices/{INVOICE_TO_APPROVE}", body), "StatusId 5 \\(Approved\\) is not allowed: approving pushes")
+    refused(area_cleanup_guard, build("PATCH", f"/invoices/{INVOICE_TO_APPROVE}", body), "StatusId 5 \\(Approved\\) is not allowed")
+
+
+@pytest.fixture
+def approve_manifest(tmp_path: Path) -> Manifest:
+    """A run whose only invoices are Drafts, one of them recorded for the approval by update (the approved run has no other area)."""
+    run = Manifest(RUN, tmp_path / "approve.json")
+    run.created(
+        "invoice", INVOICE_TO_APPROVE, run.label("invoice"),
+        {"status_id": 1, "number": 1050, "approve_via_update": True, "total": 1.0, "total_tax": 0.0},
+    )
+    run.created("invoice", INVOICE_OTHER_DRAFT, run.label("other invoice"), {"status_id": 1, "number": 1051})
+    return run
+
+
+@pytest.fixture
+def approve_guard(approve_manifest) -> LiveGuard:
+    return LiveGuard("write", approve_manifest, allow_approved_invoice=True)
+
+
+def test_one_draft_recorded_for_the_approval_may_be_approved_by_update_once(approve_guard):
+    request = build("PATCH", f"/invoices/{INVOICE_TO_APPROVE}", {"StatusId": 5})
+    approve_guard.check(request)
+    refused(approve_guard, request, "this run already approved an invoice")  # the guard allows one approval
+    other = build("PATCH", f"/invoices/{INVOICE_OTHER_DRAFT}", {"StatusId": 5})
+    refused(approve_guard, other, "this run already approved an invoice")
+    assert approve_guard.writes_allowed == 1
+
+
+def test_a_draft_not_recorded_for_the_approval_is_not_approved_by_update(approve_guard):
+    refused(approve_guard, build("PATCH", f"/invoices/{INVOICE_OTHER_DRAFT}", {"StatusId": 5}), "approve_via_update is not true")
+
+
+@pytest.mark.parametrize(
+    "changes, match",
+    [
+        ({"approve_via_update": False}, "approve_via_update is not true"),
+        ({"approve_via_update": "yes"}, "approve_via_update is not true"),
+        ({"total": 1.01}, "not recorded with a total above 0 and at most 1"),
+        ({"total": 0}, "not recorded with a total above 0 and at most 1"),
+        ({"total": None}, "not recorded with a total above 0"),
+        ({"total": True}, "not recorded with a total above 0"),
+        ({"total_tax": 0.07}, "not recorded with total_tax 0"),
+        ({"total_tax": None}, "not recorded with total_tax 0"),
+        ({"status_id": 5}, "is not recorded as a Draft"),
+        ({"status_id": None}, "is not recorded as a Draft"),
+    ],
+)
+def test_an_approval_by_update_needs_what_the_matrix_recorded_from_its_read_of_the_draft(approve_manifest, changes, match):
+    approve_manifest.update_details("invoice", INVOICE_TO_APPROVE, **changes)
+    guard = LiveGuard("write", approve_manifest, allow_approved_invoice=True)
+    refused(guard, build("PATCH", f"/invoices/{INVOICE_TO_APPROVE}", {"StatusId": 5}), match)
+    assert guard._approved_creates == 0  # a refusal does not use up the one approval
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"StatusId": 5, "Reference": f"{RUN} r"},
+        {"StatusId": 5, "LineItems": [{"Id": uid(31), "Quantity": 100}]},
+        {"StatusId": 5, "DueDate": "2030-01-01"},
+        {"StatusId": "5"},
+        {"StatusId": 5.0},
+        {"StatusId": True},
+        {"StatusId": 4},
+    ],
+)
+def test_an_approval_by_update_is_the_status_alone(approve_guard, body):  # the approve_guard's manifest holds Drafts only
+    refused(approve_guard, build("PATCH", f"/invoices/{INVOICE_TO_APPROVE}", body), "an approval by update is the body|StatusId 5")
+
+
+def test_an_approval_by_update_is_refused_for_an_invoice_the_run_did_not_make_or_next_to_another_approved_one(area_manifest):
+    approve_guard = LiveGuard("write", area_manifest, allow_approved_invoice=True)
+    refused(approve_guard, build("PATCH", f"/invoices/{FOREIGN}", {"StatusId": 5}), "is not a test invoice created by this run")
+    refused(approve_guard, build("PATCH", f"/invoices/{INVOICE_APPROVED}", {"StatusId": 5}), "is not recorded as a Draft")
+    refused(approve_guard, build("PATCH", f"/invoices/{INVOICE_TO_APPROVE}", {"StatusId": 5}), "already holds 2 invoice record\\(s\\) that are not a Draft")
+
+
+def test_an_approval_by_update_refuses_the_second_approved_invoice_after_a_created_approved_one(tmp_path):
+    run = Manifest(RUN, tmp_path / "second.json")
+    run.created("invoice", INVOICE_TO_APPROVE, run.label("invoice"), {"status_id": 1, "approve_via_update": True, "total": 1.0, "total_tax": 0})
+    guard = LiveGuard("write", run, allow_approved_invoice=True)
+    guard.check(build("PATCH", f"/invoices/{INVOICE_TO_APPROVE}", {"StatusId": 5}))
+    run.update_details("invoice", INVOICE_TO_APPROVE, status_id=5)  # the matrix writes the stored status after the answer
+    other = uid(207)
+    run.created("invoice", other, run.label("another"), {"status_id": 1, "approve_via_update": True, "total": 1.0, "total_tax": 0})
+    refused(guard, build("PATCH", f"/invoices/{other}", {"StatusId": 5}), "this run already approved an invoice")
+    # and the approved invoice is voided like the other approved invoice: recorded as 5, with the option
+    guard.check(build("DELETE", f"/invoices/{INVOICE_TO_APPROVE}"))
+
+
+# -- contracts ------------------------------------------------------------------------
+
+CONTRACT_LINE = {"Name": f"{RUN} line", "LaborTermsId": 2, "LineItems": [{"ItemId": INVOICE_ITEM, "Quantity": 1}]}
+CONTRACT_BODY = {"ClientId": TEST_CLIENT, "Name": f"{RUN} contract", "ServiceLines": [CONTRACT_LINE]}
+
+
+def test_an_hourly_contract_of_the_test_client_with_the_run_name_may_be_created_changed_and_archived(full_guard, area_cleanup_guard):
+    full_guard.check(build("POST", "/contracts", CONTRACT_BODY))
+    # the keys the contracts area sends: per-hour details with a rate type, line items with their item fields
+    line = make(CONTRACT_LINE, PerHourDetails={"RateTypeId": 1})
+    line["LineItems"] = [{"ItemId": INVOICE_ITEM, "Quantity": 1, "UnitPrice": 1.0, "Description": "x", "BillableStatusId": 2}]
+    full_guard.check(build("POST", "/contracts", make(CONTRACT_BODY, ServiceLines=[line])))
+    full_guard.check(build("PATCH", f"/contracts/{CONTRACT}", {"Name": f"{RUN} contract 2"}))
+    full_guard.check(build("PATCH", f"/contracts/{CONTRACT}", {"StatusId": 3}))
+    full_guard.check(build("PATCH", f"/contracts/{CONTRACT}", {"ClientId": TEST_CLIENT, "StatusId": 1}))
+    kept = {"ServiceLines": [{"Id": 11, "LineItems": [{"Id": 21, "Quantity": 2}, {"ItemId": INVOICE_ITEM, "Quantity": 1}]}, {"Id": 12}]}
+    full_guard.check(build("PATCH", f"/contracts/{CONTRACT}", kept))
+    area_cleanup_guard.check(build("PATCH", f"/contracts/{CONTRACT}", {"StatusId": 3}))  # the archive of a stopped run
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        ({"ClientId": SECOND}, "ClientId must be 9501"),
+        ({"ClientId": DROP}, "ClientId is required"),
+        ({"ClientId": str(TEST_CLIENT)}, "ClientId must be a JSON integer"),
+        ({"Name": "Managed services"}, "Name must be text that starts with the run id"),
+        ({"Name": DROP}, "Name must be text that starts with the run id"),
+        ({"AutoApproveAndSend": True}, "AutoApproveAndSend must be absent, null or false"),
+        ({"AutoApproveAndSend": 1}, "AutoApproveAndSend must be absent, null or false"),
+        ({"AutoInvoiceTicketProducts": True}, "AutoInvoiceTicketProducts must be absent, null or false"),
+        ({"ContactIds": [150002]}, "ContactIds holds contact 150002"),
+        ({"ServiceLines": DROP}, "ServiceLines must be a non-empty list"),
+        ({"ServiceLines": []}, "ServiceLines must be a non-empty list"),
+        ({"ServiceLines": [7]}, "ServiceLines\\[0\\] must be an object"),
+        ({"ServiceLines": [make(CONTRACT_LINE, LaborTermsId=3)]}, "Block Hours"),
+        ({"ServiceLines": [make(CONTRACT_LINE, LaborTermsId=3, BlockHoursDetails={"Hours": 5})]}, "Block Hours"),
+        ({"ServiceLines": [make(CONTRACT_LINE, BlockHoursDetails={"Hours": 5})]}, "BlockHoursDetails is never allowed"),
+        ({"ServiceLines": [make(CONTRACT_LINE, LaborTermsId="2")]}, "LaborTermsId must be a JSON integer"),
+        ({"ServiceLines": [make(CONTRACT_LINE, LaborTermsId=9)]}, "LaborTermsId must be one of"),
+        ({"ServiceLines": [make(CONTRACT_LINE, LaborTermsId=DROP)]}, "is a new line, so LaborTermsId is required"),
+        ({"ServiceLines": [make(CONTRACT_LINE, LineItems={"ItemId": INVOICE_ITEM})]}, "LineItems must be a list"),
+        ({"ServiceLines": [make(CONTRACT_LINE, LineItems=[7])]}, "LineItems\\[0\\] must be an object"),
+        ({"ServiceLines": [make(CONTRACT_LINE, LineItems=[{"Quantity": 1}])]}, "has no Id, so it is a new entry"),
+        ({"ServiceLines": [make(CONTRACT_LINE, LineItems=[{"ItemId": "x"}])]}, "has no Id, so it is a new entry"),
+    ],
+)
+def test_a_contract_create_outside_the_rules_is_refused(full_guard, overrides, match):
+    refused(full_guard, build("POST", "/contracts", make(CONTRACT_BODY, **overrides)), match)
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        # a key the contracts area never sends is refused: the allowlist, not a list of the dangerous ones
+        ({"StartDate": "2026-11-01"}, "a contract create may not carry StartDate"),
+        ({"RepeatPeriodId": 2}, "a contract create may not carry RepeatPeriodId"),
+        ({"ProrateTypeId": 1}, "a contract create may not carry ProrateTypeId"),
+        ({"InvoiceTemplateId": 5}, "a contract create may not carry InvoiceTemplateId"),
+        ({"ContactIds": []}, "a contract create may not carry ContactIds"),
+        ({"IsForAllLocations": True}, "a contract create may not carry IsForAllLocations"),
+        ({"DaysUntilDue": 5, "Reference": "x"}, "a contract create may not carry DaysUntilDue, Reference"),
+        ({"ServiceLines": [make(CONTRACT_LINE, AutoInvoiceTime=True)]}, "ServiceLines\\[0\\] may not carry AutoInvoiceTime"),
+        ({"ServiceLines": [make(CONTRACT_LINE, WorkTypeIds=[1])]}, "ServiceLines\\[0\\] may not carry WorkTypeIds"),
+        ({"ServiceLines": [make(CONTRACT_LINE, IncludedTimeGoesToId=1)]}, "ServiceLines\\[0\\] may not carry IncludedTimeGoesToId"),
+        ({"ServiceLines": [make(CONTRACT_LINE, PerHourDetails={"RateTypeId": 2, "HourlyRate": 99})]}, "PerHourDetails may not carry HourlyRate"),
+        ({"ServiceLines": [make(CONTRACT_LINE, UnlimitedHoursDetails={})]}, "may not carry UnlimitedHoursDetails"),
+        ({"ServiceLines": [make(CONTRACT_LINE, LineItems=[{"ItemId": INVOICE_ITEM, "TaxId": 3}])]}, "LineItems\\[0\\] may not carry TaxId"),
+        ({"ServiceLines": [make(CONTRACT_LINE, LineItems=[{"ItemId": INVOICE_ITEM, "StartDate": "2026-11-01"}])]}, "may not carry StartDate"),
+    ],
+)
+def test_a_contract_create_with_a_key_the_area_never_sends_is_refused_by_the_allowlist(full_guard, overrides, match):
+    refused(full_guard, build("POST", "/contracts", make(CONTRACT_BODY, **overrides)), match)
+
+
+@pytest.mark.parametrize(
+    "body, match",
+    [
+        ({"StartDate": "2026-11-01"}, "a contract change may not carry StartDate"),
+        ({"EndDate": "2026-11-01"}, "a contract change may not carry EndDate"),
+        ({"Reference": "x"}, "a contract change may not carry Reference"),
+        ({"RepeatPeriodId": 2}, "a contract change may not carry RepeatPeriodId"),
+        ({"Name": f"{RUN} c", "BrandingThemeId": 2}, "a contract change may not carry BrandingThemeId"),
+        ({"ServiceLines": [{"Id": 11, "WorkRoleIds": [1]}]}, "ServiceLines\\[0\\] may not carry WorkRoleIds"),
+        ({"ServiceLines": [{"Id": 11, "LineItems": [{"Id": 21, "DiscountPercent": 50}]}]}, "LineItems\\[0\\] may not carry DiscountPercent"),
+    ],
+)
+def test_a_contract_change_with_a_key_the_area_never_sends_is_refused_by_the_allowlist(full_guard, body, match):
+    refused(full_guard, build("PATCH", f"/contracts/{CONTRACT}", body), match)
+
+
+@pytest.mark.parametrize(
+    "body, match",
+    [
+        ({}, "the body names nothing to change"),
+        ({"ClientId": SECOND}, "ClientId must be 9501"),
+        ({"Name": "Managed services"}, "Name must be text that starts with the run id"),
+        ({"StatusId": 2}, "StatusId must be exactly the JSON integer 1 \\(Active\\) or 3 \\(Archived\\)"),
+        ({"StatusId": "3"}, "StatusId must be exactly"),
+        ({"AutoApproveAndSend": True}, "AutoApproveAndSend must be absent, null or false"),
+        ({"AutoInvoiceTicketProducts": True}, "AutoInvoiceTicketProducts must be absent, null or false"),
+        ({"ServiceLines": [{"Name": "new", "LaborTermsId": 3}]}, "Block Hours"),
+        ({"ServiceLines": [{"Id": 11, "LaborTermsId": 3}]}, "Block Hours"),
+        ({"ServiceLines": [{"Id": 11, "BlockHoursDetails": {"Balance": 5}}]}, "BlockHoursDetails is never allowed"),
+        ({"ServiceLines": [{"Name": "new"}]}, "is a new line, so LaborTermsId is required"),
+        ({"ServiceLines": "x"}, "ServiceLines must be a list"),
+        ({"ServiceLines": [{"Id": 11, "LineItems": [{"Id": "x"}]}]}, "Id must be a JSON integer"),
+    ],
+)
+def test_a_contract_update_outside_the_rules_is_refused(full_guard, body, match):
+    refused(full_guard, build("PATCH", f"/contracts/{CONTRACT}", body), match)
+
+
+def test_only_the_runs_own_contract_is_changed_and_a_contract_is_never_deleted(full_guard, area_cleanup_guard):
+    refused(full_guard, build("PATCH", "/contracts/777", {"Name": f"{RUN} x"}), "is not a contract created by this run")
+    refused(area_cleanup_guard, build("PATCH", "/contracts/777", {"StatusId": 3}), "is not a contract created by this run")
+    for subject in (full_guard, area_cleanup_guard):
+        refused(subject, build("DELETE", f"/contracts/{CONTRACT}"), "never deletes contracts")
+    refused(area_cleanup_guard, build("PATCH", f"/contracts/{CONTRACT}", {"Name": f"{RUN} x"}), "a cleanup only archives a contract")
+    refused(area_cleanup_guard, build("PATCH", f"/contracts/{CONTRACT}", {"StatusId": 1}), "a cleanup only archives a contract")
+    refused(area_cleanup_guard, build("PATCH", f"/contracts/{CONTRACT}", {"StatusId": 3, "Name": f"{RUN} x"}), "a cleanup only archives a contract")
+
+
+# -- comment and approval edits --------------------------------------------------------
+
+
+def test_a_comment_this_run_made_may_be_edited_under_its_own_project_and_task(guard):
+    guard.check(build("PATCH", f"/projects/{PROJECT}/comments/{PROJECT_COMMENT}", {"Body": f"<p>{RUN} edited</p>"}))
+    guard.check(build("PATCH", f"/projects/{PROJECT}/comments/{PROJECT_COMMENT}", {"Body": "<p>x</p>", "UpdatedByName": "MCPTEST", "Attachments": []}))
+    guard.check(build("PATCH", f"/projects/{PROJECT}/comments/{PROJECT_COMMENT}", {"Body": "<p>x</p>", "Attachments": None}))
+
+
+def test_a_task_comment_edit_needs_the_comment_recorded_under_that_task(area_manifest):
+    guard = LiveGuard("write", area_manifest)
+    guard.check(build("PATCH", f"/projects/{PROJECT}/tasks/{TASK}/comments/{TASK_COMMENT}", {"Body": "<p>edited</p>"}))
+    refused(guard, build("PATCH", f"/projects/{PROJECT}/tasks/{OTHER_TASK}/comments/{TASK_COMMENT}", {"Body": "<p>x</p>"}), "does not record this project or task comment under the taskId")
+    refused(guard, build("PATCH", f"/projects/{PROJECT}/tasks/{TASK}/comments/{PROJECT_COMMENT}", {"Body": "<p>x</p>"}), "does not record this project or task comment under the taskId")
+    refused(guard, build("PATCH", f"/projects/{PROJECT}/comments/{TASK_COMMENT}", {"Body": "<p>x</p>"}), "recorded as a task comment")
+    refused(guard, build("PATCH", f"/projects/{OTHER_TASK}/tasks/{TASK}/comments/{TASK_COMMENT}", {"Body": "<p>x</p>"}), "is not a project created by this run")
+
+
+@pytest.mark.parametrize(
+    "path, body, match",
+    [
+        (f"/projects/{PROJECT}/comments/{FOREIGN}", {"Body": "x"}, "is not a project or task comment created by this run"),
+        (f"/projects/{FOREIGN}/comments/{PROJECT_COMMENT}", {"Body": "x"}, "is not a project created by this run"),
+        (f"/projects/{PROJECT}/comments/{PROJECT_COMMENT}", {}, "the body names nothing to change"),
+        (f"/projects/{PROJECT}/comments/{PROJECT_COMMENT}", {"Body": "<img src='data:image/png;base64,AAA'>"}, "embeds an image as a data: URL"),
+        (f"/projects/{PROJECT}/comments/{PROJECT_COMMENT}", {"Body": 5}, "Body must be text"),
+        (f"/projects/{PROJECT}/comments/{PROJECT_COMMENT}", {"Body": "x", "Attachments": [{"Name": "a", "Url": "https://x"}]}, "Attachments must be absent"),
+        (f"/projects/{PROJECT}/comments/{PROJECT_COMMENT}", {"Body": "x", "UpdatedByName": 7}, "UpdatedByName must be text"),
+        (f"/projects/{PROJECT}/comments/{PROJECT_COMMENT}", {"Body": "write to bob@customer.example"}, "email address that is not allowed"),
+    ],
+)
+def test_a_comment_edit_outside_the_rules_is_refused(guard, path, body, match):
+    refused(guard, build("PATCH", path, body), match)
+
+
+def test_a_comment_edit_is_allowed_in_a_cleanup_guard_only_in_the_sense_that_it_never_needs_an_area(area_cleanup_guard):
+    # nothing outward changes with an edit of a Private comment the run made, so no area opens it (and a cleanup has no reason to send one)
+    area_cleanup_guard.check(build("PATCH", f"/projects/{PROJECT}/comments/{PROJECT_COMMENT}", {"Body": "<p>x</p>"}))
+
+
+def test_an_approval_this_run_made_may_be_renamed_under_its_own_ticket_only(guard):
+    approval = APPROVAL_OF[TICKET_NONE]
+    guard.check(build("PATCH", f"/tickets/{TICKET_NONE}/approvals/{approval}", {"Name": f"{RUN} approval renamed"}))
+    refused(guard, build("PATCH", f"/tickets/{TICKET_NONE}/approvals/{approval}", {"Name": "Approve the invoice"}), "Name must be text that starts with the run id")
+    refused(guard, build("PATCH", f"/tickets/{TICKET_NONE}/approvals/{approval}", {}), "Name must be text that starts with the run id")
+    refused(guard, build("PATCH", f"/tickets/{TICKET_CC}/approvals/{approval}", {"Name": f"{RUN} x"}), "does not record this approval under the ticketId")
+    refused(guard, build("PATCH", f"/tickets/{TICKET_NONE}/approvals/9999", {"Name": f"{RUN} x"}), "is not a approval created by this run")
+    refused(guard, build("PATCH", f"/tickets/{FOREIGN}/approvals/{approval}", {"Name": f"{RUN} x"}), "is not a ticket created by this run")
+
+
+# -- payments, the rule table and the documentation ------------------------------------------
+
+
+def test_a_payment_is_never_written_and_every_payment_read_passes(full_guard, read_guard):
+    for method, path, body in (("POST", "/payments", {"InvoiceId": INVOICE, "Amount": 1}), ("DELETE", f"/payments/{FOREIGN}", None)):
+        refused(full_guard, build(method, path, body), "payment")
+    for subject in (full_guard, read_guard):
+        subject.check(build("GET", "/payments"))
+        subject.check(build("GET", f"/payments/{FOREIGN}"))
+
+
+def test_every_new_get_operation_of_the_contract_passes_in_both_modes(full_guard, read_guard):
+    for path in (
+        "/organization/roles", f"/organization/groups/{9}", f"/organization/users/{9}", "/documents/structured", f"/documents/structured/{FOREIGN}",
+        f"/documents/structured/{FOREIGN}/submissions", f"/documents/structured/{FOREIGN}/submissions/{FOREIGN}", f"/alerts/{FOREIGN}",
+        "/assets/policies", "/assets/policies/9", "/assets/tags", "/clients/types", "/clients/custom-fields", f"/clients/{TEST_CLIENT}/locations/9",
+        "/contacts/tags", "/projects/templates", "/tickets/priorities", "/tickets/sources", "/payments", f"/payments/{FOREIGN}",
+        "/product-charges", "/product-charges/9",
+    ):
+        for subject in (full_guard, read_guard):
+            subject.check(build("GET", path))
+    refused(read_guard, build("PATCH", "/alerts", {"AlertIds": [ALERT], "StatusId": 2}), "read mode allows only GET")
+
+
+def test_the_rule_table_says_what_each_new_operation_needs(full_guard):
+    table = full_guard.rule_table()
+    for key, said in {
+        "PATCH /v1/alerts": "only with the alert_status area",
+        "PATCH /v1/alerts/{alertId}": "path ids run-created: alertId; only with the alert_status area",
+        "POST /v1/assets/types": "only with the asset_types area; Name starts with the run id",
+        "PATCH /v1/assets/types/{assetTypeId}": "path ids run-created: assetTypeId; only with the asset_types area",
+        "DELETE /v1/assets/types/{assetTypeId}": "path ids run-created: assetTypeId",
+        "POST /v1/clients/{clientId}/locations": "only with the client_locations area; the path client is the test client",
+        "PATCH /v1/clients/{clientId}/locations/{locationId}": "path ids run-created: locationId; only with the client_locations area",
+        "DELETE /v1/clients/{clientId}/locations/{locationId}": "path ids run-created: locationId; the path client is the test client",
+        "POST /v1/clients/{clientId}/domains": "only with the client_domains area; the path client is the test client",
+        "PATCH /v1/clients/{clientId}/domains/{domainId}": "path ids run-created: domainId; only with the client_domains area",
+        "DELETE /v1/clients/{clientId}/domains/{domainId}": "path ids run-created: domainId; the path client is the test client",
+        "POST /v1/product-charges": "only with the product_charges area; TicketId a run-created ticket of the test client",
+        "PATCH /v1/product-charges/{productChargeId}": "path ids run-created: productChargeId; only with the product_charges area",
+        "DELETE /v1/product-charges/{productChargeId}": "path ids run-created: productChargeId",
+        "PATCH /v1/invoices/{invoiceId}": "path ids run-created: invoiceId; a run-created invoice recorded as a Draft; only with the invoice_update area",
+        "POST /v1/contracts": "only with the contracts area; ClientId is the test client",
+        "PATCH /v1/contracts/{contractId}": "path ids run-created: contractId; a run-created contract; only with the contracts area",
+        "PATCH /v1/projects/{projectId}/comments/{commentId}": "path ids run-created: projectId, commentId",
+        "PATCH /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}": "path ids run-created: projectId, taskId, commentId",
+        "PATCH /v1/tickets/{ticketId}/approvals/{approvalId}": "path ids run-created: ticketId, approvalId",
+    }.items():
+        assert table[key].startswith(said), (key, table[key])
+    assert table["DELETE /v1/contracts/{contractId}"].startswith("never: the live harness never deletes contracts")
+    assert table["POST /v1/payments"].startswith("never") and table["DELETE /v1/payments/{paymentId}"].startswith("never")
+    assert "StatusId 5" not in table["PATCH /v1/invoices/{invoiceId}"]  # the plain guard does not mention the approval; the option adds it
+
+
+def test_the_guard_docstring_describes_the_1_5_0_areas_and_every_new_create():
+    text = " ".join(guard_module.__doc__.split())
+    for said in (
+        "`allow_areas` (empty by default; only write_matrix --with-<area> sets it, never a cleanup)",
+        "The 1.5.0 areas (contract 6c30770dffc0)",
+        "An alert is NOT created by the run",
+        "The guard never lets a contract be deleted (a contract is archived: StatusId 3) and never a payment be written",
+        "approve_invoice, PATCH /invoices/{invoiceId} with {StatusId: 5}",
+        "approve_via_update true, total above 0",
+        "PATCH /assets/agents/{agentAssetId} never (the harness has no agent writes",
+        "Name is <run id>[-text].example (the reserved .example TLD)",
+    ):
+        assert said in text, said
+    assert set(guard_module.OPT_IN_AREAS) == set(ALL_AREAS)
+    assert {_CREATES[key] for key in _CREATES if key.startswith(("POST /v1/assets/types", "POST /v1/product", "POST /v1/contracts", "POST /v1/clients/"))} == {
+        "asset_type", "product_charge", "contract", "client_location", "client_domain",
+    }
+
+
+def test_every_new_create_needs_an_open_intent_of_its_kind(area_manifest):
+    guard = area_guard(area_manifest, *ALL_AREAS, require_intents=True)
+    for request, kind in (
+        (build("POST", "/assets/types", {"Name": f"{RUN} type"}), "asset_type"),
+        (build("POST", f"/clients/{TEST_CLIENT}/locations", LOCATION_BODY), "client_location"),
+        (build("POST", f"/clients/{TEST_CLIENT}/domains", {"Name": RUN_DOMAIN}), "client_domain"),
+        (build("POST", "/product-charges", CHARGE_BODY), "product_charge"),
+        (build("POST", "/contracts", CONTRACT_BODY), "contract"),
+    ):
+        refused(guard, request, f"no open intent of kind '{kind}'")
+        seq = area_manifest.intent(kind, area_manifest.label(f"new {kind}"))
+        guard.check(request)
+        area_manifest.intent_failed(seq, "test")
+
+
+# -- the real tools of 1.5.0 in front of the guard ----------------------------------------------------------------------------------
+
+
+async def test_update_agent_is_stopped_before_the_patch_leaves_even_with_every_area(server_factory, mock_gorelo, full_guard):
+    agent = uid(77)
+    mock_gorelo.on("GET", f"/v1/assets/agents/{agent}", envelope({"Id": agent, "Description": None, "HardwareTypeId": None, "ContactId": None}))
+    mock_gorelo.on("PATCH", f"/v1/assets/agents/{agent}", envelope({"Id": agent}))
+    server = server_factory(event_hooks={"request": [full_guard]}, destructive=True)
+    text = await call_tool_error(server, "update_agent", {"agent_id": agent, "description": "x"})
+    assert "blocked PATCH" in text and "writes under /assets/ are never allowed" in text
+    assert mock_gorelo.requests == [] and full_guard.tripped  # the PATCH never left the process
+
+
+async def test_set_alert_status_for_an_alert_the_run_did_not_record_is_stopped_before_a_request_leaves(server_factory, mock_gorelo, full_guard):
+    mock_gorelo.on("PATCH", "/v1/alerts", envelope({"UpdatedIds": [ALERT_UNRECORDED]}))
+    server = server_factory(event_hooks={"request": [full_guard]}, destructive=True)
+    text = await call_tool_error(server, "set_alert_status", {"alert_ids": [ALERT_UNRECORDED], "status": "dismissed"})
+    assert "AlertIds[0]" in text and "is not a alert created by this run" in text
+    assert mock_gorelo.requests == [] and full_guard.tripped
+
+
+async def test_set_alert_status_ticketed_is_stopped_by_the_guard_even_for_a_recorded_alert(server_factory, mock_gorelo, full_guard):
+    mock_gorelo.on("PATCH", "/v1/alerts", envelope({"UpdatedIds": [ALERT]}))
+    server = server_factory(event_hooks={"request": [full_guard]}, destructive=True)
+    text = await call_tool_error(server, "set_alert_status", {"alert_ids": [ALERT], "status": "ticketed", "ticket_id": TICKET_NONE})
+    assert "StatusId must be exactly the JSON integer 1" in text and mock_gorelo.requests == []
+
+
+async def test_set_alert_status_for_a_recorded_alert_goes_through_with_the_area(server_factory, mock_gorelo, full_guard):
+    mock_gorelo.on("PATCH", "/v1/alerts", envelope({"UpdatedIds": [ALERT]}))
+    server = server_factory(event_hooks={"request": [full_guard]}, destructive=True)
+    result = await call_tool(server, "set_alert_status", {"alert_ids": [ALERT], "status": "dismissed"})
+    assert result["UpdatedIds"] == [ALERT] and mock_gorelo.requests[0].json == {"AlertIds": [ALERT], "StatusId": 2}
+    assert not full_guard.tripped
+
+
+async def test_approve_invoice_is_stopped_before_the_patch_leaves_without_the_option(server_factory, mock_gorelo, area_manifest):
+    guard = area_guard(area_manifest, *ALL_AREAS)
+    mock_gorelo.on("GET", f"/v1/invoices/{INVOICE_TO_APPROVE}", envelope(invoice_record(INVOICE_TO_APPROVE, LineItems=[{"Id": uid(31)}])))
+    mock_gorelo.on("PATCH", f"/v1/invoices/{INVOICE_TO_APPROVE}", envelope(invoice_record(INVOICE_TO_APPROVE)))
+    server = server_factory(event_hooks={"request": [guard]}, destructive=True)
+    text = await call_tool_error(server, "approve_invoice", {"invoice_id": INVOICE_TO_APPROVE, "confirm": True})
+    assert "StatusId 5 (Approved) is not allowed: approving pushes the invoice" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"] and guard.tripped
+
+
+async def test_approve_invoice_goes_through_for_the_recorded_draft_with_the_option_and_only_once(server_factory, mock_gorelo, approve_manifest):
+    guard = LiveGuard("write", approve_manifest, allow_approved_invoice=True)
+    approved = invoice_record(INVOICE_TO_APPROVE, Status={"Id": 5, "Name": "Approved"}, LineItems=[{"Id": uid(31)}])
+    draft = invoice_record(INVOICE_TO_APPROVE, LineItems=[{"Id": uid(31)}])
+
+    mock_gorelo.on("GET", f"/v1/invoices/{INVOICE_TO_APPROVE}", in_order(envelope(draft), envelope(approved), envelope(draft)))
+    mock_gorelo.on("PATCH", f"/v1/invoices/{INVOICE_TO_APPROVE}", envelope(approved))
+    server = server_factory(event_hooks={"request": [guard]}, destructive=True)
+    result = await call_tool(server, "approve_invoice", {"invoice_id": INVOICE_TO_APPROVE, "confirm": True})
+    assert result["Status"]["Id"] == 5 and mock_gorelo.requests[1].json == {"StatusId": 5}
+    text = await call_tool_error(server, "approve_invoice", {"invoice_id": INVOICE_TO_APPROVE, "confirm": True})
+    assert "this run already approved an invoice" in text
+
+
+async def test_update_invoice_sends_a_body_the_invoice_update_rules_allow(server_factory, mock_gorelo, full_guard):
+    first, second = uid(31), uid(32)
+    row = invoice_record(
+        INVOICE_OTHER_DRAFT,
+        LineItems=[{"Id": first, "ItemId": INVOICE_ITEM, "Quantity": 1}, {"Id": second, "ItemId": INVOICE_ITEM, "Quantity": 1}],
+    )
+    before = envelope({**row, "Reference": f"{RUN} reference"})
+    # the tool checks Gorelo's answer against the change: line one reads Quantity 2 afterwards, the line it did not name is unchanged
+    changed = {**row, "Reference": f"{RUN} reference", "LineItems": [{**row["LineItems"][0], "Quantity": 2}, row["LineItems"][1]]}
+    mock_gorelo.on("GET", f"/v1/invoices/{INVOICE_OTHER_DRAFT}", in_order(before, envelope(changed), envelope(changed)))
+    mock_gorelo.on("PATCH", f"/v1/invoices/{INVOICE_OTHER_DRAFT}", envelope(changed))
+    server = server_factory(event_hooks={"request": [full_guard]}, destructive=True)
+    await call_tool(
+        server, "update_invoice",
+        {"invoice_id": INVOICE_OTHER_DRAFT, "reference": f"{RUN} reference", "update_lines": [{"line_id": first, "quantity": 2}]},
+    )
+    sent = next(r.json for r in mock_gorelo.requests if r.method == "PATCH")
+    assert sent["Reference"] == f"{RUN} reference" and sent["LineItems"] == [{"Id": first, "Quantity": 2}, {"Id": second}]
+    assert not full_guard.tripped
+
+
+async def test_update_invoice_with_no_tax_sends_the_exempt_id_the_invoice_update_rules_allow(server_factory, mock_gorelo, full_guard):
+    first = uid(31)
+    exempt = {"Id": APPROVED_TAX, "Name": "Tax Exempt TAX"}
+    row = invoice_record(INVOICE_OTHER_DRAFT, LineItems=[{"Id": first, "ItemId": INVOICE_ITEM, "Quantity": 1, "Tax": {"Id": 3, "Name": "GST"}}])
+    changed = {**row, "LineItems": [{**row["LineItems"][0], "Tax": exempt, "TaxAmount": 0.0}]}
+    mock_gorelo.on("GET", f"/v1/invoices/{INVOICE_OTHER_DRAFT}", in_order(envelope(row), envelope(changed), envelope(changed)))
+    mock_gorelo.on("PATCH", f"/v1/invoices/{INVOICE_OTHER_DRAFT}", envelope(changed))
+    mock_gorelo.on("GET", "/v1/taxes", envelope(TAX_ROWS))
+    server = server_factory(event_hooks={"request": [full_guard]}, destructive=True)
+    result = await call_tool(server, "update_invoice", {"invoice_id": INVOICE_OTHER_DRAFT, "update_lines": [{"line_id": first, "no_tax": True}]})
+    sent = next(r.json for r in mock_gorelo.requests if r.method == "PATCH")
+    assert sent == {"LineItems": [{"Id": first, "TaxId": APPROVED_TAX}]} and not full_guard.tripped
+    assert "warning" not in result and f"tax id {APPROVED_TAX}" in result["note"]
+
+
+async def test_create_invoice_with_no_tax_sends_the_exempt_id_the_draft_rules_allow(server_factory, mock_gorelo, guard):
+    new = uid(71)
+    mock_gorelo.on("GET", "/v1/taxes", envelope(TAX_ROWS))
+    mock_gorelo.on("POST", "/v1/invoices", envelope({"Id": new}))
+    mock_gorelo.on("GET", f"/v1/invoices/{new}", envelope(invoice_record(new, LineItems=[])))
+    server = server_factory(event_hooks={"request": [guard]}, destructive=True)
+    await call_tool(server, "create_invoice", {"client_id": TEST_CLIENT, "line_items": [{"item_id": INVOICE_ITEM, "quantity": 1, "no_tax": True}]})
+    assert mock_gorelo.calls("POST")[0].json["LineItems"] == [{"ItemId": INVOICE_ITEM, "Quantity": 1, "TaxId": APPROVED_TAX}]
+    assert not guard.tripped
+
+
+async def test_the_create_and_update_tools_of_the_new_areas_send_bodies_the_rules_allow(server_factory, mock_gorelo, full_guard):
+    server = server_factory(event_hooks={"request": [full_guard]}, destructive=True)
+    mock_gorelo.on("POST", "/v1/assets/types", envelope({"Id": 4999}))
+    mock_gorelo.on("GET", "/v1/assets/types", envelope([{"Id": 4999, "Name": f"{RUN} type"}]))
+    row = await call_tool(server, "create_asset_type", {"name": f"{RUN} type"})
+    assert row == {"Id": 4999, "Name": f"{RUN} type"}
+    mock_gorelo.on("POST", f"/v1/clients/{TEST_CLIENT}/domains", envelope({"Id": 4301}))
+    mock_gorelo.on(
+        "GET", f"/v1/clients/{TEST_CLIENT}", envelope({"Id": TEST_CLIENT, "Domains": [{"Id": 4301, "Name": RUN_DOMAIN, "ExpirationDate": "2030-01-01"}]})
+    )
+    domain = await call_tool(server, "create_client_domain", {"client_id": TEST_CLIENT, "name": RUN_DOMAIN, "expiration_date": "2030-01-01"})
+    assert domain["Name"] == RUN_DOMAIN
+    mock_gorelo.on("POST", "/v1/product-charges", envelope({"Id": 4401}))
+    mock_gorelo.on("GET", "/v1/product-charges/4401", envelope({"Id": 4401, "TicketId": TICKET_NONE, "BillableStatus": {"Id": 2, "Name": "No charge"}}))
+    charge = await call_tool(
+        server, "create_product_charge",
+        {"item_id": INVOICE_ITEM, "ticket_id": TICKET_NONE, "quantity": 1, "unit_price": 1.0, "billable_status_id": 2},
+    )
+    assert charge["Id"] == 4401
+    sent = {r.path: r.json for r in mock_gorelo.requests if r.method == "POST"}
+    assert sent["/v1/assets/types"] == {"Name": f"{RUN} type"} and sent["/v1/product-charges"]["BillableStatusId"] == 2
+    assert not full_guard.tripped and full_guard.writes_allowed == 3
+
+
+async def test_a_product_charge_that_would_be_billable_is_stopped_before_a_request_leaves(server_factory, mock_gorelo, full_guard):
+    server = server_factory(event_hooks={"request": [full_guard]}, destructive=True)
+    mock_gorelo.on("POST", "/v1/product-charges", envelope({"Id": 4401}))
+    text = await call_tool_error(
+        server, "create_product_charge", {"item_id": INVOICE_ITEM, "ticket_id": TICKET_NONE, "quantity": 1}  # BillableStatusId left out: 1 Billable
+    )
+    assert "BillableStatusId must be exactly the JSON integer 2" in text and mock_gorelo.requests == []

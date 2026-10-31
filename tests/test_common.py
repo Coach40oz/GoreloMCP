@@ -3247,6 +3247,16 @@ REAL_DESTRUCTIVE_ARGUMENTS = {
     # not a delete, but gated by the same flag: it turns a document's public link on or publishes it to the client portal
     "share_document": {"document_id": uid(9), "public_link": True},
     "remove_document_related_item": {"document_id": uid(9), "related_item_id": 7},
+    # 1.5.0 (contract 6c30770dffc0): four deletes and three more gated tools that are not deletes
+    "delete_asset_type": {"asset_type_id": 5},
+    "delete_client_location": {"client_id": 9101, "location_id": 9001},
+    "delete_client_domain": {"client_id": 9101, "domain_id": 4},
+    "delete_product_charge": {"product_charge_id": 12},
+    # not a delete, but gated by the same flag: approving an existing invoice pushes it to accounting
+    "approve_invoice": {"invoice_id": uid(10)},
+    # not deletes, but gated by the same flag: a contract can approve and send recurring invoices on its own
+    "create_contract": {"name": "Managed Services", "client_id": 9101, "service_lines": [{"name": "Support", "labor_terms_id": 2, "per_hour_details": {}}]},
+    "update_contract": {"contract_id": 9, "name": "Renamed"},
 }
 
 

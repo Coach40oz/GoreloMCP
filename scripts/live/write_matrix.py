@@ -2,7 +2,11 @@
 
     python -m scripts.live.write_matrix [--skip-email] [--only AREA,...] [--leftovers] [--with-items] [--with-invoices]
                                         [--with-custom-assets] [--with-asset-move] [--with-custom-properties]
-                                        [--with-documents] [--with-approved-invoice]
+                                        [--with-documents] [--with-approved-invoice [--approve-via-update]]
+                                        [--with-alert-status] [--with-asset-types] [--with-client-locations]
+                                        [--with-client-domains] [--with-contact-tags] [--with-product-charges]
+                                        [--with-invoice-update] [--with-contracts] [--with-comment-edits]
+                                        [--with-ticket-source]
 
 Run id MCPTEST-<UTC yyyymmddHHMMSS>. Every record the run creates is named with it, announced in the run manifest
 (.live-runs/<run id>.json) BEFORE the create call and recorded with its id right after (the details contract of
@@ -157,6 +161,11 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                be called then. create_approved_invoice is never called here (it pushes the invoice to the accounting
                system): only the approved_invoice area below calls it
     approved_invoice
+               (with --approve-via-update the one invoice is a DRAFT of $1 made with create_invoice (the tax-exempt rate as tax_id, no recipient, no dates) whose
+               stored total (above 0 and at most 1) and total_tax (0) are checked and recorded in the manifest, then approved with
+               approve_invoice (confirm=true; a PATCH of StatusId 5; the 429 retries are off around that call), instead of create_approved_invoice,
+               which that run never calls; everything after the approval is as below; the accounting system's copy
+               is voided by hand afterwards)
                ONE Approved invoice of $1 for the test client, created, waited for until Gorelo has pushed it to the connected
                accounting system, then voided at once. SKIPPED unless --with-approved-invoice is given, and then it is
                the ONLY area of the run and the run has no other flag (--only approved_invoice alone: any other area,
@@ -175,11 +184,14 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                that constant names
                one, the area needs at least one contact of the test client (list_contacts with status_ids 1, 3 and 4) and every one
                must be in such a state (no contact at all proves nothing), no location of the test client names a billing contact
-               (list_client_locations: BillingContactIds empty, null or the text []), and an item as in the invoices area
-               (list_items). Then the intent ("invoice", status_id 5, the label `<run> approved invoice`) and
-               create_approved_invoice (the test client, ONE line: that item, quantity 1, unit price 1.0, the label as its
-               text, no tax: TaxId is sent as an explicit null, which the guard insists on; the label as reference; no
-               recipients and no dates, Gorelo's defaults; confirm=true), recorded in the manifest the moment it answers
+               (list_client_locations: BillingContactIds empty, null or the text []), an item as in the invoices area
+               (list_items) and the tax-exempt rate: list_taxes must hold exactly ONE rate with Percentage 0 whose Name or Code is
+               exactly "Tax Exempt" (case-insensitive); with none, or more than one, the area is skipped with a note (nothing is
+               guessed). Then the intent ("invoice", status_id 5, tax_id and tax_percentage 0 of that rate, the label
+               `<run> approved invoice`) and create_approved_invoice (the test client, ONE line: that item, quantity 1, unit price
+               1.0, the label as its text, tax_id of the tax-exempt rate, which the guard compares with the id the intent recorded: an
+               omitted or null TaxId would give the item's own tax, so this area names the id itself (no_tax would send the same id); the
+               label as reference; no recipients and no dates, Gorelo's defaults; confirm=true), recorded in the manifest the moment it answers
                with the status Gorelo STORED (5 when the answer has none, never 1), its number and display number.
                Checks: Status.Id 5 (a Paid 3, which Gorelo created because the total was 0, fails the area and is left
                for the user: Gorelo refuses to delete or void a Paid invoice), the client, the reference, the one line,
@@ -199,12 +211,76 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                the void is in Gorelo only (check the accounting system and void the invoice there too: Gorelo's void is
                not pushed to the connected accounting system, seen with Xero), get_invoice (Status.Id 4) and list_invoices (the test client, the label
                as query), which must still list it. The read after the void also checks TotalTax 0 and Total 1.0 (the
-               line asked for no tax and $1): when it reads otherwise, a loud note says the no-tax check FAILED. That is
+               line carried the tax-exempt rate and billed $1): when it reads otherwise, a loud note says the no-tax check FAILED. That is
                only a note, made after the void, so it can never stop or skip the void or its bookkeeping. A voided
                invoice cannot be removed, so it is recorded with the outcome "voided by the write matrix (still listed
                as Void)": a known residue, neither cleaned nor a failure (like the uploaded file). The summary of the run
                repeats the reminder about the void, for every approved invoice of the run that was voided, as its last
                line before the result
+    alert_status
+               ONE existing New alert of the test client (list_alerts for the client, then list_alerts with status dismissed on EVERY page; an
+               alert is skipped when any Dismissed alert of the client shares its Type and subject ids (AgentAssetId, CheckId, UptimeId,
+               DomainId, ContractId, CustomAssetId; the Title is not compared), because Gorelo moves the whole STACK of an alert with it and
+               restoring to New would move that one back too; none left: skipped with a note). The alert is recorded in the manifest (kind
+               alert, client_id and status_before 1) BEFORE the first change; set_alert_status dismissed (UpdatedIds must name it and are
+               recorded as dismissed_ids; get_alert reads Dismissed with DismissedOn set), set_alert_status new (get_alert reads New with
+               DismissedOn null; an id in its UpdatedIds that the dismissal did not move FAILS the area, naming the ids as a leftover for
+               the user); the cleanup restores an alert a stopped run left dismissed, only when its DismissedOn is not before the run's start
+               and only the ids recorded (any other id it moved is a leftover that names it). post_alert is never called. SKIPPED unless
+               --with-alert-status is given
+    asset_types
+               create_asset_type (Name = the run id plus text), update_asset_type (rename), list_asset_types (shows the new name once),
+               delete_asset_type (confirm=true) and a list that no longer shows it. Asset types belong to the whole account, not to a client,
+               so the name starts with the run id. SKIPPED unless --with-asset-types is given
+    client_locations
+               create_client_location (the test client, Name = the run label), update_client_location (city, address2), get_client_location,
+               list_client_locations (lists it), delete_client_location (confirm=true; Gorelo marks the location inactive, so it must leave the
+               list) and a last get_client_location whose answer is only noted. Never the default location. SKIPPED unless
+               --with-client-locations is given
+    client_domains
+               create_client_domain (the test client; Name mcptest-<run>.example under the reserved .example TLD, with an explicit expiration
+               date a year out, so no registry lookup is asked), update_client_domain (the date), delete_client_domain (confirm=true) and a
+               get_client whose Domains no longer lists it. SKIPPED unless --with-client-domains is given
+    contact_tags
+               list_contact_tags (the first tag), create_contact (an MCPTEST contact of the test client), update_contact tag_ids=[tag] (TagIds
+               must read back [tag]), update_contact job_title WITHOUT tag_ids (update_contact sends no TagIds then, so this step tests Gorelo's
+               own omit rule, "omit to leave it unchanged": the NOTE says whether Gorelo kept the tags or not, and a Gorelo that dropped them
+               is a loud note, not a failure of the area) and update_contact tag_ids=[] (TagIds must read back []). The contact is removed by
+               the cleanup. SKIPPED unless --with-contact-tags is given
+    product_charges
+               list_items (the first active product of nobody or of the test client), the run's plain MCPTEST ticket (made here when the
+               area runs alone), create_product_charge (No charge, billable status 2, so it can never be invoiced), update_product_charge,
+               get_product_charge, list_product_charges (lists it), delete_product_charge (confirm=true) and a list that no longer shows
+               it. SKIPPED unless --with-product-charges is given
+    invoice_update
+               list_items, create_invoice (a Draft with two lines A and B), then update_invoice: reference and both dates; add_lines (line C);
+               update_lines (line A); remove_line_ids (line C). After EVERY step the lines it did not name must read exactly as before (the tool
+               sends {Id} alone for them: the note records that Gorelo keeps the fields an entry with only an Id leaves out). delete_invoice
+               of the Draft. Then the TAX PROBE: list_taxes, the first rate with Percentage above 0 (none: the probe is skipped with a note) and
+               the ONE Tax Exempt rate (Percentage 0, Name or Code "Tax Exempt"; none or several: skipped with a note, the tool would refuse
+               no_tax), a temporary MCPTEST item taxed at the first rate (create_item with tax_id), the intent of a second Draft (records tax_id
+               of the exempt rate and tax_percentage 0 before the write, the guard allows no other TaxId on a Draft line), that Draft with one
+               line of the item with no_tax=true (the tool looks up the Tax Exempt rate and sends its id as TaxId), a fresh get_invoice, and a
+               NOTE that says which TaxId the tool used and which TaxId and tax amount Gorelo applied. The area FAILS unless the line shows
+               TaxAmount 0 and the invoice TotalTax 0 (the Draft and the item are deleted first); the `warning` create_invoice added when it saw
+               a no_tax line that still shows tax is recorded in the note too. Each Draft uses up an invoice
+               number. SKIPPED unless --with-invoice-update is given
+    contracts  list_items, create_contract (confirm=true; an MCPTEST Hourly contract, labor terms 2, on the test client with one service line
+               and two line items billed as No charge; never a Block Hours line, never auto_approve_and_send true), update_contract (name and
+               the quantity of line item A), add a second service line, remove it, check after each step that the service line and the
+               line item that were sent with an Id only kept their values (Quantity, UnitPrice, Description, DiscountPercent, Tax,
+               BillableStatus), then archive it (update_contract status=archived, StatusId 3). A contract CANNOT be deleted through the API
+               (the guard refuses the DELETE): the archived contract is a KNOWN RESIDUE, like an archived document. SKIPPED unless
+               --with-contracts is given
+    comment_edits
+               an MCPTEST project of the test client (as in the projects area: the Project scope, a project type and the Everyone group),
+               a section and a task, a Private project comment and a Private task comment, update_project_comment and update_task_comment
+               (BodyHtml must read back the new body, also through get_project_comment), then delete both comments and the task; the project
+               is soft deleted by the cleanup. SKIPPED unless --with-comment-edits is given (or with the Project scope missing)
+    ticket_source
+               the run's plain MCPTEST ticket (made here when the area runs alone): update_ticket source_id = another source of 1 to 6 (7
+               Messenger is read back only, never written), get_ticket (Source.Id must read back), then update_ticket back to Api. SKIPPED
+               unless --with-ticket-source is given
     uptime     create_uptime_check (http, the probe domain URL, seattle, every 60 minutes), set_uptime_maintenance
                starting now (start is the current UTC time written with an offset, 60 minutes, a reason: Gorelo
                refuses a window without a start), update_uptime_check description, delete_uptime_check
@@ -247,6 +323,8 @@ Live requests per area (method and spec path, in the order they are sent; the te
         GET /v1/tickets/statuses  # lookups by name, once per run (cached for the later areas)
         GET /v1/tickets/types
         GET /v1/organization/groups
+        GET /v1/tickets/sources  # network reads since 1.5.0 (the priorities and the sources were local tables before)
+        GET /v1/tickets/priorities
         POST /v1/tickets  # plain ticket
         GET /v1/tickets/{ticketId}  # create_ticket reads the ticket back; its stored audience is verified here
         POST /v1/tickets  # backdated and Closed
@@ -392,13 +470,157 @@ Live requests per area (method and spec path, in the order they are sent; the te
         GET /v1/contacts  # list_contacts for the test client (status_ids 1, 3, 4): every contact must be in a state that cannot be emailed (only with --with-approved-invoice, and only once UNEMAILABLE_CONTACT_STATUS_IDS names one)
         GET /v1/clients/{clientId}/locations  # list_client_locations: no location may name a billing contact
         GET /v1/items  # list_items: the first active product of nobody or of the test client
-        POST /v1/invoices  # create_approved_invoice: StatusId 5, one line of $1, no recipient, no dates
+        GET /v1/taxes  # list_taxes: the one tax-exempt rate (Percentage 0, Name or Code "Tax Exempt")
+        POST /v1/invoices  # create_approved_invoice: StatusId 5, one line of $1 with that TaxId, no recipient, no dates
         GET /v1/invoices/{invoiceId}  # create_approved_invoice reads the invoice back
         GET /v1/invoices/{invoiceId}  # get_invoice: ExternalId set (the push to accounting); repeated every 5 s until it is
         GET /v1/invoices  # delete_invoice finds the invoice by its Number
         DELETE /v1/invoices/{invoiceId}  # Approved: voided (stays listed); the answer says StatusId 4
         GET /v1/invoices/{invoiceId}  # get_invoice: Status.Id 4
         GET /v1/invoices  # list_invoices: still listed, as Void
+    alert_status (--with-alert-status):
+        GET /v1/alerts  # list_alerts for the test client (only with --with-alert-status)
+        GET /v1/alerts  # list_alerts with status dismissed: every Dismissed alert of the test client, one request per page
+        PATCH /v1/alerts  # set_alert_status dismissed
+        GET /v1/alerts/{alertId}  # Dismissed, DismissedOn set
+        PATCH /v1/alerts  # set_alert_status new
+        GET /v1/alerts/{alertId}  # New, DismissedOn null
+    asset_types (--with-asset-types):
+        POST /v1/assets/types  # create_asset_type (only with --with-asset-types)
+        GET /v1/assets/types  # create_asset_type reads the type back from the list
+        PATCH /v1/assets/types/{assetTypeId}  # update_asset_type: rename
+        GET /v1/assets/types  # and its read-back
+        GET /v1/assets/types  # list_asset_types: the renamed type
+        DELETE /v1/assets/types/{assetTypeId}  # delete_asset_type
+        GET /v1/assets/types  # list_asset_types: gone
+    client_locations (--with-client-locations):
+        POST /v1/clients/{clientId}/locations  # create_client_location (only with --with-client-locations)
+        GET /v1/clients/{clientId}/locations/{locationId}  # its read-back
+        PATCH /v1/clients/{clientId}/locations/{locationId}  # update_client_location
+        GET /v1/clients/{clientId}/locations/{locationId}  # its read-back
+        GET /v1/clients/{clientId}/locations/{locationId}  # get_client_location
+        GET /v1/clients/{clientId}/locations  # list_client_locations: it is listed
+        DELETE /v1/clients/{clientId}/locations/{locationId}  # delete_client_location: Gorelo marks it inactive
+        GET /v1/clients/{clientId}/locations  # list_client_locations: it left the list
+        GET /v1/clients/{clientId}/locations/{locationId}  # get_client_location after the delete (only noted)
+    client_domains (--with-client-domains):
+        POST /v1/clients/{clientId}/domains  # create_client_domain (only with --with-client-domains)
+        GET /v1/clients/{clientId}  # the new domain is read from the client's Domains
+        PATCH /v1/clients/{clientId}/domains/{domainId}  # update_client_domain: the expiration date
+        GET /v1/clients/{clientId}
+        DELETE /v1/clients/{clientId}/domains/{domainId}  # delete_client_domain
+        GET /v1/clients/{clientId}  # get_client: no longer in Domains
+    contact_tags (--with-contact-tags):
+        GET /v1/contacts/tags  # list_contact_tags (only with --with-contact-tags)
+        POST /v1/contacts  # create_contact
+        GET /v1/contacts/{contactId}  # update_contact reads the contact first
+        PATCH /v1/contacts/{contactId}  # tag_ids=[tag]
+        GET /v1/contacts/{contactId}  # update_contact job_title without tag_ids reads the contact first
+        PATCH /v1/contacts/{contactId}  # the tool re-sends the TagIds its read returned
+        GET /v1/contacts/{contactId}  # get_contact: the tags are kept
+        GET /v1/contacts/{contactId}  # update_contact tag_ids=[] reads the contact first
+        PATCH /v1/contacts/{contactId}
+        GET /v1/contacts/{contactId}  # get_contact: no tags
+    product_charges (--with-product-charges):
+        GET /v1/items  # list_items: the first active product of nobody or of the test client (only with --with-product-charges)
+        GET /v1/tickets/statuses  # the plain ticket and its lookups (cached: not sent when an earlier area made them)
+        GET /v1/tickets/types
+        GET /v1/organization/groups
+        GET /v1/tickets/sources
+        GET /v1/tickets/priorities
+        POST /v1/tickets
+        GET /v1/tickets/{ticketId}
+        POST /v1/product-charges  # create_product_charge: No charge
+        GET /v1/product-charges/{productChargeId}  # its read-back
+        PATCH /v1/product-charges/{productChargeId}  # update_product_charge
+        GET /v1/product-charges/{productChargeId}  # get_product_charge
+        GET /v1/product-charges  # list_product_charges for the ticket
+        DELETE /v1/product-charges/{productChargeId}  # delete_product_charge
+        GET /v1/product-charges  # list_product_charges: gone
+    invoice_update (--with-invoice-update):
+        GET /v1/items  # list_items (only with --with-invoice-update)
+        POST /v1/invoices  # create_invoice: a Draft with two lines
+        GET /v1/invoices/{invoiceId}  # create_invoice reads the invoice back
+        GET /v1/invoices/{invoiceId}  # update_invoice reads the invoice first
+        PATCH /v1/invoices/{invoiceId}  # reference and dates
+        GET /v1/invoices/{invoiceId}  # its read-back
+        GET /v1/invoices/{invoiceId}  # add_lines reads first
+        PATCH /v1/invoices/{invoiceId}  # lines A and B as {Id}, line C new
+        GET /v1/invoices/{invoiceId}
+        GET /v1/invoices/{invoiceId}  # update_lines reads first
+        PATCH /v1/invoices/{invoiceId}  # line A changed, B and C as {Id}
+        GET /v1/invoices/{invoiceId}
+        GET /v1/invoices/{invoiceId}  # remove_line_ids reads first
+        PATCH /v1/invoices/{invoiceId}  # line C left out
+        GET /v1/invoices/{invoiceId}
+        GET /v1/invoices/{invoiceId}  # get_invoice: still a Draft
+        GET /v1/invoices  # delete_invoice finds the invoice by its Number
+        DELETE /v1/invoices/{invoiceId}  # Draft: deleted
+        GET /v1/taxes  # the tax probe: list_taxes
+        POST /v1/items  # create_item: a product taxed at the first rate above 0
+        GET /v1/items/{itemId}
+        GET /v1/taxes  # create_invoice: the lookup of the Tax Exempt rate that no_tax sends
+        POST /v1/invoices  # create_invoice: one line of that item with no_tax=true (TaxId of the Tax Exempt rate)
+        GET /v1/invoices/{invoiceId}
+        GET /v1/invoices/{invoiceId}  # a fresh get_invoice: which TaxId and tax amount Gorelo applied
+        GET /v1/invoices  # delete_invoice finds the invoice by its Number
+        DELETE /v1/invoices/{invoiceId}
+        DELETE /v1/items/{itemId}  # delete_item
+    contracts (--with-contracts):
+        GET /v1/items  # list_items (only with --with-contracts)
+        POST /v1/contracts  # create_contract: Hourly, one service line, one line item
+        GET /v1/contracts/{contractId}  # its read-back
+        GET /v1/contracts/{contractId}  # update_contract reads the contract first
+        PATCH /v1/contracts/{contractId}  # name and the quantity of the line item
+        GET /v1/contracts/{contractId}
+        GET /v1/contracts/{contractId}  # add a second service line
+        PATCH /v1/contracts/{contractId}
+        GET /v1/contracts/{contractId}
+        GET /v1/contracts/{contractId}  # remove it
+        PATCH /v1/contracts/{contractId}
+        GET /v1/contracts/{contractId}
+        PATCH /v1/contracts/{contractId}  # status archived (no read first)
+        GET /v1/contracts/{contractId}
+    comment_edits (--with-comment-edits):
+        GET /v1/projects  # scope probe (only with --with-comment-edits); a 403 with code 080203 ends the area here (skipped)
+        GET /v1/clients/{clientId}/locations  # the test client's location (cached when an earlier area read it)
+        GET /v1/tickets/statuses  # the lookups (cached when an earlier area made them)
+        GET /v1/tickets/types
+        GET /v1/organization/groups
+        GET /v1/tickets/sources
+        GET /v1/tickets/priorities
+        GET /v1/projects/types
+        POST /v1/projects
+        GET /v1/projects/{projectId}
+        POST /v1/projects/{projectId}/sections
+        POST /v1/projects/{projectId}/tasks
+        GET /v1/projects/{projectId}/tasks/{taskId}
+        POST /v1/projects/{projectId}/comments  # a Private project comment
+        GET /v1/projects/{projectId}/comments/{commentId}
+        PATCH /v1/projects/{projectId}/comments/{commentId}  # update_project_comment
+        GET /v1/projects/{projectId}/comments/{commentId}
+        GET /v1/projects/{projectId}/comments/{commentId}  # get_project_comment
+        POST /v1/projects/{projectId}/tasks/{taskId}/comments  # a Private task comment
+        GET /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}
+        PATCH /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}  # update_task_comment
+        GET /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}
+        GET /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}  # get_project_comment
+        DELETE /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}
+        DELETE /v1/projects/{projectId}/comments/{commentId}
+        DELETE /v1/projects/{projectId}/tasks/{taskId}
+    ticket_source (--with-ticket-source):
+        GET /v1/tickets/statuses  # the plain ticket and its lookups (cached when an earlier area made them; only with --with-ticket-source)
+        GET /v1/tickets/types
+        GET /v1/organization/groups
+        GET /v1/tickets/sources
+        GET /v1/tickets/priorities
+        POST /v1/tickets
+        GET /v1/tickets/{ticketId}
+        PATCH /v1/tickets/{ticketId}  # source_id = another source
+        GET /v1/tickets/{ticketId}
+        GET /v1/tickets/{ticketId}  # get_ticket by GUID
+        PATCH /v1/tickets/{ticketId}  # back to Api
+        GET /v1/tickets/{ticketId}
     uptime:
         GET /v1/clients/{clientId}/locations  # the test client's location (Matrix.location() is cached: not sent when an earlier area in the same run, custom_assets with --with-custom-assets, already read it)
         POST /v1/uptime  # http check, the probe domain URL, seattle, every 60 minutes
@@ -415,6 +637,8 @@ Live requests per area (method and spec path, in the order they are sent; the te
         GET /v1/tickets/statuses  # the ticket lookups (cached: not sent when the tickets area ran first); only the Everyone group is used here
         GET /v1/tickets/types
         GET /v1/organization/groups
+        GET /v1/tickets/sources
+        GET /v1/tickets/priorities
         GET /v1/projects/types  # list_project_types: the first type, required by create_project
         POST /v1/projects  # with that type and the Everyone group (group_id)
         GET /v1/projects/{projectId}
@@ -443,7 +667,7 @@ eleven requests), and with the move it skips the move, with a note, when the sec
 it) or has no location (only the read of its locations is sent); the documents area
 without the Documents scope is its first request only (a skip), lists a document again up to 3 times when a search lags behind a
 write, and stops at the first failed check (the cleanup then archives what is still Active: one GET and one PATCH for each such
-document); the three lookups come with the first area that needs them (--only comments or time starts with them and the plain
+document); the five lookups come with the first area that needs them (--only comments or time starts with them and the plain
 ticket; --only projects sends them, and the test client's location, right after its two scope probes, which is why the
 projects list above names them with the note that an earlier area of the same run has read them already, and a full run
 sends the other twelve requests of that area only); get_ticket by number
@@ -543,12 +767,24 @@ PATCH that names the second client unless the manifest announced it. The custom_
 its own (get_client and update_client are in MATRIX_TOOLS); what stops update_client from changing the test client in any
 other run is the guard: it refuses every PATCH of the test client unless it is built with allow_custom_properties
 (--with-custom-properties) and the body is one recorded custom field (a field whose record is cleaned takes the null only). With --with-approved-invoice the run
-may call ONLY APPROVED_INVOICE_TOOLS (create_approved_invoice, get_invoice, list_invoices, delete_invoice, list_items,
-list_contacts, list_client_locations) and its guard is built with allow_approved_invoice; create_approved_invoice is
+may call ONLY APPROVED_INVOICE_TOOLS (create_approved_invoice, approve_invoice, create_invoice, get_invoice, list_invoices,
+delete_invoice, list_items, list_taxes, list_contacts, list_client_locations; eight of the ten per run) and its guard is built with allow_approved_invoice; create_approved_invoice is
 named nowhere else in this module. That run also switches off the 429 retries of its Gorelo client around the create call
 alone (no_429_retries, put back right after it), because the guard allows the create once and a retried POST would count as
 a second one; the client is looked up before the first request (gorelo_client_behind), or the run does not start. The
 matrix checks before it creates anything that the server offers every tool it may call.
+
+The opt-in areas of 1.5.0 (OPT_INS; contract 6c30770dffc0) follow the same rules, each with its own flag: its tools (OptIn.tools) are callable
+only with the flag, the guard gets the matching allow_areas name (guard.OPT_IN_AREAS: alert_status, asset_types, client_locations,
+client_domains, product_charges, invoice_update, contracts; contact_tags, comment_edits and ticket_source need none, because the
+guard's old rules for a run-created contact, project comment and ticket already cover them), every record is announced and recorded in the
+manifest (an alert, which the run does not create, is recorded before its first change), and the cleanup knows its kinds (asset_type,
+client_location, client_domain, product_charge, contract, alert: scripts/live/cleanup.py). All of them need the TEST CLIENT Active, like
+every write run (the check of run_matrix, before a manifest is made; the operator makes the client Active in the Gorelo app, this
+harness never does). Known residue per area: contracts (an archived contract stays in Gorelo; the summary ends with a reminder line);
+client_locations and client_domains (Gorelo marks a deleted one inactive: it leaves the lists but is not removed); the invoice numbers
+used up by invoice_update (two Drafts) and the approved invoice; nothing for the others. The tax probe of invoice_update and the answer of
+contact_tags to an update that names no tag_ids are recorded in the notes of the run summary.
 """
 
 from __future__ import annotations
@@ -562,7 +798,7 @@ import math
 import os
 import re
 import sys
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -572,12 +808,17 @@ from fastmcp import Client
 from gorelo_client import GoreloClient
 from scripts.live._env import EnvError, Pacer, live_settings, scrub, without_quotes
 from scripts.live.cleanup import (
+    ALERT_DISMISSED,
+    ALERT_NEW,
+    CONTRACT_ARCHIVED,
+    CONTRACT_RESIDUE_TAIL,
     CUSTOM_ASSET_CLIENT_UNKNOWN,
     CUSTOM_ASSET_RESIDUE,
     CUSTOM_ASSET_RESIDUE_TAIL,
     CHANGED_FIELDS,
     DOCUMENT_ARCHIVED,
     DOCUMENT_RESIDUE_TAIL,
+    contract_residue,
     custom_asset_residue,
     custom_property_leftover_kind,
     document_residue,
@@ -690,6 +931,7 @@ INVOICE_DELETED = 6  # the StatusId Gorelo answers a DELETE of a Draft invoice w
 INVOICE_LINE_QUANTITY = 1
 INVOICE_LINE_PRICE = 1.0
 INVOICE_DUE_DAYS = 14
+TAX_EXEMPT_NAME = "tax exempt"  # the Name or Code (compared case-insensitively, whole text) of the one rate the approved invoice may use
 CATALOG_PAGE = 50  # catalog items read to find one to bill
 # The approved invoice is polled every SYNC_INTERVAL seconds, SYNC_POLLS times after the first read: at most 120 s in all,
 # for Gorelo to push it to the connected accounting system (ExternalId is set once it has).
@@ -755,12 +997,109 @@ INVOICE_TOOLS = frozenset(
 
 # The tools of the approved_invoice run (--with-approved-invoice): the ONLY tools that run may call. This set is the one
 # place besides the area itself where create_approved_invoice is named; it replaces MATRIX_TOOLS for that run.
-APPROVED_INVOICE_TOOLS = frozenset(
-    {
-        "create_approved_invoice", "get_invoice", "list_invoices", "delete_invoice", "list_items", "list_contacts",
-        "list_client_locations",
-    }
+# The tools both ways of the approved invoice run share: the reads, the lookup of the item and of the tax-exempt rate, and the void.
+APPROVED_RUN_COMMON = frozenset(
+    {"get_invoice", "list_invoices", "delete_invoice", "list_items", "list_taxes", "list_contacts", "list_client_locations"}
 )
+# A run may make its invoice Approved in ONE of two ways, never both (tools_for): create_approved_invoice (the default), or
+# create_invoice and approve_invoice (--approve-via-update, see APPROVE_VIA_UPDATE_TOOLS).
+APPROVED_INVOICE_TOOLS = frozenset({"create_approved_invoice", "approve_invoice", "create_invoice", *APPROVED_RUN_COMMON})
+
+
+@dataclass(frozen=True)
+class OptIn:
+    """One opt-in area of release 1.5.0 (contract 6c30770dffc0): off by default, run only with its flag (--with-<area>), skipped with
+    a reason otherwise (also under --only <area>), and callable only through its own tools."""
+
+    key: str  # the area name (also the --only name); the flag is --with-<key with dashes>
+    what: str  # what it writes, for the skip reason and the help text
+    tools: frozenset[str]  # the tools only this area may call (on top of MATRIX_TOOLS)
+    guard_area: str | None = None  # the name the guard opens for it (guard.OPT_IN_AREAS), None: no guard area is needed
+
+    @property
+    def flag(self) -> str:
+        return "--with-" + self.key.replace("_", "-")
+
+    @property
+    def skip_reason(self) -> str:
+        return f"not live-tested by default: {self.what}"
+
+
+OPT_INS: tuple[OptIn, ...] = (
+    OptIn(
+        "alert_status",
+        "dismisses and then restores to New ONE existing New alert of the test client (Gorelo moves the whole stack of the alert with it)",
+        frozenset({"list_alerts", "get_alert", "set_alert_status"}),
+        "alert_status",
+    ),
+    OptIn(
+        "asset_types",
+        "creates, renames and deletes an MCPTEST asset type (asset types belong to the whole account, not to a client)",
+        frozenset({"list_asset_types", "create_asset_type", "update_asset_type", "delete_asset_type"}),
+        "asset_types",
+    ),
+    OptIn(
+        "client_locations",
+        "creates, updates and deletes one MCPTEST location of the test client (Gorelo marks a deleted location inactive)",
+        frozenset({"get_client_location", "create_client_location", "update_client_location", "delete_client_location"}),
+        "client_locations",
+    ),
+    OptIn(
+        "client_domains",
+        "creates, updates and deletes one MCPTEST domain under the reserved .example TLD on the test client",
+        frozenset({"create_client_domain", "update_client_domain", "delete_client_domain"}),
+        "client_domains",
+    ),
+    OptIn(
+        "contact_tags",
+        "sets, keeps and clears the tags of an MCPTEST contact of the test client",
+        frozenset({"list_contact_tags"}),
+    ),
+    OptIn(
+        "product_charges",
+        "creates, updates and deletes a No charge product charge on an MCPTEST ticket of the test client",
+        frozenset(
+            {
+                "list_items", "get_product_charge", "list_product_charges", "create_product_charge", "update_product_charge",
+                "delete_product_charge",
+            }
+        ),
+        "product_charges",
+    ),
+    OptIn(
+        "invoice_update",
+        "changes the lines of a Draft invoice of the test client and runs a tax probe (a temporary catalog item and a second Draft); "
+        "each Draft uses up an invoice number",
+        frozenset(
+            {
+                "list_items", "list_taxes", "create_invoice", "get_invoice", "update_invoice", "delete_invoice", "create_item",
+                "delete_item",
+            }
+        ),
+        "invoice_update",
+    ),
+    OptIn(
+        "contracts",
+        "creates an MCPTEST Hourly contract on the test client, changes it and archives it; a contract CANNOT be deleted through the "
+        "API, so it stays in Gorelo, archived, until removed in the Gorelo app",
+        frozenset({"list_items", "get_contract", "create_contract", "update_contract"}),
+        "contracts",
+    ),
+    OptIn(
+        "comment_edits",
+        "creates an MCPTEST project with a Private project comment and a Private task comment on the test client, edits both and deletes them",
+        frozenset({"get_project_comment", "update_project_comment", "update_task_comment"}),
+    ),
+    OptIn(
+        "ticket_source",
+        "sets the source of an MCPTEST ticket of the test client and reads it back",
+        frozenset(),
+    ),
+)
+OPT_IN_BY_KEY: dict[str, OptIn] = {area.key: area for area in OPT_INS}
+# The tools of the approved invoice run when --approve-via-update is given: a Draft of $1 made with create_invoice is approved with
+# approve_invoice (a PATCH of StatusId 5) instead of being created Approved with create_approved_invoice, which that run never calls.
+APPROVE_VIA_UPDATE_TOOLS = frozenset({"create_invoice", "approve_invoice"})
 
 
 def tools_for(
@@ -769,14 +1108,19 @@ def tools_for(
     with_approved_invoice: bool = False,
     with_custom_assets: bool = False,
     with_documents: bool = False,
+    opt_in: Iterable[str] = (),
+    approve_via_update: bool = False,
 ) -> frozenset[str]:
-    """The tools a run may call: with --with-approved-invoice exactly APPROVED_INVOICE_TOOLS (that run has no other area);
-    otherwise MATRIX_TOOLS, without the three item tools unless --with-items was given, without the six invoice tools
-    unless --with-invoices was given, with the four custom asset tools only when --with-custom-assets was given (the move needs
-    no tool of its own: update_custom_asset and list_client_locations do it) and with the sixteen document tools only when
-    --with-documents was given."""
+    """The tools a run may call: with --with-approved-invoice exactly APPROVED_INVOICE_TOOLS, less create_approved_invoice (and, without
+    --approve-via-update, create_invoice and approve_invoice too) or, with --approve-via-update, less create_approved_invoice only
+    (that run has no other area); otherwise MATRIX_TOOLS, without the three item tools unless --with-items was given, without the
+    six invoice tools unless --with-invoices was given, with the four custom asset tools only when --with-custom-assets was given
+    (the move needs no tool of its own: update_custom_asset and list_client_locations do it), with the sixteen document tools only when
+    --with-documents was given and with the tools of each opt-in area of 1.5.0 (OPT_INS) that was enabled."""
     if with_approved_invoice:
-        return APPROVED_INVOICE_TOOLS
+        if approve_via_update:
+            return APPROVED_RUN_COMMON | APPROVE_VIA_UPDATE_TOOLS
+        return APPROVED_INVOICE_TOOLS - APPROVE_VIA_UPDATE_TOOLS
     tools = MATRIX_TOOLS
     if not with_items:
         tools = tools - ITEM_TOOLS
@@ -786,6 +1130,8 @@ def tools_for(
         tools = tools | DOCUMENT_TOOLS
     if not with_invoices:
         tools = tools - INVOICE_TOOLS
+    for key in opt_in:
+        tools = tools | OPT_IN_BY_KEY[key].tools
     return tools
 
 
@@ -1046,8 +1392,8 @@ def amount_text(value: Any) -> str:
 def tax_problem(invoice: dict[str, Any]) -> str | None:
     """What the invoice says against the no-tax $1 that was approved, or None when TotalTax is 0 and Total is 1.0.
 
-    The line asked for no tax (TaxId sent as an explicit null) and billed 1 x 1.0, so a TotalTax other than 0 or a Total
-    other than 1.0 means Gorelo did not take the null as "no tax" (or changed the amount). The text is written to be
+    The line carried the tax-exempt rate (its TaxId) and billed 1 x 1.0, so a TotalTax other than 0 or a Total
+    other than 1.0 means Gorelo did not apply that rate as "no tax" (or changed the amount). The text is written to be
     noticed and holds amounts and kinds only; a TotalTax or Total that is missing or not a number is a problem too."""
     tax, total = invoice.get("TotalTax", _MISSING), invoice.get("Total", _MISSING)
     wanted = INVOICE_LINE_QUANTITY * INVOICE_LINE_PRICE
@@ -1055,8 +1401,35 @@ def tax_problem(invoice: dict[str, Any]) -> str | None:
         return None
     return (
         f"WARNING: no-tax check FAILED: TotalTax is {amount_text(tax)} (expected 0) and Total is {amount_text(total)} "
-        f"(expected {wanted!r}), so Gorelo may not have taken the explicit TaxId null as no tax"
+        f"(expected {wanted!r}), so Gorelo may not have applied the tax-exempt rate as no tax"
     )
+
+
+def tax_exempt_rates(taxes: Any) -> list[dict[str, Any]]:
+    """The rows of list_taxes that are THE tax-exempt rate: Percentage exactly 0 and a Name or Code that is, as a whole and without
+    regard to case, "Tax Exempt". A row without a whole-number Id is no rate the run can use. The caller needs exactly one."""
+    rows = taxes if isinstance(taxes, list) else []
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and is_id(row.get("Id"))
+        and is_amount(row.get("Percentage"))
+        and row["Percentage"] == 0
+        and any(isinstance(row.get(key), str) and row[key].casefold() == TAX_EXEMPT_NAME for key in ("Name", "Code"))
+    ]
+
+
+async def find_tax_exempt_rate(m: Matrix) -> int:
+    """list_taxes, and the Id of the one tax-exempt rate; Skipped, with a note and without guessing, when there is none or several."""
+    rates = tax_exempt_rates((await m.tool("list_taxes")).get("items"))
+    if len(rates) != 1:
+        found = "none" if not rates else f"{len(rates)} (Ids {', '.join(str(row['Id']) for row in rates)})"
+        raise Skipped(
+            "precondition not met: list_taxes must hold exactly one rate with Percentage 0 whose Name or Code is exactly 'Tax Exempt' "
+            f"(case-insensitive) to put on the Approved invoice, and it holds {found}; nothing was written (no rate is guessed)"
+        )
+    return rates[0]["Id"]
 
 
 def unemailable_contact(row: Any) -> bool:
@@ -1194,6 +1567,7 @@ class Lookups:
     everyone: int
     api: int
     normal: int
+    sources: list[dict[str, Any]] = field(default_factory=list)  # every row of list_ticket_sources (the ticket_source area picks another)
 
     def status(self, name: str) -> int:
         return named_id(self.statuses, name, "ticket status")
@@ -1230,6 +1604,8 @@ class Matrix:
         with_documents: bool = False,
         with_asset_move: bool = False,
         second_client_active: bool = False,  # fail closed: a move needs the run to say that the second client is Active
+        opt_in: Iterable[str] = (),
+        approve_via_update: bool = False,
     ) -> None:
         if with_approved_invoice and gorelo is None:  # the one create is sent with 429 retries off: the client must be reachable
             raise SetupError(
@@ -1252,6 +1628,8 @@ class Matrix:
         self.with_documents = with_documents
         self.with_asset_move = with_asset_move
         self.second_client_active = second_client_active  # the status check of the run: a moved asset's new client must be Active
+        self.opt_in = frozenset(opt_in)  # the opt-in areas of 1.5.0 this run enabled (OPT_INS keys)
+        self.approve_via_update = approve_via_update  # the approved invoice is approved with approve_invoice, not created Approved
         self.sync_interval = sync_interval
         self.sync_polls = sync_polls
         self.gorelo = gorelo  # only the approved invoice run holds it (see without_429_retries)
@@ -1364,6 +1742,7 @@ class Matrix:
                 everyone=named_id(groups, "Everyone", "group"),
                 api=named_id(sources, "Api", "ticket source"),
                 normal=named_id(priorities, "Normal", "ticket priority"),
+                sources=sources,
             )
         return self._lookups
 
@@ -2772,6 +3151,55 @@ async def check_nobody_can_be_emailed(m: Matrix) -> None:
     )
 
 
+async def approve_draft_by_update(m: Matrix, label: str, line: dict[str, Any], tax_id: int) -> dict[str, Any]:
+    """--approve-via-update: create ONE Draft of $1 (create_invoice, the tax-exempt rate as tax_id, no recipient), check what Gorelo stored, record it for the approval
+    and approve it with approve_invoice (a PATCH of StatusId 5). Returns the approved invoice as the tool
+    read it back.
+
+    The Draft is created and recorded as any Draft (status_id 1). The guard approves only a Draft whose manifest details hold
+    approve_via_update true, a total above 0 and at most APPROVED_INVOICE_LIMIT, and total_tax 0, so those are written from the matrix's own read of
+    the Draft (the tax-exempt rate, tax_id and its Percentage 0, is recorded with it) (a total or a tax that is not what was asked for stops the area here, with the Draft left to the cleanup, which deletes it). The
+    client's 429 retries are off around the approval alone: the guard allows ONE approval, and a retried PATCH would count as a second. When the
+    approval call fails after a request was sent, the invoice is read again and the manifest takes the status Gorelo says, so a Draft that was
+    approved after all is never left recorded as a Draft."""
+    today = m.clock().astimezone(timezone.utc).date()
+    made = await m.create(
+        "invoice",
+        label,
+        {"client_id": SITE.test_client, "status_id": INVOICE_DRAFT, "tax_id": tax_id, "tax_percentage": 0},
+        "create_invoice",
+        {
+            "client_id": SITE.test_client,
+            "line_items": [line],
+            "invoice_date": today.isoformat(),
+            "due_date": (today + timedelta(days=INVOICE_DUE_DAYS)).isoformat(),
+            "reference": label,
+        },
+        recorded=lambda record: {**invoice_record(record), "tax_id": tax_id, "tax_percentage": 0},
+    )
+    invoice_id = made["Id"]
+    draft = full(made, "create_invoice")
+    expect("create_invoice Status.Id (Draft, to be approved)", dig(draft, "Status", "Id"), INVOICE_DRAFT)
+    problem = tax_problem(draft)
+    if problem is not None:
+        raise CheckFailed(f"{problem}; the Draft is not approved and is left to the cleanup, which deletes it")
+    m.manifest.update_details(
+        "invoice", invoice_id, approve_via_update=True, total=draft.get("Total"), total_tax=draft.get("TotalTax")
+    )
+    sent = m.pacer.requests
+    try:
+        with m.without_429_retries():
+            approved = await m.tool("approve_invoice", invoice_id=invoice_id, confirm=True)
+    except ToolFailed as exc:
+        if m.pacer.requests == sent or exc.rejected:  # nothing reached Gorelo, or Gorelo said no: the invoice is still the Draft
+            raise
+        read = await m.tool("get_invoice", invoice_id=invoice_id)  # unconfirmed: take the status Gorelo says it has
+        m.manifest.update_details("invoice", invoice_id, **invoice_record(read, INVOICE_DRAFT))
+        raise
+    m.manifest.update_details("invoice", invoice_id, **invoice_record(approved, INVOICE_APPROVED))
+    return approved
+
+
 async def area_approved_invoice(m: Matrix) -> None:
     """ONE Approved invoice of $1 for the test client: created, read, waited for until Gorelo has pushed it to the connected
     accounting system, then voided at once and checked. The only area that calls create_approved_invoice, and it runs
@@ -2794,40 +3222,35 @@ async def area_approved_invoice(m: Matrix) -> None:
             f"no active product of nobody or of client {SITE.test_client} among the first {CATALOG_PAGE} catalog items "
             "to put on the invoice"
         )
+    tax_id = await find_tax_exempt_rate(m)  # before any write: with none or several the area is skipped (no_tax is never used here)
     label = m.manifest.label("approved invoice")
-    # Recorded (status_id, number, display_number) the moment create_approved_invoice answers, before any check; the status
-    # is what Gorelo stored, and 5 (never 1) when the answer has none, so a failed read-back cannot make an Approved invoice
-    # look like a Draft. An answer without an Id leaves the intent open: the cleanup then searches for the label.
-    #
-    # The client's 429 retries are off for this call and for nothing else (they are back right after it, also when it raises):
-    # the guard allows ONE create, so a retried POST would be refused as a second one. The call includes the tool's read-back
-    # GET, which is therefore not retried either: a 429 there is a failed read-back like any other (the invoice exists, is
-    # recorded as Approved and is left for the user with the --void-approved command). Every later request, the polls, the
-    # lookup by Number and the DELETE that voids, keeps the normal retries.
-    with m.without_429_retries():
-        made = await m.create(
-            "invoice",
-            label,
-            {"status_id": INVOICE_APPROVED},
-            "create_approved_invoice",
-            {
-                "client_id": SITE.test_client,
-                "line_items": [
-                    {
-                        "item_id": item_id,
-                        "quantity": INVOICE_LINE_QUANTITY,
-                        "unit_price": INVOICE_LINE_PRICE,
-                        "description": label,
-                        "no_tax": True,
-                    }
-                ],
-                "reference": label,
-                "confirm": True,
-            },
-            recorded=lambda record: invoice_record(record, INVOICE_APPROVED),
-        )
+    line = {"item_id": item_id, "quantity": INVOICE_LINE_QUANTITY, "unit_price": INVOICE_LINE_PRICE, "description": label, "tax_id": tax_id}
+    if m.approve_via_update:  # a Draft of $1 approved with approve_invoice (a PATCH of StatusId 5); create_approved_invoice is not called
+        made = await approve_draft_by_update(m, label, line, tax_id)
+        approver = "approve_invoice"
+    else:
+        # Recorded (status_id, number, display_number) the moment create_approved_invoice answers, before any check; the status
+        # is what Gorelo stored, and 5 (never 1) when the answer has none, so a failed read-back cannot make an Approved invoice
+        # look like a Draft. An answer without an Id leaves the intent open: the cleanup then searches for the label.
+        #
+        # The client's 429 retries are off for this call and for nothing else (they are back right after it, also when it raises):
+        # the guard allows ONE create, so a retried POST would be refused as a second one. The call includes the tool's read-back
+        # GET, which is therefore not retried either: a 429 there is a failed read-back like any other (the invoice exists, is
+        # recorded as Approved and is left for the user with the --void-approved command). Every later request, the polls, the
+        # lookup by Number and the DELETE that voids, keeps the normal retries.
+        with m.without_429_retries():
+            made = await m.create(
+                "invoice",
+                label,
+                # tax_id and its Percentage 0 are recorded BEFORE the write: the guard compares the line's TaxId with this id
+                {"status_id": INVOICE_APPROVED, "tax_id": tax_id, "tax_percentage": 0},
+                "create_approved_invoice",
+                {"client_id": SITE.test_client, "line_items": [line], "reference": label, "confirm": True},
+                recorded=lambda record: invoice_record(record, INVOICE_APPROVED),
+            )
+        approver = "create_approved_invoice"
     invoice_id = made["Id"]
-    invoice = full(made, "create_approved_invoice")
+    invoice = full(made, approver)
     name = invoice_name(invoice)
     warned: set[str] = set()
 
@@ -2842,16 +3265,16 @@ async def area_approved_invoice(m: Matrix) -> None:
     status = dig(invoice, "Status", "Id")
     if status == INVOICE_PAID:
         raise CheckFailed(
-            f"create_approved_invoice Status.Id: expected {INVOICE_APPROVED} (Approved), got {INVOICE_PAID} (Paid): "
+            f"{approver} Status.Id: expected {INVOICE_APPROVED} (Approved), got {INVOICE_PAID} (Paid): "
             f"Gorelo created invoice {name} as Paid, and it refuses to delete or void a Paid invoice, so it is left "
             "for the user"
         )
-    expect("create_approved_invoice Status.Id (Approved)", status, INVOICE_APPROVED)
-    expect("create_approved_invoice ClientId", invoice.get("ClientId"), SITE.test_client)
-    expect("create_approved_invoice Reference", invoice.get("Reference"), label)
-    check_invoice_line(invoice, item_id, label, "create_approved_invoice")
+    expect(f"{approver} Status.Id (Approved)", status, INVOICE_APPROVED)
+    expect(f"{approver} ClientId", invoice.get("ClientId"), SITE.test_client)
+    expect(f"{approver} Reference", invoice.get("Reference"), label)
+    check_invoice_line(invoice, item_id, label, approver)
     total = invoice.get("Total")
-    check(is_amount(total) and total > 0, f"create_approved_invoice Total is {total!r}, expected an amount above 0")
+    check(is_amount(total) and total > 0, f"{approver} Total is {total!r}, expected an amount above 0")
     m.note(
         f"approved invoice number consumed: Number {invoice.get('Number')!r}, DisplayNumber {invoice.get('DisplayNumber')!r} "
         "(an Approved invoice cannot be removed, only voided, and it stays listed as Void)"
@@ -2929,7 +3352,7 @@ async def area_approved_invoice(m: Matrix) -> None:
     after = await m.tool("get_invoice", invoice_id=invoice_id)
     check(same_guid(after.get("Id"), invoice_id), "get_invoice returned another invoice after the void")
     watch(after, "after the void")
-    # The no-tax check (TaxId null, 1 x 1.0) is a note and nothing more: it comes after the void and never raises, so it can
+    # The no-tax check (the tax-exempt TaxId, 1 x 1.0) is a note and nothing more: it comes after the void and never raises, so it can
     # neither stop nor skip the void or the bookkeeping below. A loud note is how an invoice that was taxed is noticed.
     problem = tax_problem(after)
     if problem is None:
@@ -3091,6 +3514,784 @@ async def area_projects(m: Matrix) -> None:
 
 
 # --------------------------------------------------------------------------
+# The opt-in areas of release 1.5.0 (contract 6c30770dffc0): off by default, one flag each (OPT_INS)
+# --------------------------------------------------------------------------
+
+
+def opt_in(m: Matrix, key: str) -> OptIn:
+    """The definition of an opt-in area, after checking that the run enabled it: Skipped (nothing announced, nothing sent: its tools
+    are not even callable) with the reason otherwise. Every one of these areas needs the TEST CLIENT Active, like every write run (the
+    check of run_matrix, before a manifest is made); none of them changes the status of a client."""
+    area = OPT_IN_BY_KEY[key]
+    if key not in m.opt_in:
+        raise Skipped(area.skip_reason)
+    return area
+
+
+def status_id_of(row: Any) -> Any:
+    """The status id of a row whose Status is {Id, Name} (or, tolerated, the bare number)."""
+    status = row.get("Status") if isinstance(row, dict) else None
+    return status.get("Id") if isinstance(status, dict) else status
+
+
+def ids_of(listing: Any) -> list[Any]:
+    rows = listing.get("items") if isinstance(listing, dict) else None
+    return [row.get("Id") for row in (rows if isinstance(rows, list) else []) if isinstance(row, dict)]
+
+
+def has_id(ids: Any, ident: Any) -> bool:
+    """Is `ident` among these ids (a GUID compares ignoring case)?"""
+    return any((same_guid(found, ident) if isinstance(ident, str) else found == ident) for found in (ids if isinstance(ids, list) else []))
+
+
+def lists_id(listing: Any, ident: Any) -> bool:
+    """Does a list answer hold a row with this Id?"""
+    return has_id(ids_of(listing), ident)
+
+
+ALERT_SUBJECT_KEYS = ("AgentAssetId", "CheckId", "UptimeId", "DomainId", "ContractId", "CustomAssetId")  # what an alert is about
+ALERT_DISMISSED_PAGE = 200  # list_alerts page size when every Dismissed alert of the test client is read
+ALERT_DISMISSED_PAGES = 50  # pages read at most; more than that and the area is skipped (nothing proves the stack is free)
+
+
+def alert_stack_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    """What Gorelo groups an alert's stack by, as far as this harness can see: the Type and the subject ids (AgentAssetId, CheckId, UptimeId,
+    DomainId, ContractId, CustomAssetId), compared without regard to case. The Title is NOT part of it: the stack is the repeats of one alert,
+    and two alerts with different titles may still be one stack, so a Title match is not trusted."""
+    kind = row.get("Type")
+    kind = kind.get("Id") if isinstance(kind, dict) else kind
+    return (kind, *[str(row[key]).lower() if row.get(key) is not None else None for key in ALERT_SUBJECT_KEYS])
+
+
+async def dismissed_alerts_of_the_test_client(m: Matrix) -> list[dict[str, Any]]:
+    """Every Dismissed alert of the test client, on EVERY page (a stack member on page two would be restored by the restore too)."""
+    rows: list[dict[str, Any]] = []
+    cursor: str | None = None
+    for _page in range(ALERT_DISMISSED_PAGES):
+        arguments: dict[str, Any] = {"client_ids": [SITE.test_client], "status": ["dismissed"], "page_size": ALERT_DISMISSED_PAGE}
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        page = await m.tool("list_alerts", **arguments)
+        rows.extend(row for row in (page.get("items") or []) if isinstance(row, dict))
+        cursor = page.get("next_cursor")
+        if not page.get("has_more") or not isinstance(cursor, str) or not cursor:
+            return rows
+    raise Skipped(
+        f"the test client {SITE.test_client} has more than {ALERT_DISMISSED_PAGES * ALERT_DISMISSED_PAGE} Dismissed alerts, so the area cannot "
+        "prove that restoring one to New would not move another back; nothing was changed"
+    )
+
+
+async def area_alert_status(m: Matrix) -> None:
+    """Dismiss, then restore to New, ONE existing New alert of the test client (set_alert_status, get_alert).
+
+    The run never creates an alert (post_alert is not a tool of the matrix). Gorelo changes the whole stack of an alert (the repeats grouped
+    with it) with it: dismissing moves every New alert of the stack and restoring to New moves every Dismissed one back. So the area reads
+    EVERY Dismissed alert of the test client (all pages) and uses an alert only when none of them shares its Type and subject ids
+    (alert_stack_key; the Title is not compared): restoring would move such an alert back to New, which the run did not dismiss. After the
+    restore, an id in its UpdatedIds that the dismissal did not name FAILS the area, naming the ids as a leftover for the user.
+    The alert is recorded in the manifest (kind alert, details client_id and status_before 1, then dismissed_ids: the ids the dismissal
+    moved) BEFORE the first change: the guard allows only a recorded alert of the test client and the cleanup restores one a stopped run
+    left dismissed, only within the run's window and only for the ids recorded. Skipped, with a note, when no alert of the test client is New."""
+    opt_in(m, "alert_status")
+    listing = await m.tool("list_alerts", client_ids=[SITE.test_client], page_size=50)
+    rows = [row for row in (listing.get("items") or []) if isinstance(row, dict)]
+    candidates = [
+        row
+        for row in rows
+        if is_guid(row.get("Id")) and status_id_of(row) == ALERT_NEW and row.get("ClientId") == SITE.test_client
+    ]
+    if not candidates:
+        raise Skipped(f"no alert of the test client {SITE.test_client} is New among the {len(rows)} listed, so there is nothing to dismiss")
+    dismissed_already = await dismissed_alerts_of_the_test_client(m)
+    taken = {alert_stack_key(other) for other in dismissed_already}
+    chosen = next((row for row in candidates if alert_stack_key(row) not in taken), None)
+    if chosen is None:
+        raise Skipped(
+            f"every New alert of the test client {SITE.test_client} shares its Type and subject with a Dismissed alert (the Title is not "
+            "compared), which restoring to New would move back too; nothing was changed"
+        )
+    alert_id = chosen["Id"]
+    label = m.manifest.label(f"alert {alert_id}")
+    m.manifest.created("alert", alert_id, label, {"client_id": SITE.test_client, "status_before": ALERT_NEW})
+    dismissed = await m.tool("set_alert_status", alert_ids=[alert_id], status="dismissed")
+    check(has_id(dismissed.get("UpdatedIds"), alert_id), "set_alert_status dismissed: UpdatedIds does not name the alert")
+    moved = [str(item) for item in dismissed.get("UpdatedIds", [])]
+    m.manifest.update_details("alert", alert_id, dismissed_ids=moved)  # what the cleanup may restore, and the area checks the restore against
+    count = len(moved)
+    got = await m.tool("get_alert", alert_id=alert_id)
+    check(same_guid(got.get("Id"), alert_id), "get_alert returned another alert")
+    expect("get_alert Status.Id after the dismissal", status_id_of(got), ALERT_DISMISSED)
+    check(got.get("DismissedOn") is not None, "get_alert after the dismissal: DismissedOn is not set")
+    restored = await m.tool("set_alert_status", alert_ids=[alert_id], status="new")
+    check(has_id(restored.get("UpdatedIds"), alert_id), "set_alert_status new: UpdatedIds does not name the alert")
+    back = await m.tool("get_alert", alert_id=alert_id)
+    expect("get_alert Status.Id after the restore", status_id_of(back), ALERT_NEW)
+    check(back.get("DismissedOn") is None, "get_alert after the restore: DismissedOn is still set")
+    m.mark_cleaned("alert", alert_id, "restored to New by the write matrix (set_alert_status)")
+    known = {item.lower() for item in moved}
+    extra = [str(item) for item in restored.get("UpdatedIds", []) if str(item).lower() not in known]
+    if extra:
+        raise CheckFailed(
+            f"set_alert_status new moved back {len(extra)} alert(s) that the dismissal had not moved: {', '.join(extra)}. They were Dismissed "
+            "before the run or were dismissed by somebody meanwhile and are New now: LEFT FOR THE USER, who has to dismiss them again in the "
+            "Gorelo app if they should stay dismissed"
+        )
+    m.note(
+        f"alert {alert_id} dismissed ({count} alert(s) of its stack moved) and restored to New ({len(restored.get('UpdatedIds', []))} moved back); "
+        "get_alert read Dismissed with DismissedOn set, then New with it cleared"
+    )
+
+
+async def area_asset_types(m: Matrix) -> None:
+    """Create, rename and delete an MCPTEST asset type (asset types belong to the whole account, so the name starts with the run id)."""
+    opt_in(m, "asset_types")
+    label = m.manifest.label("asset type")
+    made = full(await m.create("asset_type", label, {}, "create_asset_type", {"name": label}), "create_asset_type")
+    type_id = made["Id"]
+    expect("create_asset_type Name", made.get("Name"), label)
+    renamed = f"{label} renamed"
+    changed = full(await m.tool("update_asset_type", asset_type_id=type_id, name=renamed), "update_asset_type")
+    expect("update_asset_type Name", changed.get("Name"), renamed)
+    listing = await m.tool("list_asset_types")
+    shown = [row for row in listing.get("items", []) if isinstance(row, dict) and row.get("Id") == type_id]
+    check(len(shown) == 1 and shown[0].get("Name") == renamed, "list_asset_types does not show the renamed type once")
+    gone = await m.tool("delete_asset_type", asset_type_id=type_id, confirm=True)
+    expect("delete_asset_type Id", gone.get("Id"), type_id)
+    check(not lists_id(await m.tool("list_asset_types"), type_id), "list_asset_types still lists the deleted type")
+    m.mark_cleaned("asset_type", type_id, "deleted by the write matrix (delete_asset_type)")
+
+
+async def area_client_locations(m: Matrix) -> None:
+    """Create, update and delete one MCPTEST location of the test client. Gorelo marks a deleted location inactive: it leaves the client's list
+    (checked) and the single read afterwards is only noted."""
+    opt_in(m, "client_locations")
+    client = SITE.test_client
+    label = m.manifest.label("location")
+    made = full(
+        await m.create(
+            "client_location",
+            label,
+            {"client_id": client},
+            "create_client_location",
+            {"client_id": client, "name": label, "address1": "1 Test Street", "city": "Seattle"},
+        ),
+        "create_client_location",
+    )
+    location = made["Id"]
+    expect("create_client_location Name", made.get("Name"), label)
+    expect("create_client_location ClientId", made.get("ClientId"), client)
+    check(made.get("IsDefault") is not True, "create_client_location: the new location is the default location of the test client")
+    changed = full(
+        await m.tool("update_client_location", client_id=client, location_id=location, city="Tacoma", address2="Suite 2"),
+        "update_client_location",
+    )
+    expect("update_client_location City", changed.get("City"), "Tacoma")
+    expect("update_client_location Address2", changed.get("Address2"), "Suite 2")
+    expect("update_client_location Name (left out of the update)", changed.get("Name"), label)
+    got = await m.tool("get_client_location", client_id=client, location_id=location)
+    expect("get_client_location City", got.get("City"), "Tacoma")
+    check(lists_id(await m.tool("list_client_locations", client_id=client), location), "list_client_locations does not list the new location")
+    gone = await m.tool("delete_client_location", client_id=client, location_id=location, confirm=True)
+    expect("delete_client_location Id", gone.get("Id"), location)
+    check(not lists_id(await m.tool("list_client_locations", client_id=client), location), "list_client_locations still lists the deleted location")
+    try:
+        after = await m.tool("get_client_location", client_id=client, location_id=location)
+        m.note(f"get_client_location after the delete still answers (IsDefault {after.get('IsDefault')!r}): Gorelo keeps an inactive location")
+    except ToolFailed as exc:
+        m.note(f"get_client_location after the delete answers: {exc.text[:120]}")
+    m.mark_cleaned("client_location", location, "deleted by the write matrix (delete_client_location; Gorelo marks it inactive)")
+
+
+async def area_client_domains(m: Matrix) -> None:
+    """Create, update and delete one MCPTEST domain of the test client: mcptest-<run>.example, under the reserved .example TLD (it can route no
+    inbound email). The expiration date is sent explicitly, so Gorelo's registry lookup is never asked."""
+    opt_in(m, "client_domains")
+    client = SITE.test_client
+    name = m.manifest.run_id.lower() + ".example"
+    label = m.manifest.label("domain")
+    today = m.clock().astimezone(timezone.utc).date()
+    first, second = (today + timedelta(days=365)).isoformat(), (today + timedelta(days=366)).isoformat()
+    made = full(
+        await m.create(
+            "client_domain",
+            label,
+            {"client_id": client, "name": name},
+            "create_client_domain",
+            {"client_id": client, "name": name, "expiration_date": first},
+        ),
+        "create_client_domain",
+    )
+    domain = made["Id"]
+    expect("create_client_domain Name", made.get("Name"), name)
+    expect("create_client_domain ExpirationDate", date_text(made.get("ExpirationDate")), first)
+    changed = full(
+        await m.tool("update_client_domain", client_id=client, domain_id=domain, expiration_date=second), "update_client_domain"
+    )
+    expect("update_client_domain ExpirationDate", date_text(changed.get("ExpirationDate")), second)
+    expect("update_client_domain Name (left out of the update)", changed.get("Name"), name)
+    gone = await m.tool("delete_client_domain", client_id=client, domain_id=domain, confirm=True)
+    expect("delete_client_domain Id", gone.get("Id"), domain)
+    domains = (await m.tool("get_client", client_id=client)).get("Domains")
+    check(
+        not any(isinstance(entry, dict) and entry.get("Id") == domain for entry in (domains if isinstance(domains, list) else [])),
+        "get_client still lists the deleted domain in its Domains",
+    )
+    m.mark_cleaned("client_domain", domain, "deleted by the write matrix (delete_client_domain)")
+
+
+async def area_contact_tags(m: Matrix) -> None:
+    """On an MCPTEST contact: set tag_ids, update another field WITHOUT tag_ids, then clear the tags with [].
+
+    update_contact sends TagIds only when the caller gives tag_ids and never re-sends the stored tags (Gorelo's text: "omit to leave it
+    unchanged"), so the second step tests Gorelo's own omit rule. Whether Gorelo kept the tags is NOT a failure of the area either way: it is
+    the answer the run was made to get, and the note says which it was (the update's answer and a fresh get_contact are both read)."""
+    opt_in(m, "contact_tags")
+    tags = (await m.tool("list_contact_tags")).get("items")
+    tag = first_int_id(tags)
+    if tag is None:
+        raise Skipped("the tenant has no contact tag to set")
+    run = m.manifest.run_id
+    label = m.manifest.label("tagged contact")
+    made = full(
+        await m.create(
+            "contact",
+            label,
+            {"client_id": SITE.test_client},
+            "create_contact",
+            {
+                "client_id": SITE.test_client,
+                "first_name": run,
+                "last_name": "Tagged",
+                "primary_email": f"{run.lower()}-tags@example.invalid",
+            },
+        ),
+        "create_contact",
+    )
+    contact = made["Id"]
+    expect("create_contact TagIds (none asked for)", made.get("TagIds"), [])
+    tagged = await m.tool("update_contact", contact_id=contact, tag_ids=[tag])
+    expect("update_contact TagIds after setting them", tagged.get("TagIds"), [tag])
+    title = f"{run} tagged title"
+    omitted = await m.tool("update_contact", contact_id=contact, job_title=title)
+    expect("update_contact JobTitle", omitted.get("JobTitle"), title)
+    back = await m.tool("get_contact", contact_id=contact)
+    answered, stored = omitted.get("TagIds"), back.get("TagIds")
+    kept = answered == [tag] and stored == [tag]
+    cleared = await m.tool("update_contact", contact_id=contact, tag_ids=[])
+    expect("update_contact TagIds after tag_ids=[]", cleared.get("TagIds"), [])
+    expect("get_contact TagIds after tag_ids=[]", (await m.tool("get_contact", contact_id=contact)).get("TagIds"), [])
+    m.note(
+        f"contact tags (tag {tag}) set; an update that named no tag_ids (Gorelo's omit rule, nothing re-sent): "
+        + (
+            "Gorelo KEPT the tags (omitting TagIds leaves them unchanged)"
+            if kept
+            else f"Gorelo did NOT keep the tags (the update answered TagIds {answered!r} and get_contact read {stored!r}), so omitting TagIds "
+            "does not leave them unchanged"
+        )
+        + "; then cleared with []"
+    )
+
+
+async def area_product_charges(m: Matrix) -> None:
+    """On the run's plain MCPTEST ticket of the test client: create, update and delete a No charge product charge (billable status 2, so it
+    can never be invoiced). The product is the first active product of nobody or of the test client; the ticket is the plain ticket the
+    comments and time areas use (made here when this area runs alone)."""
+    opt_in(m, "product_charges")
+    found = await m.tool("list_items", type="product", status="active", page_size=CATALOG_PAGE)
+    item_id = billable_item(found.get("items"))
+    if item_id is None:
+        raise Skipped(
+            f"no active product of nobody or of client {SITE.test_client} among the first {CATALOG_PAGE} catalog items to charge"
+        )
+    ticket = full(await m.plain_ticket(), "create_ticket")["Id"]
+    label = m.manifest.label("product charge")
+    made = full(
+        await m.create(
+            "product_charge",
+            label,
+            {"ticket_id": ticket, "client_id": SITE.test_client},
+            "create_product_charge",
+            {
+                "item_id": item_id,
+                "ticket_id": ticket,
+                "quantity": 1,
+                "unit_price": 1.0,
+                "description": label,
+                "billable_status_id": NO_CHARGE,
+            },
+        ),
+        "create_product_charge",
+    )
+    charge = made["Id"]
+    check(same_guid(made.get("TicketId"), ticket), "create_product_charge: the charge is not on the ticket that was asked for")
+    expect("create_product_charge Quantity", made.get("Quantity"), 1)
+    expect("create_product_charge BillableStatus.Id (No charge)", dig(made, "BillableStatus", "Id"), NO_CHARGE)
+    expect("create_product_charge ClientId", made.get("ClientId"), SITE.test_client)
+    changed = await m.tool("update_product_charge", product_charge_id=charge, quantity=2, unit_price=2.0, description=f"{label} updated")
+    expect("update_product_charge Quantity", changed.get("Quantity"), 2)
+    expect("update_product_charge UnitPrice", changed.get("UnitPrice"), 2.0)
+    expect("update_product_charge BillableStatus.Id (left out of the update)", dig(changed, "BillableStatus", "Id"), NO_CHARGE)
+    got = await m.tool("get_product_charge", product_charge_id=charge)
+    expect("get_product_charge Description", got.get("Description"), f"{label} updated")
+    check(lists_id(await m.tool("list_product_charges", ticket_ids=[ticket]), charge), "list_product_charges does not list the new charge")
+    gone = await m.tool("delete_product_charge", product_charge_id=charge, confirm=True)
+    expect("delete_product_charge Id", gone.get("Id"), charge)
+    check(not lists_id(await m.tool("list_product_charges", ticket_ids=[ticket]), charge), "list_product_charges still lists the deleted charge")
+    m.mark_cleaned("product_charge", charge, "deleted by the write matrix (delete_product_charge)")
+
+
+async def area_ticket_source(m: Matrix) -> None:
+    """Set the source of the run's plain MCPTEST ticket to another source (1 to 6; 7 Messenger is read back only, never written) and read it
+    back, then put it back to the Api source the ticket was created with."""
+    opt_in(m, "ticket_source")
+    lookups = await m.lookups()
+    plain = full(await m.plain_ticket(), "create_ticket")
+    ticket = plain["Id"]
+    current = dig(plain, "Source", "Id")
+    other = next(
+        (
+            row
+            for row in lookups.sources
+            if isinstance(row, dict) and is_id(row.get("Id")) and row["Id"] <= 6 and row["Id"] not in (current, lookups.api)
+        ),
+        None,
+    )
+    if other is None:
+        raise Skipped("list_ticket_sources has no writable source (1 to 6) other than the one of the ticket")
+    changed = await m.tool("update_ticket", ticket_id=ticket, source_id=other["Id"])
+    expect("update_ticket Source.Id", dig(changed, "Source", "Id"), other["Id"])
+    got = await m.get_ticket(ticket, "guid")
+    expect("get_ticket Source.Id after the update", dig(got, "Source", "Id"), other["Id"])
+    back = await m.tool("update_ticket", ticket_id=ticket, source_id=lookups.api)
+    expect("update_ticket Source.Id (back to Api)", dig(back, "Source", "Id"), lookups.api)
+    m.note(f"ticket source set to {other['Id']} ({other.get('Name')!r}) and read back, then put back to {lookups.api} (Api)")
+
+
+def line_state(line: Any) -> dict[str, Any]:
+    """What a line (or contract line item) says about its price: the values that an entry with an Id only must leave alone."""
+    line = line if isinstance(line, dict) else {}
+    return {
+        "Quantity": line.get("Quantity"),
+        "UnitPrice": line.get("UnitPrice"),
+        "Description": line.get("Description"),
+        "DiscountPercent": line.get("DiscountPercent"),
+        "Tax": dig(line, "Tax", "Id"),
+        "BillableStatus": dig(line, "BillableStatus", "Id"),
+    }
+
+
+def lines_by_text(invoice: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The invoice's lines by their Description (the run label plus a letter): line text -> line."""
+    lines = invoice.get("LineItems")
+    found = {}
+    for line in lines if isinstance(lines, list) else []:
+        if isinstance(line, dict) and isinstance(line.get("Description"), str):
+            found[line["Description"]] = line
+    return found
+
+
+async def area_invoice_update(m: Matrix) -> None:
+    """update_invoice on a Draft of the test client, then a TAX PROBE.
+
+    The Draft has two lines (A and B). Steps: update the reference and both dates; add line C; change line A; remove line C. After every step
+    the lines the step did not name must read exactly as before (the tool sends {Id} alone for them: this settles whether Gorelo keeps the
+    fields an entry with only an Id leaves out). The Draft is deleted at the end (it uses up an invoice number).
+
+    The TAX PROBE: a temporary MCPTEST catalog item whose tax is the first rate of list_taxes with Percentage above 0 (skipped, with a note, when
+    there is none, or when list_taxes does not hold exactly one Tax Exempt rate: the tool would refuse) goes onto a second Draft with
+    no_tax=true. The tool looks up the Tax Exempt rate and sends its id as TaxId (a null would give the item's own tax, measured 2026-10-30).
+    The rate is recorded in the intent before the write. The note records which TaxId the tool used and which TaxId and tax amount Gorelo
+    applied. The area FAILS unless the line's TaxAmount and the invoice's TotalTax read 0. create_invoice adds a `warning` to its answer when
+    a no_tax line still shows tax; the note records it. The Draft and the item are deleted first, then the check is made."""
+    opt_in(m, "invoice_update")
+    found = await m.tool("list_items", type="product", status="active", page_size=CATALOG_PAGE)
+    item_id = billable_item(found.get("items"))
+    if item_id is None:
+        raise Skipped(
+            f"no active product of nobody or of client {SITE.test_client} among the first {CATALOG_PAGE} catalog items to put on the invoice"
+        )
+    today = m.clock().astimezone(timezone.utc).date()
+    label = m.manifest.label("update invoice")
+    text_a, text_b, text_c = f"{label} A", f"{label} B", f"{label} C"
+
+    def line(text: str, price: float) -> dict[str, Any]:
+        return {"item_id": item_id, "quantity": 1, "unit_price": price, "description": text}
+
+    made = await m.create(
+        "invoice",
+        label,
+        {"client_id": SITE.test_client, "status_id": INVOICE_DRAFT},
+        "create_invoice",
+        {
+            "client_id": SITE.test_client,
+            "line_items": [line(text_a, 1.0), line(text_b, 2.0)],
+            "invoice_date": today.isoformat(),
+            "due_date": (today + timedelta(days=INVOICE_DUE_DAYS)).isoformat(),
+            "reference": label,
+        },
+        recorded=invoice_record,
+    )
+    invoice_id = made["Id"]
+    invoice = full(made, "create_invoice")
+    expect("create_invoice Status.Id (Draft)", dig(invoice, "Status", "Id"), INVOICE_DRAFT)
+    before = lines_by_text(invoice)
+    check(set(before) == {text_a, text_b}, "create_invoice: the Draft does not have exactly the two lines that were asked for")
+    states = {text: line_state(row) for text, row in before.items()}
+    m.note(
+        f"invoice number consumed: Number {invoice.get('Number')!r}, DisplayNumber {invoice.get('DisplayNumber')!r} (a Draft uses up one invoice number)"
+    )
+
+    def same_as_before(read: dict[str, Any], texts: list[str], step: str) -> None:
+        lines = lines_by_text(read)
+        for text in texts:
+            name = text[len(label):].strip()
+            check(text in lines, f"update_invoice ({step}) line {name} (named by its Id only): it no longer reads with its text, so its values were not kept")
+            expect(f"update_invoice ({step}) line {name} (named by its Id only)", line_state(lines[text]), states[text])
+
+    reference, new_date, new_due = f"{label} ref", (today + timedelta(days=1)).isoformat(), (today + timedelta(days=30)).isoformat()
+    step = await m.tool("update_invoice", invoice_id=invoice_id, reference=reference, invoice_date=new_date, due_date=new_due)
+    expect("update_invoice Reference", step.get("Reference"), reference)
+    expect("update_invoice InvoiceDate", date_text(step.get("InvoiceDate")), new_date)
+    expect("update_invoice DueDate", date_text(step.get("DueDate")), new_due)
+    same_as_before(step, [text_a, text_b], "header only")
+    step = await m.tool("update_invoice", invoice_id=invoice_id, add_lines=[line(text_c, 3.0)])
+    check(len(step.get("LineItems") or []) == 3, "update_invoice (add a line): the Draft does not have three lines")
+    same_as_before(step, [text_a, text_b], "a line added")
+    states[text_c] = line_state(lines_by_text(step).get(text_c))
+    line_a = lines_by_text(step)[text_a]["Id"]
+    step = await m.tool("update_invoice", invoice_id=invoice_id, update_lines=[{"line_id": line_a, "quantity": 2, "unit_price": 4.0}])
+    changed_a = line_state(lines_by_text(step).get(text_a))
+    expect("update_invoice (change a line) Quantity of line A", changed_a["Quantity"], 2)
+    expect("update_invoice (change a line) UnitPrice of line A", changed_a["UnitPrice"], 4.0)
+    states[text_a] = {**states[text_a], "Quantity": 2, "UnitPrice": 4.0}
+    same_as_before(step, [text_a, text_b, text_c], "a line changed")
+    line_c = lines_by_text(step)[text_c]["Id"]
+    step = await m.tool("update_invoice", invoice_id=invoice_id, remove_line_ids=[line_c])
+    check(len(step.get("LineItems") or []) == 2, "update_invoice (remove a line): the Draft does not have two lines")
+    same_as_before(step, [text_a, text_b], "a line removed")
+    m.note(
+        "update_invoice: the lines that a step did not name were sent as {Id} alone and read back with the same Quantity, UnitPrice, "
+        "Description, DiscountPercent, Tax and BillableStatus after all four steps: Gorelo keeps the fields an entry with only an Id leaves out"
+    )
+    after = await m.tool("get_invoice", invoice_id=invoice_id)
+    expect("get_invoice Status.Id before the delete", dig(after, "Status", "Id"), INVOICE_DRAFT)
+    number = after.get("Number")
+    if is_id(number):
+        gone = await m.delete_draft(number)
+        check(same_guid(gone.get("Id"), invoice_id), "delete_invoice answered with another invoice's Id")
+        expect("delete_invoice StatusId (Deleted)", gone.get("StatusId"), INVOICE_DELETED)
+        m.mark_cleaned("invoice", invoice_id, "deleted by the write matrix (delete_invoice, Draft)")
+    else:
+        m.note("the Draft has no Number, so delete_invoice cannot find it: the cleanup removes it with its raw DELETE")
+    await tax_probe(m, today)
+
+
+async def tax_probe(m: Matrix, today: Any) -> None:
+    """Does no_tax=true give NO tax on a line of an item taxed above 0? A temporary MCPTEST item taxed at a rate above 0 goes onto a Draft with
+    no_tax=true; the tool sends the id of the Tax Exempt rate. The note says which TaxId the tool used and which TaxId and tax amount Gorelo
+    applied; the area FAILS (after the Draft and the item are deleted) unless TaxAmount and TotalTax read 0. Skipped, with a note, when
+    list_taxes has no rate above 0 or not exactly one Tax Exempt rate."""
+    taxes = (await m.tool("list_taxes")).get("items")
+    rate = next(
+        (
+            row
+            for row in (taxes if isinstance(taxes, list) else [])
+            if isinstance(row, dict) and is_id(row.get("Id")) and is_amount(row.get("Percentage")) and row["Percentage"] > 0
+        ),
+        None,
+    )
+    if rate is None:
+        m.note("TAX PROBE skipped: list_taxes has no rate with Percentage above 0")
+        return
+    exempt = tax_exempt_rates(taxes)
+    if len(exempt) != 1:
+        found = "none" if not exempt else f"{len(exempt)} (Ids {', '.join(str(row['Id']) for row in exempt)})"
+        m.note(f"TAX PROBE skipped: list_taxes must hold exactly one Tax Exempt rate for no_tax to resolve (it holds {found}); nothing was written")
+        return
+    exempt_id = exempt[0]["Id"]
+    item_label = m.manifest.label("tax probe item")
+    item = full(
+        await m.create(
+            "item",
+            item_label,
+            {"client_id": SITE.test_client},
+            "create_item",
+            {
+                "type": "product",
+                "name": item_label,
+                "client_id": SITE.test_client,
+                "description": f"{item_label}: created by the live write matrix, safe to delete.",
+                "unit_price": 1.0,
+                "tax_id": rate["Id"],
+            },
+        ),
+        "create_item",
+    )
+    item_id = item["Id"]
+    label = m.manifest.label("tax probe invoice")
+    made = await m.create(
+        "invoice",
+        label,
+        # the exempt rate and its Percentage 0 are recorded BEFORE the write (the approved invoice's pattern): the guard allows no other TaxId
+        {"client_id": SITE.test_client, "status_id": INVOICE_DRAFT, "tax_id": exempt_id, "tax_percentage": 0},
+        "create_invoice",
+        {
+            "client_id": SITE.test_client,
+            "line_items": [{"item_id": item_id, "quantity": 1, "unit_price": 1.0, "description": label, "no_tax": True}],
+            "invoice_date": today.isoformat(),
+            "due_date": (today + timedelta(days=INVOICE_DUE_DAYS)).isoformat(),
+            "reference": label,
+        },
+        recorded=lambda record: {**invoice_record(record), "tax_id": exempt_id, "tax_percentage": 0},
+    )
+    invoice_id = made["Id"]
+    # create_invoice adds a `warning` to the FULL invoice when a no_tax line still shows tax; a warning on an answer without line items is a
+    # failed read-back (full() raises for that one). The tax warning is a finding of the probe, so it is taken off and recorded in the note.
+    tool_warning = made.get("warning") if isinstance(made.get("LineItems"), list) else None
+    tool_note = made.get("note") if isinstance(made.get("note"), str) else None
+    dropped = ("warning", "note") if tool_warning else ("note",)
+    invoice = full({key: value for key, value in made.items() if key not in dropped}, "create_invoice")
+    got = await m.tool("get_invoice", invoice_id=invoice_id)  # a fresh read: what Gorelo stored, not what the create answered
+    row = lines_by_text(got).get(label) or {}
+    applied, amount, total_tax = dig(row, "Tax", "Id"), row.get("TaxAmount"), got.get("TotalTax", invoice.get("TotalTax"))
+    gave_none = is_amount(amount) and amount == 0 and is_amount(total_tax) and total_tax == 0  # by the amounts: how "no tax" is spelled is Gorelo's
+    verdict = (
+        "no_tax=true gave NO tax"
+        if gave_none
+        else "no_tax=true did NOT give no tax (a tax was applied although the Tax Exempt rate was sent): the area FAILS"
+    )
+    m.note(
+        f"TAX PROBE: a line of an item taxed at {rate['Percentage']:g}% (TaxId {rate['Id']}) created with no_tax=true (the tool sent TaxId "
+        f"{exempt_id}, the Tax Exempt rate): Gorelo applied TaxId {applied!r}, line TaxAmount {amount_text(amount)}, invoice TotalTax "
+        f"{amount_text(total_tax)}: {verdict}"
+        + (f"; create_invoice warning: {tool_warning}" if tool_warning else "; create_invoice added no warning")
+        + (f"; create_invoice note: {tool_note}" if tool_note else "")
+    )
+    number = got.get("Number")
+    if is_id(number) and dig(got, "Status", "Id") == INVOICE_DRAFT:
+        gone = await m.delete_draft(number)
+        expect("delete_invoice StatusId (Deleted, tax probe)", gone.get("StatusId"), INVOICE_DELETED)
+        m.mark_cleaned("invoice", invoice_id, "deleted by the write matrix (delete_invoice, Draft)")
+    else:
+        m.note("the tax probe Draft was not deleted by the area (no Number or not a Draft): the cleanup handles it")
+    gone_item = await m.tool("delete_item", item_id=item_id, confirm=True)
+    check(same_guid(gone_item.get("Id"), item_id), "delete_item answered with another item's Id")
+    m.mark_cleaned("item", item_id, "deleted by the write matrix (delete_item)")
+    check(
+        gave_none,
+        f"TAX PROBE FAILED: a line created with no_tax=true (TaxId {exempt_id}, the Tax Exempt rate) shows TaxAmount {amount_text(amount)} and the "
+        f"invoice TotalTax {amount_text(total_tax)}, expected 0 and 0: no_tax does not give no tax",
+    )
+
+
+async def area_contracts(m: Matrix) -> None:
+    """An MCPTEST Hourly contract (labor terms 2) on the test client: one service line with two line items (No charge), update its name and
+    one line item, add a second service line then remove it, check that the entries sent with an Id only kept their values, then archive it
+    (status 3). A contract CANNOT be deleted through the API (the guard refuses the DELETE): the archived contract is a known residue, like an
+    archived document. Never a Block Hours line (it raises an invoice) and never auto_approve_and_send true."""
+    opt_in(m, "contracts")
+    found = await m.tool("list_items", type="product", status="active", page_size=CATALOG_PAGE)
+    item_id = billable_item(found.get("items"))
+    if item_id is None:
+        raise Skipped(
+            f"no active product of nobody or of client {SITE.test_client} among the first {CATALOG_PAGE} catalog items to bill on the contract"
+        )
+    client = SITE.test_client
+    label = m.manifest.label("contract")
+    hourly = {"rate_type_id": 1}
+    made = full(
+        await m.create(
+            "contract",
+            label,
+            {"client_id": client},
+            "create_contract",
+            {
+                "name": label,
+                "client_id": client,
+                "service_lines": [
+                    {
+                        "name": f"{label} line",
+                        "labor_terms_id": 2,
+                        "per_hour_details": hourly,
+                        "line_items": [
+                            {"item_id": item_id, "quantity": 1, "unit_price": 1.0, "description": f"{label} item A", "billable_status_id": NO_CHARGE},
+                            {"item_id": item_id, "quantity": 3, "unit_price": 2.0, "description": f"{label} item B", "billable_status_id": NO_CHARGE},
+                        ],
+                    }
+                ],
+                "confirm": True,
+            },
+        ),
+        "create_contract",
+    )
+    contract = made["Id"]
+
+    def lines_of(record: dict[str, Any]) -> list[dict[str, Any]]:
+        lines = record.get("ServiceLines")
+        return [row for row in (lines if isinstance(lines, list) else []) if isinstance(row, dict)]
+
+    expect("create_contract Name", made.get("Name"), label)
+    expect("create_contract Client.Id", dig(made, "Client", "Id"), client)
+    expect("create_contract Status.Id (Active)", dig(made, "Status", "Id"), 1)
+    first = lines_of(made)
+    check(len(first) == 1, f"create_contract: the contract has {len(first)} service lines, expected 1")
+    expect("create_contract line LaborTerms.Id (Hourly)", dig(first[0], "LaborTerms", "Id"), 2)
+    items = first[0].get("LineItems") if isinstance(first[0].get("LineItems"), list) else []
+    check(len(items) == 2, f"create_contract: the service line has {len(items)} line items, expected 2")
+    line_id = first[0]["Id"]
+    item_a = next((row for row in items if row.get("Description") == f"{label} item A"), None)
+    item_b = next((row for row in items if row.get("Description") == f"{label} item B"), None)
+    check(item_a is not None and item_b is not None, "create_contract: the service line does not have the line items A and B that were asked for")
+    kept_b = line_state(item_b)  # line item B and the service line's name are only ever named by their Id: they must never change
+    line_name = f"{label} line"
+
+    def check_kept(record: dict[str, Any], step: str) -> None:
+        lines = lines_of(record)
+        current = next((row for row in lines if row.get("Id") == line_id), None)
+        check(current is not None, f"update_contract ({step}): the first service line is gone")
+        expect(f"update_contract ({step}) service line Name (named by its Id only)", current.get("Name"), line_name)
+        row = next((x for x in current.get("LineItems") or [] if x.get("Id") == item_b["Id"]), None)
+        check(row is not None, f"update_contract ({step}): line item B is gone")
+        expect(f"update_contract ({step}) line item B (named by its Id only)", line_state(row), kept_b)
+
+    renamed = f"{label} renamed"
+    changed = await m.tool(
+        "update_contract",
+        contract_id=contract,
+        name=renamed,
+        service_lines=[{"id": line_id, "line_items": [{"id": item_a["Id"], "quantity": 2}]}],
+        confirm=True,
+    )
+    expect("update_contract Name", changed.get("Name"), renamed)
+    lines = lines_of(changed)
+    check(len(lines) == 1 and lines[0].get("Id") == line_id, "update_contract: the service line did not stay")
+    now_a = next((row for row in lines[0].get("LineItems") or [] if row.get("Id") == item_a["Id"]), {})
+    expect("update_contract line item A Quantity", now_a.get("Quantity"), 2)
+    expect("update_contract line item A UnitPrice (left out of the update)", now_a.get("UnitPrice"), 1.0)
+    check_kept(changed, "a line item changed")
+    kept_a = line_state(now_a)
+    added = await m.tool(
+        "update_contract",
+        contract_id=contract,
+        service_lines=[{"name": f"{label} line 2", "labor_terms_id": 2, "per_hour_details": hourly}],
+        confirm=True,
+    )
+    lines = lines_of(added)
+    check(len(lines) == 2, f"update_contract (add a line): the contract has {len(lines)} service lines, expected 2")
+    second = next((row for row in lines if row.get("Id") != line_id), None)
+    check(second is not None and second.get("Name") == f"{label} line 2", "update_contract (add a line): the new service line is not there")
+    check_kept(added, "a service line added")
+    removed = await m.tool("update_contract", contract_id=contract, remove_service_line_ids=[second["Id"]], confirm=True)
+    lines = lines_of(removed)
+    check(len(lines) == 1 and lines[0].get("Id") == line_id, "update_contract (remove a line): the contract does not have the first line only")
+    check_kept(removed, "a service line removed")
+    after_a = next((row for row in lines[0].get("LineItems") or [] if row.get("Id") == item_a["Id"]), {})
+    expect("update_contract (remove a line) line item A (named by its Id only)", line_state(after_a), kept_a)
+    m.note(
+        "update_contract: the service line and the line items that a step sent with an Id only read back with the same Name, Quantity, UnitPrice, "
+        "Description, DiscountPercent, Tax and BillableStatus after a line item was changed and a second service line was added and removed"
+    )
+    archived = await m.tool("update_contract", contract_id=contract, status="archived", confirm=True)
+    expect("update_contract Status.Id (Archived)", dig(archived, "Status", "Id"), CONTRACT_ARCHIVED)
+    m.manifest.cleanup_failed("contract", contract, contract_residue("archived by the write matrix (update_contract)"))
+    m.note(f"contract {contract} archived: it cannot be deleted through the API, so it stays in Gorelo until removed in the Gorelo app")
+
+
+async def area_comment_edits(m: Matrix) -> None:
+    """On an MCPTEST project of the test client: a Private project comment and a Private task comment, edit both bodies (update_project_comment,
+    update_task_comment), then delete the comments and the task (the project is soft deleted by the cleanup). Like the projects area it needs
+    the Project scope (skipped, with the scope named, when the key lacks it)."""
+    opt_in(m, "comment_edits")
+    missing = await m.probe_scope("list_projects", page_size=1)
+    if missing is not None:
+        raise Skipped(f"scope missing: {missing}")
+    location = await m.location()
+    lookups = await m.lookups()
+    type_id = first_guid_id((await m.tool("list_project_types"))["items"])
+    if type_id is None:
+        raise Skipped("the tenant has no project type to create a project with")
+    label = m.manifest.label("edit project")
+    m.note(
+        "create_project sends no created_on, so the project-created notification of the app fires (Gorelo does not say who receives it) and "
+        "creating the task fires the app's automation triggers; the comments are Private and email nobody"
+    )
+    project = full(
+        await m.create(
+            "project",
+            label,
+            {"client_id": SITE.test_client},
+            "create_project",
+            {"title": label, "client_id": SITE.test_client, "location_id": location, "type_id": type_id, "group_id": lookups.everyone},
+        ),
+        "create_project",
+    )
+    project_id = project["Id"]
+    label = m.manifest.label("edit section")
+    section = await m.create(
+        "section", label, {"project_id": project_id}, "create_project_section", {"project_id": project_id, "title": label}
+    )
+    label = m.manifest.label("edit task")
+    task = full(
+        await m.create(
+            "task",
+            label,
+            {"project_id": project_id},
+            "create_project_task",
+            {"project_id": project_id, "title": label, "section_id": section["Id"]},
+        ),
+        "create_project_task",
+    )
+    task_id = task["Id"]
+    label = m.manifest.label("project comment")
+    posted = full(
+        await m.create(
+            "project_comment",
+            label,
+            {"project_id": project_id},
+            "create_project_comment",
+            {"project_id": project_id, "body": f"<p>{label}</p>", "conversation_type": "private"},
+        ),
+        "create_project_comment",
+    )
+    comment_id = posted["Id"]
+    edited = f"<p>{label} edited</p>"
+    changed = full(await m.tool("update_project_comment", project_id=project_id, comment_id=comment_id, body=edited), "update_project_comment")
+    expect("update_project_comment BodyHtml", changed.get("BodyHtml"), edited)
+    got = await m.tool("get_project_comment", project_id=project_id, comment_id=comment_id)
+    expect("get_project_comment BodyHtml after the edit", got.get("BodyHtml"), edited)
+    label = m.manifest.label("task comment")
+    task_posted = full(
+        await m.create(
+            "project_comment",
+            label,
+            {"project_id": project_id, "task_id": task_id},
+            "create_project_comment",
+            {"project_id": project_id, "task_id": task_id, "body": f"<p>{label}</p>", "conversation_type": "private"},
+        ),
+        "create_project_comment",
+    )
+    task_comment = task_posted["Id"]
+    task_edited = f"<p>{label} edited</p>"
+    changed = full(
+        await m.tool("update_task_comment", project_id=project_id, task_id=task_id, comment_id=task_comment, body=task_edited),
+        "update_task_comment",
+    )
+    expect("update_task_comment BodyHtml", changed.get("BodyHtml"), task_edited)
+    got = await m.tool("get_project_comment", project_id=project_id, task_id=task_id, comment_id=task_comment)
+    expect("get_project_comment (task comment) BodyHtml after the edit", got.get("BodyHtml"), task_edited)
+    gone = await m.tool("delete_project_comment", project_id=project_id, task_id=task_id, comment_id=task_comment, confirm=True)
+    check(same_guid(gone.get("Id"), task_comment), "delete_project_comment answered with another comment's Id")
+    m.mark_cleaned("project_comment", task_comment, "deleted by the write matrix (delete_project_comment)")
+    gone = await m.tool("delete_project_comment", project_id=project_id, comment_id=comment_id, confirm=True)
+    check(same_guid(gone.get("Id"), comment_id), "delete_project_comment answered with another comment's Id")
+    m.mark_cleaned("project_comment", comment_id, "deleted by the write matrix (delete_project_comment)")
+    gone = await m.tool("delete_project_task", project_id=project_id, task_id=task_id, confirm=True)
+    check(same_guid(gone.get("Id"), task_id), "delete_project_task answered with another task's Id")
+    m.mark_cleaned("task", task_id, "deleted by the write matrix (delete_project_task)")
+
+
+# --------------------------------------------------------------------------
 # Selecting and running areas
 # --------------------------------------------------------------------------
 
@@ -3115,6 +4316,16 @@ AREAS: tuple[Area, ...] = (
     Area(DOCUMENTS_AREA, area_documents),
     Area("invoices", area_invoices),
     Area(APPROVED_INVOICE_AREA, area_approved_invoice),
+    Area("alert_status", area_alert_status),
+    Area("asset_types", area_asset_types),
+    Area("client_locations", area_client_locations),
+    Area("client_domains", area_client_domains),
+    Area("contact_tags", area_contact_tags),
+    Area("product_charges", area_product_charges),
+    Area("invoice_update", area_invoice_update),
+    Area("contracts", area_contracts),
+    Area("comment_edits", area_comment_edits),
+    Area("ticket_source", area_ticket_source),
     Area("uptime", area_uptime),
     Area("projects", area_projects),
 )
@@ -3247,6 +4458,7 @@ class MatrixReport:
     assets: list[str] = field(default_factory=list)
     asset_texts: dict[str, str] = field(default_factory=dict)  # asset id -> the residue text of its record (see residue_asset_texts)
     documents: list[str] = field(default_factory=list)  # the documents of the run: none can be deleted through the API (residue_documents)
+    contracts: list[str] = field(default_factory=list)  # the contracts of the run: none can be deleted through the API (residue_contracts)
 
     @property
     def ok(self) -> bool:
@@ -3306,6 +4518,11 @@ class MatrixReport:
                 f"reminder: {len(self.documents)} document(s) of this run stay in Gorelo {DOCUMENT_RESIDUE_TAIL}; the cleanup lines above "
                 f"say which are archived: search the Documents area of Gorelo for {self.run_id}"
             )
+        if self.contracts:  # a contract cannot be deleted through the API either: archived, it stays in Gorelo
+            lines.append(
+                f"reminder: {len(self.contracts)} contract(s) of this run stay in Gorelo {CONTRACT_RESIDUE_TAIL}; the cleanup lines above "
+                f"say which are archived: search the Contracts of Gorelo for {self.run_id}"
+            )
         for name in self.voided:  # the last thing said before the result: an invoice voided in Gorelo may still be open in Xero
             lines.append(f"reminder: approved invoice {name}: {VOID_REMINDER}")
         lines.append("result: " + ("PASSED" if self.ok else "FAILED"))
@@ -3344,6 +4561,12 @@ def residue_documents(manifest: Manifest) -> list[str]:
     return [str(record.id) for record in manifest.all_created() if record.kind == "document"]
 
 
+def residue_contracts(manifest: Manifest) -> list[str]:
+    """The ids of the contracts of this run: none of them can be deleted through the API, so each stays in Gorelo (archived when the run or
+    the cleanup could do it), and the summary says so."""
+    return [str(record.id) for record in manifest.all_created() if record.kind == "contract"]
+
+
 def residue_asset_texts(manifest: Manifest) -> dict[str, str]:
     """Where each custom asset of this run may be, in the words of its record: its id -> the outcome the matrix or the cleanup wrote
     last. An outcome ends with CUSTOM_ASSET_RESIDUE_TAIL, so the cleanup keeps it; an asset with no outcome yet reads as the residue
@@ -3367,6 +4590,17 @@ async def run_matrix(
     with_custom_properties: bool = False,
     with_documents: bool = False,
     with_asset_move: bool = False,
+    with_alert_status: bool = False,
+    with_asset_types: bool = False,
+    with_client_locations: bool = False,
+    with_client_domains: bool = False,
+    with_contact_tags=False,  # a bool; written without an annotation because a test forbids one old word followed by a colon in this file
+    with_product_charges: bool = False,
+    with_invoice_update: bool = False,
+    with_contracts: bool = False,
+    with_comment_edits: bool = False,
+    with_ticket_source: bool = False,
+    approve_via_update: bool = False,
     settings: Settings | None = None,
     transport: Any = None,
     pace: float = PACE_SECONDS,
@@ -3404,6 +4638,12 @@ async def run_matrix(
                  the test client that cannot be deleted through the API: the area archives them, the cleanup archives what a
                  stopped run left, and the summary tells the operator that they stay in Gorelo. Not allowed beside
                  with_approved_invoice (that run takes no other flag).
+    with_alert_status, with_asset_types, with_client_locations, with_client_domains, with_contact_tags, with_product_charges,
+    with_invoice_update, with_contracts, with_comment_edits, with_ticket_source  the opt-in areas of 1.5.0 (OPT_INS; --with-<area>). Each is
+                 skipped with its reason without its flag, also under --only <area>, and its tools cannot be called then; each flag opens
+                 its tools and the matching guard area (guard.OPT_IN_AREAS). Not allowed beside with_approved_invoice.
+    approve_via_update  with with_approved_invoice only (UsageError otherwise): the approved invoice is a Draft of $1 approved with
+                 approve_invoice instead of an invoice created Approved; create_approved_invoice is not called then.
     A run needs the TEST CLIENT Active: right after the check of the client names run_matrix raises guard.ClientNotActive (a
     SiteConfigError: "cannot start", exit status 2) when it is not, before a manifest is made or a request is sent.
     with_invoices run the invoices area (--with-invoices). Without it the area is skipped with INVOICES_SKIP_REASON,
@@ -3431,6 +4671,18 @@ async def run_matrix(
     """
     site()  # refuse to start, before anything is created, when the site config is missing or incomplete
     selected = select_areas(areas, skip_email, with_approved_invoice)
+    opted = {
+        key: given
+        for key, given in (
+            ("alert_status", with_alert_status), ("asset_types", with_asset_types), ("client_locations", with_client_locations),
+            ("client_domains", with_client_domains), ("contact_tags", with_contact_tags), ("product_charges", with_product_charges),
+            ("invoice_update", with_invoice_update), ("contracts", with_contracts), ("comment_edits", with_comment_edits),
+            ("ticket_source", with_ticket_source),
+        )
+    }
+    enabled = [key for key, given in opted.items() if given]
+    if approve_via_update and not with_approved_invoice:
+        raise UsageError("--approve-via-update needs --with-approved-invoice: it only changes how that run makes its one approved invoice")
     if with_approved_invoice:  # the run that approves a real invoice does that and nothing else, so no other flag opens anything
         alongside = [
             flag
@@ -3440,6 +4692,7 @@ async def run_matrix(
                 ("--with-documents", with_documents), ("--with-asset-move", with_asset_move),
                 ("--leftovers", leftovers),
                 ("--skip-email", skip_email),
+                *((OPT_IN_BY_KEY[key].flag, True) for key in enabled),
             )
             if given
         ]
@@ -3450,7 +4703,9 @@ async def run_matrix(
             "--with-asset-move needs --with-custom-assets: only the custom_assets area creates the asset that moves to the second client and back"
         )
     chosen = settings if settings is not None else live_settings()
-    needed = tools_for(with_items, with_invoices, with_approved_invoice, with_custom_assets, with_documents)
+    needed = tools_for(
+        with_items, with_invoices, with_approved_invoice, with_custom_assets, with_documents, opt_in=enabled, approve_via_update=approve_via_update
+    )
     offered = {spec.name for spec in REGISTRY.select(chosen.toolsets, chosen.destructive, chosen.destructive_tools)}
     if needed - offered:  # a renamed or gated tool would otherwise show up half way through the run
         raise SetupError("the server does not offer the tools the matrix calls: " + ", ".join(sorted(needed - offered)))
@@ -3467,6 +4722,7 @@ async def run_matrix(
         "write", manifest, require_intents=True, allow_approved_invoice=with_approved_invoice,
         allow_custom_assets=with_custom_assets, allow_custom_properties=with_custom_properties,
         allow_custom_asset_move=with_asset_move, allow_documents=with_documents, base_url=chosen.base_url,
+        allow_areas=[OPT_IN_BY_KEY[key].guard_area for key in enabled if OPT_IN_BY_KEY[key].guard_area],
     )
     pacer = Pacer(pace)
     hooks = {"request": [guard, pacer]}
@@ -3499,6 +4755,8 @@ async def run_matrix(
                     with_documents=with_documents,
                     with_asset_move=with_asset_move,
                     second_client_active=second is not None and second.active,
+                    opt_in=enabled,
+                    approve_via_update=approve_via_update,
                     sync_interval=sync_interval,
                     sync_polls=sync_polls,
                     gorelo=gorelo,
@@ -3543,6 +4801,7 @@ async def run_matrix(
             assets=residue_assets(manifest),
             asset_texts=residue_asset_texts(manifest),
             documents=residue_documents(manifest),
+            contracts=residue_contracts(manifest),
         )
         for line in report.render():
             echo(scrub(line, chosen.api_key))
@@ -3621,6 +4880,20 @@ def main(argv: list[str] | None = None) -> int:
         "contact statuses that cannot be emailed (empty since 1.3.0, so the gate is closed); without the flag the area is skipped, "
         "also under --only approved_invoice",
     )
+    parser.add_argument(
+        "--approve-via-update",
+        action="store_true",
+        help="with --with-approved-invoice only: make the one approved invoice by creating a Draft of $1 and approving it with "
+        "approve_invoice (a PATCH of StatusId 5) instead of creating it Approved. It pushes the "
+        "invoice to the connected accounting system like the create does; the void is in Gorelo only, so void the accounting system's copy by hand",
+    )
+    for area in OPT_INS:
+        parser.add_argument(
+            area.flag,
+            action="store_true",
+            help=f"also run the {area.key} area ({area.what}); without it the area is skipped, also under --only {area.key}. "
+            "It needs the test client Active, like every write run",
+        )
     args = parser.parse_args(argv)
     try:
         report = asyncio.run(
@@ -3635,6 +4908,8 @@ def main(argv: list[str] | None = None) -> int:
                 with_custom_properties=args.with_custom_properties,
                 with_documents=args.with_documents,
                 with_asset_move=args.with_asset_move,
+                approve_via_update=args.approve_via_update,
+                **{f"with_{area.key}": getattr(args, f"with_{area.key}") for area in OPT_INS},
             )
         )
     except UsageError as exc:

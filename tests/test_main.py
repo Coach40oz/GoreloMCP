@@ -475,7 +475,10 @@ def test_the_start_logs_every_gated_tool_of_the_enabled_toolsets_for_the_word_on
     monkeypatch.setenv("GORELO_ENABLE_DESTRUCTIVE", "1")
     monkeypatch.setenv("GORELO_TOOLSETS", "core,tickets,time")
     launch.main()
-    assert gated_lines(launch) == ["gorelo-mcp gated tools: delete_ticket_comment,delete_time_entry"]
+    # core gained three gated tools in 1.5.0 (delete_asset_type, delete_client_domain, delete_client_location)
+    assert gated_lines(launch) == [
+        "gorelo-mcp gated tools: delete_asset_type,delete_client_domain,delete_client_location,delete_ticket_comment,delete_time_entry"
+    ]
 
 
 def test_the_start_logs_the_listed_gated_tools_sorted_and_keeps_the_ready_line_shape(launch, monkeypatch):

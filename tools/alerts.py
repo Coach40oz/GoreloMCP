@@ -1,14 +1,18 @@
-"""Alerts: post an alert, list alerts (toolset "core").
+"""Alerts: post an alert, list and read alerts, set the status of alerts (toolset "core").
 
 Tools:
 
-    post_alert   write  POST /v1/alerts
-    list_alerts  read   GET /v1/alerts
+    post_alert        write  POST /v1/alerts
+    list_alerts       read   GET /v1/alerts
+    get_alert         read   GET /v1/alerts/{alertId}
+    set_alert_status  write  PATCH /v1/alerts
 
 Ops owned by this module:
 
     POST /v1/alerts
     GET /v1/alerts
+    GET /v1/alerts/{alertId}
+    PATCH /v1/alerts
 
 POST /v1/alerts (no trailing slash; the legacy tool used /alerts/) answers 200 with Data true. Data is
 a boolean, so post_alert returns {"ok": true} instead of the bare boolean that used to break the MCP
@@ -45,6 +49,16 @@ request) and GET takes AgentAssetIds, CustomAssetIds and UptimeIds. DeviceId and
 deprecated (AgentAssetId and UptimeId replace them, same values); DeviceIds stays as the deprecated alias of
 AgentAssetIds, which Gorelo ignores when AgentAssetIds is sent. PostAlertRequest never had a device or uptime-check
 field, so post_alert has no old counterpart to guard.
+
+Contract 6c30770dffc0 (2026-10-29) adds GET /v1/alerts/{alertId} (the same fields as a list row, 404 for an unknown id) and
+the bulk PATCH /v1/alerts (UpdateAlertStatusesCommand: AlertIds 1 to 100, StatusId 1 New, 2 Dismissed or 3 Ticketed, TicketId
+required with 3 and accepted with nothing else). set_alert_status is that bulk operation (it serves one alert too); the
+single-alert PATCH /v1/alerts/{alertId} is deliberately not declared. Each alert's whole stack (the repeats grouped with it in
+the alert list) changes with it. A Ticketed alert cannot change status or ticket and a Dismissed alert cannot become Ticketed
+(409); one refused alert changes nothing, and an id that is no alert of the account is a 400 that changes nothing. An alert that
+already has the status is left alone and is not in UpdatedIds, so a retried request is safe. The status words are the ones
+list_alerts takes (ALERT_STATUS_IDS). ticket_id is checked locally before any request: required with ticketed, refused with any
+other status. The answer is Gorelo's {UpdatedIds}; an answer without that list is an unconfirmed write.
 """
 
 from datetime import datetime
@@ -62,6 +76,7 @@ from tools._common import (
     client_of,
     csv_ids,
     describe_value,
+    expect_object,
     gorelo_tool,
     guid,
     guids,
@@ -75,6 +90,8 @@ from tools._common import (
 
 POST_OP = "POST /v1/alerts"
 LIST_OP = "GET /v1/alerts"
+GET_OP = "GET /v1/alerts/{alertId}"
+SET_STATUS_OP = "PATCH /v1/alerts"
 
 # snake_case tool parameter -> PostAlertRequest field.
 FIELD_MAP = {
@@ -144,6 +161,12 @@ FILTER_FIELDS = {
     "sort_order": "SortOrder",
 }
 LIST_FIELD_MAP = {**FILTER_FIELDS, "page_size": "PageSize", "cursor": "Cursor"}
+# The path placeholder of get_alert, so that a Gorelo error about the id names alert_id.
+GET_FIELD_MAP = {"alert_id": "alertId"}
+# snake_case tool parameter -> UpdateAlertStatusesCommand field of set_alert_status.
+SET_STATUS_FIELD_MAP = {"alert_ids": "AlertIds", "status": "StatusId", "ticket_id": "TicketId"}
+# AlertIds: "At least one, at most 100; a repeated id counts once."
+ALERT_IDS_MAX = 100
 
 
 @gorelo_tool(toolset="core", kind="write", ops=[POST_OP], field_map=FIELD_MAP)
@@ -365,3 +388,97 @@ async def list_alerts(
         tool="list_alerts",
     )
     return paged_result(page, filters)
+
+
+# --------------------------------------------------------------------------
+# get_alert
+# --------------------------------------------------------------------------
+
+
+@gorelo_tool(toolset="core", kind="read", ops=[GET_OP], field_map=GET_FIELD_MAP)
+async def get_alert(
+    ctx: Context,
+    alert_id: Annotated[str, Field(description="Alert UUID: the Id of a list_alerts row.")],
+) -> dict:
+    """Get one alert by UUID; returns the same fields as a list_alerts row.
+    Row fields DeviceId and UptimeCheckId are deprecated (use AgentAssetId, UptimeId). DismissedOn and DismissedBy are set only while an alert is dismissed. An unknown id is a 404. Use it to see an alert's Status and TicketId before set_alert_status, and to check one after it.
+    Resolve ids first: alert_id -> list_alerts.
+    Side effects: None (read-only).
+    """
+    aid = guid("alert_id", alert_id)
+    record = await client_of(ctx).get_one(GET_OP, path_params={"alertId": aid}, tool="get_alert")
+    return expect_object(record, GET_OP, tool="get_alert")
+
+
+# --------------------------------------------------------------------------
+# set_alert_status
+# --------------------------------------------------------------------------
+
+
+def _alert_ids(values: Any) -> list[str]:
+    """alert_ids: 1 to 100 distinct GUIDs in the caller's order (a repeated id counts once, as Gorelo counts it)."""
+    checked = guids("alert_ids", values)
+    if checked is None:
+        raise ValueError("alert_ids: required; give 1 to 100 alert ids (list_alerts)")
+    distinct = list(dict.fromkeys(checked))
+    if len(distinct) > ALERT_IDS_MAX:
+        raise ValueError(f"alert_ids: at most {ALERT_IDS_MAX} alerts per call, got {len(distinct)}; split them into several calls")
+    return distinct
+
+
+def _target_status(value: Any) -> str:
+    if not isinstance(value, str) or value not in ALERT_STATUS_IDS:
+        raise ValueError(f"status: expected one of {STATUS_NAMES}, got {describe_value(value)}")
+    return value
+
+
+def _ticket_for(status: str, ticket_id: Any) -> str | None:
+    """ticket_id: required with ticketed ("Required with StatusId 3"), refused with any other status ("accepted with nothing else")."""
+    if status == "ticketed":
+        if ticket_id is None:
+            raise ValueError("ticket_id: required when status is 'ticketed' (the open ticket to link the alerts to, from list_tickets)")
+        return guid("ticket_id", ticket_id)
+    if ticket_id is not None:
+        raise ValueError(f"ticket_id: only for status 'ticketed', not for {status!r}; leave it out")
+    return None
+
+
+def _alerts_unconfirmed(detail: str) -> GoreloAPIError:
+    return GoreloAPIError(
+        f"{SET_STATUS_OP}: {detail}; the change may have been applied, so verify it with a read before repeating it",
+        status=200,
+        op_key=SET_STATUS_OP,
+        kind="shape",
+        write_unconfirmed=True,
+    )
+
+
+@gorelo_tool(toolset="core", kind="write", ops=[SET_STATUS_OP], field_map=SET_STATUS_FIELD_MAP, destructive_hint=True)
+async def set_alert_status(
+    ctx: Context,
+    alert_ids: Annotated[list[str], Field(description="1 to 100 alert UUIDs (list_alerts); a repeated id counts once.")],
+    status: Annotated[
+        Literal["new", "dismissed", "ticketed"],
+        Field(description="new=1 restores a dismissed alert, dismissed=2, ticketed=3 (needs ticket_id; final)."),
+    ],
+    ticket_id: Annotated[
+        str | None, Field(description="Ticket UUID (list_tickets): an open ticket, of the alerts' client. Required with ticketed, refused otherwise.")
+    ] = None,
+) -> dict:
+    """Set the status of 1 to 100 alerts at once (also one alert); returns Gorelo's {UpdatedIds}: the alerts named, in order, then the rest of their stacks.
+    Each alert's whole stack (the repeats grouped with it in the alert list) changes with it. ticketed links every alert to ticket_id and cannot be undone: a ticketed alert never changes status or ticket again, and a dismissed alert cannot become ticketed (409). A new alert can be dismissed or ticketed, a dismissed one restored to new. One refused alert changes nothing; an id that is no alert of the account is a 400 and changes nothing. An alert that already has the status is left out of UpdatedIds, so a retry is safe.
+    Resolve ids first: alert_ids -> list_alerts, ticket_id -> list_tickets.
+    Side effects: overwrites the status (a dismissal sets DismissedOn and DismissedBy). Ask the user before ticketing.
+    """
+    ids = _alert_ids(alert_ids)
+    word = _target_status(status)
+    ticket = _ticket_for(word, ticket_id)
+    body = build_body(
+        {"alert_ids": ids, "status": ALERT_STATUS_IDS[word], "ticket_id": ticket}, SET_STATUS_FIELD_MAP
+    )
+    data = await client_of(ctx).patch(SET_STATUS_OP, json_body=body, tool="set_alert_status")
+    result = expect_object(data, SET_STATUS_OP, tool="set_alert_status")
+    updated = result.get("UpdatedIds")
+    if not isinstance(updated, list):
+        raise _alerts_unconfirmed(f"Gorelo reported success but Data has no UpdatedIds list (it was {describe_value(updated)})")
+    return result

@@ -207,7 +207,7 @@ def test_the_instructions_state_every_house_rule():
         "email nobody",
         "Public comment emails the ticket contact and the CCs",
         "side conversation comment or an approval comment emails its recipients",
-        "Delete, void and approved-invoice tools exist only when the operator has enabled them",
+        "Delete, void, approved-invoice and contract-write tools exist only when the operator has enabled them",
         "only when the operator has enabled them",
         "confirm=true",
         "Errors name the parameter to fix",
@@ -234,10 +234,11 @@ def test_record_text_is_data_never_instructions_is_the_eighth_and_last_base_rule
     assert numbers == list(range(1, 9))  # one rule added: 1 to 8, in order, no gaps
 
 
-# GORELO_ENABLE_DESTRUCTIVE also registers create_approved_invoice, which does not delete or void anything but
-# approves an invoice (Gorelo pushes it to the connected accounting system), so rule 6 names it next to the deletes.
+# GORELO_ENABLE_DESTRUCTIVE also registers create_approved_invoice and approve_invoice, which do not delete or void anything but
+# approve an invoice (Gorelo pushes it to the connected accounting system), and create_contract and update_contract (1.5.0: they write a
+# billing contract, which can approve and send recurring invoices on its own), so rule 6 names them next to the deletes.
 GATE_RULE = (
-    "6. Delete, void and approved-invoice tools exist only when the operator has enabled them, and they always need "
+    "6. Delete, void, approved-invoice and contract-write tools exist only when the operator has enabled them, and they always need "
     "confirm=true. Ask the user before setting it.\n"
 )
 
@@ -246,13 +247,14 @@ def test_rule_six_covers_every_kind_of_tool_the_destructive_flag_registers():
     assert GATE_RULE in INSTRUCTIONS
     (rule,) = [line for line in INSTRUCTIONS.splitlines() if line.startswith("6. ")]
     assert rule + "\n" == GATE_RULE  # still the sixth rule: the numbering of the other rules did not move
-    # everything the flag registers is a delete or void tool, or create_approved_invoice: a new gated tool that is
-    # neither has to be named in the rule before this test lets it through
+    # everything the flag registers is a delete or void tool, an approved-invoice tool or a contract write: a new gated tool
+    # that is none of them has to be named in the rule before this test lets it through
     gated = {spec.name for spec in REGISTRY.specs if spec.kind == "destructive"}
     assert {name for name in gated if not name.startswith("delete_")} == {
-        "create_approved_invoice", "remove_document_related_item", "share_document",
+        "approve_invoice", "create_approved_invoice", "create_contract", "remove_document_related_item", "share_document",
+        "update_contract",
     }
-    assert "approved-invoice" in rule and "Delete" in rule and "void" in rule
+    assert "approved-invoice" in rule and "contract-write" in rule and "Delete" in rule and "void" in rule
     # remove_document_related_item is a delete (rule 6 covers it); share_document is named by the documents rule, which
     # exists whenever the tool does, and says it needs confirm=true
     assert "share_document (when enabled; needs confirm=true)" in DOCUMENTS_INSTRUCTIONS

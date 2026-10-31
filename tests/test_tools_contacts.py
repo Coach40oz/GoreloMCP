@@ -13,6 +13,7 @@ from conftest import (
     call_tool_error,
     envelope,
     error_envelope,
+    in_order,
     list_tools,
     make_ctx,
     paged_envelope,
@@ -36,12 +37,12 @@ CONTACT_5 = "/v1/contacts/5"  # update_contact: the id is in the path only (the 
 CREATE_PARAMS = [
     "client_id", "first_name", "last_name", "primary_email", "location_id", "secondary_email", "mobile_phone",
     "mobile_phone_country_code", "office_phone", "office_phone_country_code", "job_title", "department",
-    "time_zone", "description",
+    "time_zone", "description", "tag_ids",
 ]
 UPDATE_PARAMS = [
     "contact_id", "first_name", "last_name", "primary_email", "location_id", "mobile_phone",
     "mobile_phone_country_code", "office_phone", "office_phone_country_code", "job_title", "department",
-    "time_zone", "description", "clear_fields", "secondary_email",
+    "time_zone", "description", "clear_fields", "secondary_email", "tag_ids",
 ]
 
 TOOLS = {
@@ -49,11 +50,12 @@ TOOLS = {
     "list_contacts": (
         "read", ["GET /v1/contacts"], False,
         [
-            "client_id", "client_ids", "status_ids", "query", "created_since", "created_before", "updated_since",
-            "updated_before", "page_size", "cursor",
+            "client_id", "client_ids", "location_ids", "status_ids", "query", "created_since", "created_before",
+            "updated_since", "updated_before", "page_size", "cursor",
         ],
         [],
     ),
+    "list_contact_tags": ("read", ["GET /v1/contacts/tags"], False, [], []),
     "get_contact": ("read", ["GET /v1/contacts/{contactId}"], False, ["contact_id"], ["contact_id"]),
     "create_contact": (
         "write", ["POST /v1/contacts"], False, CREATE_PARAMS, ["client_id", "first_name", "last_name", "primary_email"]
@@ -63,17 +65,18 @@ TOOLS = {
     ),
 }
 
-# The UpdateContactCommand fields update_contact sends (every one of them, every time).
+# The UpdateContactCommand fields (update_contact copies every one of them from the record, except TagIds, which it sends only
+# when the caller gives tag_ids: a stored tag that went inactive would make the request a 400).
 COMMAND_KEYS = {
     "FirstName", "LastName", "ClientId", "LocationId", "PrimaryEmail", "MobilePhone",
     "MobilePhoneCountryCode", "OfficePhone", "OfficePhoneCountryCode", "JobTitle", "Department", "TimeZone",
-    "Description",
+    "Description", "TagIds",
 }
 READ_ONLY_KEYS = {"Id", "Alias", "Status", "CreatedOn", "UpdatedOn", "IsTemporaryContact", "MergedWithContactId"}
 # The command fields Gorelo requires: always sent, always with a value.
 REQUIRED_KEYS = {"FirstName", "LastName", "ClientId", "PrimaryEmail"}
 # The optional command fields a contact may not have: left out of the body when it has no value.
-OPTIONAL_KEYS = COMMAND_KEYS - REQUIRED_KEYS
+OPTIONAL_KEYS = COMMAND_KEYS - REQUIRED_KEYS - {"TagIds"}
 
 # The `note` of an update that leaves a stored region code out because the contact has no such phone, pinned word for word
 # (tools/contacts.py _cleared_note): the region parameter with the code it held, and why.
@@ -118,6 +121,7 @@ def contact_record(contact_id=5, **extra):
         "Department": "IT",
         "TimeZone": "UTC",
         "Description": "Notes",
+        "TagIds": [3, 7],
         "Alias": "jdoe",
         "Status": {"Id": 1, "Name": "Active"},
         "IsTemporaryContact": False,
@@ -279,7 +283,7 @@ def test_update_contact_command_is_exactly_the_spec_command_without_what_the_api
     op = spec_index.op("PATCH /v1/contacts/{contactId}")
     assert COMMAND_KEYS | {"SecondaryEmail"} == set(op.body["fields"])
     assert set(op.body["required"]) <= COMMAND_KEYS
-    assert set(contacts_module.COPIED_FIELDS) == COMMAND_KEYS
+    assert set(contacts_module.COPIED_FIELDS) | {"TagIds"} == COMMAND_KEYS  # TagIds is sent only with tag_ids
     assert "ContactId" not in op.body["fields"]  # the contact id is in the path (contract e15cb5a18ec2)
 
 
@@ -287,7 +291,10 @@ def test_update_contact_command_is_exactly_the_spec_command_without_what_the_api
 def test_docstrings_follow_the_template(name):
     spec = next(s for s in REGISTRY.specs if s.name == name)
     doc = spec.fn.__doc__
-    assert (TOOLS[name][0] == "write") == ("Side effects:" in doc)  # only writes have side effects to state
+    if name == "list_contact_tags":  # the 1.5.0 read states its ids and that it changes nothing
+        assert "Resolve ids first:" in doc and "Side effects: None (read-only)." in doc
+    else:
+        assert (TOOLS[name][0] == "write") == ("Side effects:" in doc)  # only writes have side effects to state
     assert ("Paging:" in doc) == (name == "list_contacts")
 
 
@@ -926,7 +933,7 @@ async def test_update_contact_sends_every_command_field_and_never_a_read_only_on
     routed_update(mock_gorelo)
     await call_tool(server, "update_contact", {"contact_id": 5, "department": "Ops"})
     body = patched(mock_gorelo)[0].json
-    assert set(body) == COMMAND_KEYS
+    assert set(body) == COMMAND_KEYS - {"TagIds"}  # TagIds only with tag_ids
     assert not set(body) & READ_ONLY_KEYS
     op = spec_index.op("PATCH /v1/contacts/{contactId}")
     assert set(body) <= set(op.body["fields"]) and set(op.body["required"]) <= set(body)
@@ -948,7 +955,7 @@ async def test_update_contact_omits_the_values_the_contact_does_not_have_and_sen
     # fields are not nullable in the spec, so an explicit null is never sent
     sparse = contact_record(
         LocationId=None, MobilePhone=None, MobilePhoneCountryCode=None, OfficePhone=None,
-        OfficePhoneCountryCode=None, JobTitle=None, Department=None, TimeZone=None, Description=None,
+        OfficePhoneCountryCode=None, JobTitle=None, Department=None, TimeZone=None, Description=None, TagIds=[],
     )
     routed_update(mock_gorelo, record=sparse)
     await call_tool(server, "update_contact", {"contact_id": 5, "last_name": "Smith"})
@@ -1074,7 +1081,8 @@ async def test_every_clearable_field_can_be_cleared_at_once(server, mock_gorelo)
         MobilePhone=None, MobilePhoneCountryCode=None, OfficePhone=None,
         OfficePhoneCountryCode=None, JobTitle=None, Department=None, TimeZone=None, Description=None,
     )
-    # every clearable field is gone, the four required ones remain with values, and so does the location, which cannot be cleared
+    # every clearable field is gone, the four required ones remain with values, and so do the location (it cannot be cleared)
+    # and the tags are not sent at all (clear_fields never touches them: only tag_ids=[] removes tags)
     assert set(body) == REQUIRED_KEYS | {"LocationId"} and body["LocationId"] == 9001
 
 
@@ -1299,7 +1307,7 @@ async def test_a_location_cannot_be_cleared_next_to_other_clears_either(client_f
 async def test_update_contact_with_nothing_to_change_is_a_local_error(server, mock_gorelo):
     text = await call_tool_error(server, "update_contact", {"contact_id": 5})
     assert text.startswith("nothing to update: pass at least one of first_name, last_name, primary_email")
-    assert "secondary_email or clear_fields" in text
+    assert "secondary_email, tag_ids or clear_fields" in text
     assert mock_gorelo.requests == []
 
 
@@ -2005,3 +2013,195 @@ async def test_the_optional_parameters_default_to_null_without_advertising_a_nul
     assert update["clear_fields"]["items"] == {"type": "string", "enum": list(contacts_module.CLEARABLE_FIELDS)}
     assert update["location_id"]["type"] == "integer" and "default" not in update["location_id"]
     assert tools["list_contacts"]["client_ids"]["items"] == {"type": "integer"}
+
+
+# --------------------------------------------------------------------------
+# Contract 6c30770dffc0 (release 1.5.0): contact tags and the LocationIds filter
+# --------------------------------------------------------------------------
+
+TAGS = "/v1/contacts/tags"
+
+
+async def test_list_contact_tags_reads_the_unpaged_list_and_sends_no_query(server, mock_gorelo):
+    rows = [
+        {"Id": 3, "Name": "Approver", "CreatedOn": None, "UpdatedOn": None, "Description": "Can approve"},
+        {"Id": 7, "Name": "VIP", "CreatedOn": None, "UpdatedOn": None, "Description": None},
+    ]
+    mock_gorelo.on("GET", TAGS, envelope(rows))
+    result = await call_tool(server, "list_contact_tags", {})
+    assert result == {"items": rows, "count": 2}
+    assert (mock_gorelo.last.method, mock_gorelo.last.path, mock_gorelo.last.query) == ("GET", TAGS, {})
+
+
+async def test_list_contact_tags_reports_an_empty_list_as_count_zero(server, mock_gorelo):
+    mock_gorelo.on("GET", TAGS, envelope([]))
+    assert await call_tool(server, "list_contact_tags", {}) == {"items": [], "count": 0}
+
+
+async def test_list_contact_tags_maps_a_gorelo_error_and_refuses_a_non_list_answer(server, mock_gorelo):
+    mock_gorelo.on("GET", TAGS, in_order(
+        error_envelope(403, [("080203", "API key does not have 'Contacts' read access", None)]),
+        envelope({"Id": 1}),
+    ))
+    text = await call_tool_error(server, "list_contact_tags", {})
+    assert "Contacts" in text and "list_contact_tags" in text
+    assert "expected Data to be a list" in await call_tool_error(server, "list_contact_tags", {})
+
+
+async def test_list_contacts_sends_location_ids_comma_joined_as_locationids(server, mock_gorelo):
+    mock_gorelo.on("GET", CONTACTS, paged_envelope([contact_record()]))
+    result = await call_tool(server, "list_contacts", {"location_ids": [9001, 9002], "client_id": 9101})
+    assert mock_gorelo.last.query == {"ClientIds": "9101", "LocationIds": "9001,9002", "PageSize": "200"}
+    assert result["filters"] == {"client_id": 9101, "location_ids": [9001, 9002]}
+
+
+@pytest.mark.parametrize(
+    "arguments, fragment",
+    [
+        ({"location_ids": []}, "location_ids"),
+        ({"location_ids": [0]}, "location_ids"),
+        ({"location_ids": list(range(1, 102))}, "location_ids"),
+    ],
+)
+async def test_list_contacts_refuses_a_bad_location_ids_before_any_http(server, mock_gorelo, arguments, fragment):
+    text = await call_tool_error(server, "list_contacts", arguments)
+    assert fragment in text and mock_gorelo.requests == []
+
+
+async def test_list_contacts_maps_a_locationids_error_to_the_parameter(server, mock_gorelo):
+    mock_gorelo.on("GET", CONTACTS, error_envelope(400, [("070101", "A filter accepts at most 100 ids.", "LocationIds")]))
+    text = await call_tool_error(server, "list_contacts", {"location_ids": [1]})
+    assert text == trace("Gorelo rejected list_contacts (HTTP 400, code 070101): location_ids: A filter accepts at most 100 ids.")
+
+
+async def test_create_contact_sends_tag_ids_as_tagids_and_checks_the_answer(server, mock_gorelo):
+    mock_gorelo.on("POST", CONTACTS, envelope(contact_record(TagIds=[3, 7])))
+    result = await call_tool(server, "create_contact", {**REQUIRED_FOUR, "tag_ids": [7, 3]})
+    assert mock_gorelo.last.json == {
+        "ClientId": 9101, "FirstName": "Jane", "LastName": "Doe", "PrimaryEmail": "jane@example.invalid",
+        "TagIds": [7, 3],
+    }
+    assert result["TagIds"] == [3, 7]
+
+
+async def test_create_contact_without_tag_ids_sends_no_tagids(server, mock_gorelo):
+    mock_gorelo.on("POST", CONTACTS, envelope(contact_record(TagIds=[])))
+    await call_tool(server, "create_contact", REQUIRED_FOUR)
+    assert "TagIds" not in mock_gorelo.last.json
+
+
+@pytest.mark.parametrize(
+    "tags, fragment",
+    [([], "tag_ids: must not be an empty list"), ([0], "tag_ids"), ([True], "tag_ids"), (list(range(1, 102)), "tag_ids: at most 100")],
+)
+async def test_create_contact_refuses_bad_tag_ids_before_any_http(server, mock_gorelo, tags, fragment):
+    text = await call_tool_error(server, "create_contact", {**REQUIRED_FOUR, "tag_ids": tags})
+    assert fragment in text and mock_gorelo.requests == []
+
+
+async def test_create_contact_maps_a_tagids_error_to_the_parameter(server, mock_gorelo):
+    mock_gorelo.on("POST", CONTACTS, error_envelope(400, [("070101", "Tag 99 is not an active contact tag.", "TagIds")]))
+    text = await call_tool_error(server, "create_contact", {**REQUIRED_FOUR, "tag_ids": [99]})
+    assert text == trace("Gorelo rejected create_contact (HTTP 400, code 070101): tag_ids: Tag 99 is not an active contact tag.")
+
+
+async def test_create_contact_answer_that_shows_other_tags_is_a_write_unconfirmed_error(server, mock_gorelo):
+    mock_gorelo.on("POST", CONTACTS, envelope(contact_record(TagIds=[3])))
+    text = await call_tool_error(server, "create_contact", {**REQUIRED_FOUR, "tag_ids": [3, 7]})
+    assert "TagIds differ" in text and "get_contact" in text and len(mock_gorelo.requests) == 1
+
+
+async def test_update_contact_without_tag_ids_sends_no_tagids_even_when_the_contact_has_tags(server, mock_gorelo):
+    # the spec says "omit to leave it unchanged": re-sending a stored tag that has become inactive would be a 400 on TagIds
+    routed_update(mock_gorelo, record=contact_record(TagIds=[2, 9]))
+    await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "CTO"})
+    body = patched(mock_gorelo)[0].json
+    assert "TagIds" not in body and body == command(JobTitle="CTO")
+
+
+async def test_update_contact_of_a_contact_with_no_tags_sends_no_tagids(server, mock_gorelo):
+    routed_update(mock_gorelo, record=contact_record(TagIds=[]))
+    await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "CTO"})
+    assert "TagIds" not in patched(mock_gorelo)[0].json
+
+
+async def test_update_contact_with_tag_ids_sends_that_list_instead_of_the_stored_one(server, mock_gorelo):
+    routed_update(mock_gorelo, record=contact_record(TagIds=[2, 9]), answer=contact_record(TagIds=[4, 5]))
+    result = await call_tool(server, "update_contact", {"contact_id": 5, "tag_ids": [5, 4]})
+    assert patched(mock_gorelo)[0].json == command(TagIds=[5, 4])
+    assert result["TagIds"] == [4, 5]
+
+
+async def test_update_contact_tag_ids_alone_is_enough_to_update(server, mock_gorelo):
+    routed_update(mock_gorelo, record=contact_record(TagIds=[]), answer=contact_record(TagIds=[7]))
+    await call_tool(server, "update_contact", {"contact_id": 5, "tag_ids": [7]})
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
+
+
+async def test_update_contact_with_an_empty_tag_ids_clears_every_tag_with_an_explicit_empty_list(server, mock_gorelo):
+    routed_update(mock_gorelo, record=contact_record(TagIds=[2, 9]), answer=contact_record(TagIds=[]))
+    result = await call_tool(server, "update_contact", {"contact_id": 5, "tag_ids": []})
+    body = patched(mock_gorelo)[0].json
+    assert body == command(TagIds=[]) and body["TagIds"] == []
+    assert result["TagIds"] == []
+
+
+async def test_update_contact_clear_fields_never_touches_the_tags(server, mock_gorelo):
+    routed_update(mock_gorelo, record=contact_record(TagIds=[2, 9]))
+    await call_tool(server, "update_contact", {"contact_id": 5, "clear_fields": ["job_title"]})
+    body = patched(mock_gorelo)[0].json
+    assert "TagIds" not in body and "JobTitle" not in body
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "clear_fields": ["tag_ids"]})
+    assert "clear_fields" in text and len(patched(mock_gorelo)) == 1
+
+
+@pytest.mark.parametrize(
+    "tags, fragment",
+    [([0], "tag_ids"), ([True], "tag_ids"), (list(range(1, 102)), "tag_ids: at most 100"), ("3", "tag_ids")],
+)
+async def test_update_contact_refuses_bad_tag_ids_before_any_http(server, mock_gorelo, tags, fragment):
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "tag_ids": tags})
+    assert fragment in text and mock_gorelo.requests == []
+
+
+async def test_update_contact_maps_a_tagids_error_to_the_parameter(server, mock_gorelo):
+    mock_gorelo.on("GET", CONTACT_5, envelope(contact_record()))
+    mock_gorelo.on("PATCH", CONTACT_5, error_envelope(400, [("070101", "Tag 99 is not an active contact tag.", "TagIds")]))
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "tag_ids": [99]})
+    assert text == trace("Gorelo rejected update_contact (HTTP 400, code 070101): tag_ids: Tag 99 is not an active contact tag.")
+
+
+async def test_update_contact_answer_that_shows_other_tags_is_a_write_unconfirmed_error(server, mock_gorelo):
+    routed_update(mock_gorelo, record=contact_record(TagIds=[2]), answer=contact_record(TagIds=[2]))
+    text = await call_tool_error(server, "update_contact", {"contact_id": 5, "tag_ids": [8]})
+    assert "TagIds differ" in text and "get_contact" in text
+
+
+async def test_update_contact_ignores_the_tagids_of_the_record_whatever_its_shape(server, mock_gorelo):
+    # the stored tags are never copied, so a record without TagIds, or with an odd one, is no reason to refuse
+    mock_gorelo.on("GET", CONTACT_5, envelope(only(contact_record(), "TagIds")))
+    mock_gorelo.on("PATCH", CONTACT_5, envelope(contact_record(TagIds=[4])))
+    await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "X"})
+    assert "TagIds" not in patched(mock_gorelo)[0].json
+    mock_gorelo.requests.clear()
+    routed_update(mock_gorelo, record=contact_record(TagIds="3,7"))
+    await call_tool(server, "update_contact", {"contact_id": 5, "job_title": "X"})
+    assert "TagIds" not in patched(mock_gorelo)[0].json
+    # given tag_ids, the list is sent as the caller gave it
+    mock_gorelo.requests.clear()
+    routed_update(mock_gorelo, record=contact_record(), answer=contact_record(TagIds=[4]))
+    await call_tool(server, "update_contact", {"contact_id": 5, "tag_ids": [4]})
+    assert patched(mock_gorelo)[0].json == command(TagIds=[4])
+
+
+async def test_the_tag_and_location_ids_name_the_tool_that_resolves_them(server):
+    tools = {t.name: t for t in await list_tools(server)}
+    for name in ("create_contact", "update_contact"):
+        assert "list_contact_tags" in tools[name].inputSchema["properties"]["tag_ids"]["description"]
+    assert "list_client_locations" in tools["list_contacts"].inputSchema["properties"]["location_ids"]["description"]
+    assert "[] removes them all" in tools["update_contact"].inputSchema["properties"]["tag_ids"]["description"]
+
+
+def test_list_contact_tags_docstring_names_what_it_resolves():
+    doc = flat(contacts_module.list_contact_tags.__doc__)
+    assert "tag_ids" in doc and "create_contact" in doc and "update_contact" in doc

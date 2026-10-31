@@ -76,8 +76,27 @@ The guard and cleanup read these `details` keys, so the harness must record them
                        counts as known undeletable, never as cleaned and never alone a failure. The guard takes a write to a
                        document only for a run-created one, so this record is what unlocks it
 
-`id` is an int for client, contact, time_entry and custom_property, a UUID for ticket, comment, item, uptime, project,
-section, task, project_comment, invoice, custom_asset and document, and any short token for attachment, side_conversation and approval.
+    asset_type         an asset type of the write matrix's asset_types area (--with-asset-types): its Name starts with the run id. The
+                       account's asset types are shared by every client; the run deletes the type it made, and the cleanup deletes one
+                       a stopped run left (a gated delete, run-created types only)
+    client_location    a location of the TEST CLIENT (--with-client-locations): client_id (the test client). Gorelo marks a deleted
+                       location inactive instead of removing it, so a deleted one stays visible as inactive
+    client_domain      a web domain of the TEST CLIENT (--with-client-domains): client_id and name (mcptest-<run>.example, the reserved
+                       .example TLD, which can route no inbound email)
+    product_charge     a product charge on a run-created ticket of the test client (--with-product-charges): ticket_id and client_id
+    contract           a contract of the TEST CLIENT (--with-contracts): client_id, labor terms 2 (Hourly) only. A contract cannot be
+                       deleted through the API, so every one is a known residue from the moment it exists: the run archives it
+                       (StatusId 3), a cleanup archives one a stopped run left, and the outcome of an archived one ends with
+                       "(a contract cannot be deleted through the API)", which cleanup counts as known undeletable
+    alert              an EXISTING alert of the test client that the alert_status area dismisses and restores. Not a create: like
+                       custom_property the record says what the cleanup must undo, so it is written BEFORE the first write. details:
+                       client_id (the test client; the guard refuses any other alert), status_before (1, New), and the label names the
+                       alert. The cleanup restores it to New (PATCH StatusId 1, the one write it makes to an alert) when it still reads
+                       Dismissed
+
+`id` is an int for client, contact, time_entry, custom_property, asset_type, client_location, client_domain, product_charge and
+contract, a UUID for ticket, comment, item, uptime, project, section, task, project_comment, invoice, custom_asset, document and alert,
+and any short token for attachment, side_conversation and approval.
 Never put secrets in `details` (the manifest refuses keys that look like one). An uploaded attachment's url
 carries an access token: record its name, not its url.
 """
@@ -116,6 +135,12 @@ KINDS: tuple[str, ...] = (
     "custom_asset",
     "custom_property",
     "document",
+    "asset_type",
+    "client_location",
+    "client_domain",
+    "product_charge",
+    "contract",
+    "alert",
 )
 # "int": a positive integer. "uuid": a UUID (stored lowercase, hyphenated). "any": either of those or a short token.
 ID_TYPES: dict[str, str] = {
@@ -137,6 +162,12 @@ ID_TYPES: dict[str, str] = {
     "custom_asset": "uuid",
     "custom_property": "int",
     "document": "uuid",
+    "asset_type": "int",
+    "client_location": "int",
+    "client_domain": "int",
+    "product_charge": "int",
+    "contract": "int",
+    "alert": "uuid",
 }
 # the kinds of records that exist before a run (listed leftovers of earlier probes)
 LEFTOVER_KINDS = ("client", "contact")

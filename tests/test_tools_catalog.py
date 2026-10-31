@@ -682,6 +682,88 @@ def test_the_item_status_texts_are_the_ones_in_the_spec():
 
 
 # --------------------------------------------------------------------------
+# list_items: SortBy and SortOrder
+# --------------------------------------------------------------------------
+
+
+async def test_list_items_declares_the_sort_enums_in_the_order_the_other_list_tools_pin(server):
+    tools = await list_tools(server)
+    properties = tool_def("list_items", tools).inputSchema["properties"]
+    assert properties["sort_by"]["enum"] == ["updatedOn", "createdOn"]
+    assert properties["sort_order"]["enum"] == ["asc", "desc"]
+    assert properties["sort_by"]["description"] == "createdOn (default) or updatedOn."
+    assert properties["sort_order"]["description"] == "asc or desc (default)."
+    assert (catalog.ITEM_SORT_BY, catalog.ITEM_SORT_ORDER) == (("updatedOn", "createdOn"), ("asc", "desc"))
+
+
+async def test_list_items_sends_no_sort_when_none_is_given(server, mock_gorelo):
+    mock_gorelo.on("GET", ITEMS, paged_envelope([item_row()]))
+    result = await call_tool(server, "list_items")
+    assert "SortBy" not in mock_gorelo.last.query and "SortOrder" not in mock_gorelo.last.query
+    assert result["filters"] == {}
+
+
+async def test_list_items_sends_the_sort_under_its_spec_names_and_echoes_it(server, mock_gorelo):
+    mock_gorelo.on("GET", ITEMS, paged_envelope([item_row()]))
+    result = await call_tool(server, "list_items", {"sort_by": "updatedOn", "sort_order": "asc"})
+    assert mock_gorelo.last.query == {"SortBy": "updatedOn", "SortOrder": "asc", "PageSize": "50"}
+    assert result["filters"] == {"sort_by": "updatedOn", "sort_order": "asc"}
+
+
+async def test_paging_keeps_the_sort_on_every_page(server, mock_gorelo):
+    mock_gorelo.on(
+        "GET",
+        ITEMS,
+        in_order(
+            envelope([item_row()], pagination("c-2", 2)),
+            envelope([item_row(uid(12))], pagination(None, 2, has_more=False)),
+        ),
+    )
+    args = {"sort_by": "createdOn", "sort_order": "desc", "page_size": 1}
+    one = await call_tool(server, "list_items", args)
+    two = await call_tool(server, "list_items", {**args, "cursor": one["next_cursor"]})
+    assert (one["has_more"], two["has_more"]) == (True, False)
+    assert [r.query for r in mock_gorelo.requests] == [
+        {"SortBy": "createdOn", "SortOrder": "desc", "PageSize": "1"},
+        {"SortBy": "createdOn", "SortOrder": "desc", "PageSize": "1", "Cursor": "c-2"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("args", "fragment"),
+    [
+        ({"sort_by": "name"}, "sort_by"),
+        ({"sort_by": "Updatedon"}, "sort_by"),
+        ({"sort_order": "ascending"}, "sort_order"),
+    ],
+)
+async def test_list_items_refuses_a_sort_outside_the_spec_before_any_http_call(server, mock_gorelo, args, fragment):
+    text = await call_tool_error(server, "list_items", args)
+    assert fragment in text
+    assert mock_gorelo.requests == []
+
+
+async def test_calling_list_items_directly_with_an_unknown_sort_is_refused_not_dropped(client_factory, mock_gorelo):
+    with pytest.raises(ToolError, match="sort_by: must be one of 'updatedOn', 'createdOn', got 'name'"):
+        await call_directly(client_factory, catalog.list_items, sort_by="name")
+    with pytest.raises(ToolError, match="sort_order: must be one of 'asc', 'desc', got 'up'"):
+        await call_directly(client_factory, catalog.list_items, sort_order="up")
+    assert mock_gorelo.requests == []
+
+
+async def test_a_gorelo_400_on_the_sort_names_the_snake_case_param(server, mock_gorelo):
+    mock_gorelo.on("GET", ITEMS, error_envelope(400, [("070101", "Not a valid value.", "SortBy")]))
+    text = await call_tool_error(server, "list_items", {"sort_by": "updatedOn"})
+    assert text == f"Gorelo rejected list_items (HTTP 400, code 070101): sort_by: Not a valid value. [trace {TEST_TRACE_ID}]"
+
+
+@needs_spec_text
+def test_the_item_sort_texts_are_the_ones_in_the_spec():
+    assert param_text("get", "/v1/items", "SortBy") == "Sort field: createdOn (default) or updatedOn. Any other value is a 400."
+    assert param_text("get", "/v1/items", "SortOrder") == "Sort direction: asc or desc (default). Any other value is a 400."
+
+
+# --------------------------------------------------------------------------
 # get_item
 # --------------------------------------------------------------------------
 

@@ -17,6 +17,7 @@ from conftest import (
     make_ctx,
     paged_envelope,
     pagination,
+    uid,
 )
 
 import tools.alerts as alerts_module
@@ -53,6 +54,13 @@ CORE_TOOLS = {
     "post_alert", "list_alerts",
     "list_agent_apps", "get_agent_hardware", "list_agent_patches", "list_agent_available_updates", "list_agent_tags",
     "list_asset_types", "list_scripts", "get_script",  # 1.4.0 (contract 05200951c89e)
+    # 1.5.0 (contract 6c30770dffc0): the 19 regular tools these modules gained. The three gated ones (delete_asset_type,
+    # delete_client_location, delete_client_domain) are not in the group: no core tool here is destructive.
+    "list_org_roles", "get_org_group", "get_org_user",
+    "get_alert", "set_alert_status",
+    "update_agent", "list_policies", "get_policy", "list_asset_tags", "create_asset_type", "update_asset_type",
+    "list_client_types", "list_client_custom_fields", "get_client_location", "create_client_location", "update_client_location",
+    "create_client_domain", "update_client_domain", "list_contact_tags",
 }
 
 
@@ -126,7 +134,7 @@ def core_specs():
 
 def test_every_core_tool_is_registered_once_in_the_core_toolset():
     specs = core_specs()
-    assert sorted(spec.name for spec in specs) == sorted(CORE_TOOLS) and len(CORE_TOOLS) == 25  # 16 until list_alerts joined, 17 until 1.4.0 added eight
+    assert sorted(spec.name for spec in specs) == sorted(CORE_TOOLS) and len(CORE_TOOLS) == 44  # 16 until list_alerts joined, 17 until 1.4.0 added eight (25), 1.5.0 added 19 regular ones
     assert {spec.toolset for spec in specs} == {"core"}
 
 
@@ -138,9 +146,14 @@ def test_no_core_tool_is_destructive_and_none_can_reach_a_delete(spec_index):
         assert all(op in spec_index.ops for op in spec.ops), spec.name
 
 
-def test_only_the_two_update_tools_overwrite_data():
+def test_only_the_update_and_set_tools_overwrite_data():
     overwriting = {spec.name for spec in core_specs() if spec.destructive_hint}
-    assert overwriting == {"update_client", "update_contact"}
+    # 1.5.0 added set_alert_status and the update tools of agents, asset types, client locations and client domains
+    assert overwriting == {
+        "update_client", "update_contact", "set_alert_status", "update_agent", "update_asset_type", "update_client_location",
+        "update_client_domain",
+    }
+    assert {name for name in overwriting if not name.startswith(("update_", "set_"))} == set()
 
 
 def test_every_core_tool_has_an_ascii_docstring_without_dashes():
@@ -200,13 +213,24 @@ def test_the_core_modules_use_the_shared_helpers_for_ids_and_write_answers():
 ID_PARAMS = {
     "list_clients": ["status_ids", "group_ids"],
     "get_client": ["client_id"],
-    "update_client": ["client_id", "status_id", "clear_custom_property_ids", "group_ids"],
+    "create_client": ["client_type_id"],  # 1.5.0
+    "update_client": ["client_id", "status_id", "clear_custom_property_ids", "group_ids", "client_type_id"],
     "list_client_locations": ["client_id"],
-    "list_contacts": ["client_id", "client_ids", "status_ids"],
+    "get_client_location": ["client_id", "location_id"],  # 1.5.0
+    "create_client_location": ["client_id", "primary_contact_id", "billing_contact_ids"],
+    "update_client_location": ["client_id", "location_id", "primary_contact_id", "billing_contact_ids", "remove_billing_contact_ids"],
+    "create_client_domain": ["client_id"],
+    "update_client_domain": ["client_id", "domain_id"],
+    "list_contacts": ["client_id", "client_ids", "status_ids", "location_ids"],
     "get_contact": ["contact_id"],
-    "create_contact": ["client_id", "location_id"],
-    "update_contact": ["contact_id", "location_id"],
-    "list_org_users": ["status_ids"],
+    "create_contact": ["client_id", "location_id", "tag_ids"],
+    "update_contact": ["contact_id", "location_id", "tag_ids"],
+    "list_org_users": ["status_ids", "group_ids"],
+    "get_org_group": ["group_id"],
+    "get_org_user": ["user_id"],
+    "get_policy": ["policy_id"],
+    "update_agent": ["contact_id", "hardware_type_id"],
+    "update_asset_type": ["asset_type_id"],
     "list_agents": ["status_ids", "client_ids"],
     "list_custom_assets": ["client_ids"],
     "post_alert": ["client_id"],
@@ -218,13 +242,24 @@ ID_PARAMS = {
 BASE_ARGS = {
     "list_clients": {},
     "get_client": {"client_id": 1},
+    "create_client": {"name": "N", "location_name": "L"},
     "update_client": {"client_id": 1, "name": "N"},
     "list_client_locations": {"client_id": 1},
+    "get_client_location": {"client_id": 1, "location_id": 2},
+    "create_client_location": {"client_id": 1, "name": "N"},
+    "update_client_location": {"client_id": 1, "location_id": 2, "name": "N"},
+    "create_client_domain": {"client_id": 1, "name": "example.invalid"},
+    "update_client_domain": {"client_id": 1, "domain_id": 2, "name": "example.invalid"},
     "list_contacts": {},
     "get_contact": {"contact_id": 1},
     "create_contact": {"client_id": 1, "first_name": "a", "last_name": "b", "primary_email": "c"},
     "update_contact": {"contact_id": 1, "job_title": "X", "secondary_email": []},
     "list_org_users": {},
+    "get_org_group": {"group_id": 1},
+    "get_org_user": {"user_id": 1},
+    "get_policy": {"policy_id": 1},
+    "update_agent": {"agent_id": uid(1), "contact_id": 1},
+    "update_asset_type": {"asset_type_id": 1, "name": "N"},
     "list_agents": {},
     "list_custom_assets": {},
     "post_alert": {"name": "n", "client_id": 1, "resource": "r", "severity": 1},
@@ -279,10 +314,16 @@ MAX_PARAMETER = 220  # and never more than 220 per parameter
 TYPICAL_DESCRIPTION = 700
 TYPICAL_PARAMETER = 160
 # update_client carries the 1.4.0 group_ids guidance (read GroupIds first, [9] drops the rest, who sees the client): 795 measured
-DESCRIPTION_OVERRIDES = {"update_client": 810}
+# 1.5.0: set_alert_status (857) says the bulk limits, that one id also works and what a dismissal records; update_agent (870) says what
+# each of its five fields does to an agent (the contact, the hardware type, the clear options)
+# 1.5.0: update_client_location (795) says that it reads the location first and that a current billing contact left off
+# is refused unless remove_billing_contact_ids names it
+DESCRIPTION_OVERRIDES = {"update_client": 810, "set_alert_status": 860, "update_agent": 875, "update_client_location": 800}
 # update_contact.secondary_email says that the API cannot show the list, that the user sees it in the Gorelo app, and so that the
 # model asks the user for the complete list before it replaces it: 203 measured
-PARAMETER_OVERRIDES = {("update_contact", "secondary_email"): 205}
+# update_client_location.billing_contact_ids says that the list is the COMPLETE new one, where the current one is read (get_client_location)
+# and that a current contact left off is refused unless named in remove_billing_contact_ids: 190 measured
+PARAMETER_OVERRIDES = {("update_contact", "secondary_email"): 205, ("update_client_location", "billing_contact_ids"): 190}
 
 
 async def core_tools(server):
@@ -307,7 +348,13 @@ async def test_every_core_tool_and_parameter_description_stays_within_the_size_l
 # agent and asset type reads, list_scripts, get_script) add 6_301 bytes and the new 1.4.0 parameters of list_clients, update_client,
 # list_alerts and post_alert 1_630 more: 32_841 measured, the limit is that plus about 1 percent rounded up to the next 100.
 # For 1.4.2 the group measures 32_890 bytes (64 more, the update_contact texts about the secondary emails); the limit is unchanged.
-CORE_BUDGET_BYTES = 33_200
+# For 1.5.0 the group measures 56_728 bytes: the 19 regular tools that release 1.5.0 added to these modules (the three gated ones are not
+# in the group) and the new parameters of list_org_users, create_client, update_client, list_contacts, create_contact and update_contact.
+# The limit is that plus about 1 percent, rounded up to the next 100.
+# Since 1.5.0 (the billing contact guard of update_client_location and its new parameter, the "Resolve ids
+# first" and "Side effects: None (read-only)." lines of eleven reads, text fixes) the group measures 57_910 bytes: the limit
+# is that plus about 1 percent, rounded up to the next 100.
+CORE_BUDGET_BYTES = 58_500
 
 
 async def test_the_core_tool_list_stays_within_its_size_budget(server_factory):
@@ -377,7 +424,7 @@ async def test_a_healthy_api_reports_the_client_count_and_the_server_configurati
         "total_clients": 40,
         "toolsets": ["core", "tickets"],
         "destructive": True,
-        "gated_tools": ["delete_ticket_comment"],
+        "gated_tools": ["delete_asset_type", "delete_client_domain", "delete_client_location", "delete_ticket_comment"],  # core gained three gated tools in 1.5.0
         "spec_sha256": spec_index.sha256,
     }
 
@@ -392,7 +439,10 @@ async def test_destructive_off_and_a_single_toolset_are_reported_as_they_are(ser
 async def test_the_registered_gated_tools_are_reported_by_name_whether_all_or_some_are_switched_on(server_factory, mock_gorelo):
     mock_gorelo.on("GET", CLIENTS, paged_envelope([a_client()], total_count=1))
     every = await call_tool(server_factory(toolsets={"core", "tickets", "time", "uptime"}, destructive=True), "health_check")
-    assert every["gated_tools"] == ["delete_ticket_comment", "delete_time_entry", "delete_uptime_check"]
+    assert every["gated_tools"] == [
+        "delete_asset_type", "delete_client_domain", "delete_client_location",
+        "delete_ticket_comment", "delete_time_entry", "delete_uptime_check",
+    ]
     some = await call_tool(
         server_factory(toolsets={"core", "tickets", "time", "uptime"}, destructive=True, destructive_tools=frozenset({"delete_time_entry"})),
         "health_check",

@@ -43,7 +43,9 @@ LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-late
 # 16727 bytes after the shape text of 2026-10-03 (the list and get descriptions name the User, Ticket and Task objects);
 # the limit did not move. 17118 bytes before the closed ticket sentence of create_time_entry and 17229 after it
 # (111 bytes); the limit did not move.
-MODULE_BUDGET_BYTES = 17900
+# 1.5.0: the group gained create_contract and update_contract (contract 6c30770dffc0; 14 tools now) and the new query and body
+# texts of list_contracts and get_contract: 37845 bytes measured, the limit is that plus about 1 percent, rounded up to the next 100.
+MODULE_BUDGET_BYTES = 38300
 VERIFY_AFTER_SHAPE = "the write may have been applied, so verify it with a read before repeating it"
 
 # What the time entry tools must provide: name -> (kind, ops)
@@ -169,15 +171,31 @@ def test_every_declared_op_exists_in_the_spec_and_none_is_forbidden(spec_index):
             assert op not in FORBIDDEN_OPS, f"{name}: {op}"
 
 
+# Spec fields of POST /v1/time-entries that no parameter sends, each with the reason (a decision for 1.5.0).
+UNEXPOSED_CREATE_FIELDS = {
+    "CreatedOn": "backdated historical import: never invoiced and cannot be changed or deleted later; left out on purpose",
+}
+
+
 def test_the_field_maps_cover_exactly_the_spec_fields(spec_index):
     create = spec_index.op("POST /v1/time-entries")
-    assert set(time_entries.CREATE_FIELDS.values()) == set(create.body["fields"])
+    assert set(time_entries.CREATE_FIELDS.values()) | set(UNEXPOSED_CREATE_FIELDS) == set(create.body["fields"])
+    assert not set(time_entries.CREATE_FIELDS.values()) & set(UNEXPOSED_CREATE_FIELDS)
     update = spec_index.op("PATCH /v1/time-entries/{timeEntryId}")
     assert set(time_entries.UPDATE_FIELDS.values()) == set(update.body["fields"])
     listing = spec_index.op("GET /v1/time-entries")
     assert set(time_entries.LIST_QUERY.values()) | {"PageSize", "Cursor"} == set(listing.query_params)
     assert listing.paged and not spec_index.op("GET /v1/billing-roles").paged
     assert not spec_index.op("GET /v1/work-types").paged
+
+
+async def test_create_time_entry_has_no_created_on_parameter_by_the_owners_decision(server_factory, mock_gorelo):
+    listed = {t.name: t for t in await list_tools(server_factory())}
+    params = set(listed["create_time_entry"].inputSchema["properties"])
+    assert not params & {"created_on", "created_at", "backdate", "back_dated"}
+    for value in time_entries.CREATE_FIELDS.values():
+        assert value != "CreatedOn"
+    assert mock_gorelo.requests == []
 
 
 async def test_the_tools_appear_in_the_time_toolset_only_and_delete_needs_the_destructive_flag(server_factory):
@@ -383,7 +401,7 @@ def test_the_module_documents_the_two_409_refusals():
 async def test_the_package_tool_list_stays_within_its_budget(server_factory):
     names = {spec.name for spec in REGISTRY.specs if spec.fn.__module__ in MODULE_GROUP}
     package = [t for t in await list_tools(server_factory(destructive=True)) if t.name in names]
-    assert len(package) == len(names) == 12
+    assert len(package) == len(names) == 14
     size = sum(len(json.dumps(t.model_dump(mode="json", exclude_none=True))) for t in package)
     assert size <= MODULE_BUDGET_BYTES, f"{size} bytes, budget {MODULE_BUDGET_BYTES}"
 
@@ -894,8 +912,9 @@ async def test_every_field_goes_out_under_its_pascal_case_name(server, mock_gore
         "Distance": 12.5,
         "Attachments": [{"Name": "report.pdf", "Url": "https://files.example.test/report.pdf"}],
     }
-    # every spec field is reachable (TaskId through the task variant)
-    assert set(body) | {"TaskId"} == set(spec_index.op("POST /v1/time-entries").body["fields"])
+    # every spec field is reachable (TaskId through the task variant) except the deliberately unexposed ones
+    assert set(body) | {"TaskId"} | set(UNEXPOSED_CREATE_FIELDS) == set(spec_index.op("POST /v1/time-entries").body["fields"])
+    assert not set(body) & set(UNEXPOSED_CREATE_FIELDS)
 
 
 @pytest.mark.parametrize("status", [1, 2, 3])

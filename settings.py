@@ -14,7 +14,11 @@ Variables:
     GORELO_ENABLE_DESTRUCTIVE optional. Switches on the gated tools: the delete and void tools,
                               remove_document_related_item (it removes the link between a document and another
                               record), create_approved_invoice (it creates an Approved invoice, which Gorelo pushes to
-                              the connected accounting system at once and may email to its recipients) and
+                              the connected accounting system at once and may email to its recipients),
+                              approve_invoice (it approves an existing invoice, which Gorelo pushes to the connected
+                              accounting system at once), create_contract and update_contract (they write a billing
+                              contract, and a contract can make Gorelo approve and send recurring invoices on its own,
+                              which pushes them to the accounting system) and
                               share_document (it turns a document's public link on, so anyone who has the link can
                               read it without a login, or publishes it to the client portal). Every call still needs
                               confirm=true.

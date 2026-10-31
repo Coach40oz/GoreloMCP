@@ -1,17 +1,26 @@
-"""Contacts: list, read, create, update (toolset "core").
+"""Contacts: list, read, create, update and the contact tags (toolset "core").
 
-Tools: list_contacts, get_contact, create_contact, update_contact.
+Tools: list_contacts, get_contact, create_contact, update_contact, list_contact_tags.
 
 Ops owned by this module:
 
     GET /v1/contacts
+    GET /v1/contacts/tags
     GET /v1/contacts/{contactId}
     POST /v1/contacts
     PATCH /v1/contacts/{contactId}
 
 Contract notes (observed on 2026-10-01 and 2026-10-24, see docs/API-OBSERVED-BEHAVIOR.md):
 
-* GET /v1/contacts has both a legacy ClientId and ClientIds. list_contacts only ever sends ClientIds.
+* GET /v1/contacts has both a legacy ClientId and ClientIds. list_contacts only ever sends ClientIds. It also takes LocationIds
+  (contract 6c30770dffc0: client location ids, up to 100, keeps contacts based at any of them).
+* Tags (contract 6c30770dffc0): CreateContactCommand and UpdateContactCommand take TagIds (ids from GET /v1/contacts/tags, active
+  tags only), at most 100, and every id must be an active contact tag or the whole request is a 400 on TagIds. On update the text
+  says "Replaces the set; [] clears it; omit to leave it unchanged"; ContactResponse carries TagIds (ascending, [] when none).
+  update_contact follows the omit text: it sends TagIds ONLY when the caller gives tag_ids and never re-sends the stored tags
+  (a stored tag that has become inactive would make the whole request a 400 on TagIds). tag_ids=[] clears all tags (the same shape
+  as secondary_email=[]). create_contact refuses [] (omit it). When tag_ids is given the answer's TagIds is compared with it as a
+  set; a difference is a write-unconfirmed shape error.
 * GET /v1/contacts StatusIds is 1 Active, 3 Temporary, 4 Archived (contract a7954b24844b, 2026-10-17; 2 Inactive is gone):
   the default leaves Archived out, a supplied list returns only those statuses, deleted contacts are never listed,
   up to 100 values, any other value is a 400. list_contacts checks every item against that scale, and the count,
@@ -85,6 +94,7 @@ from tools._common import (
     describe_value,
     expect_object,
     gorelo_tool,
+    list_result,
     non_empty,
     paged_result,
     positive_id,
@@ -94,6 +104,7 @@ from tools._common import (
 )
 
 LIST_OP = "GET /v1/contacts"
+TAGS_OP = "GET /v1/contacts/tags"
 GET_OP = "GET /v1/contacts/{contactId}"
 CREATE_OP = "POST /v1/contacts"
 UPDATE_OP = "PATCH /v1/contacts/{contactId}"
@@ -105,6 +116,7 @@ SINCE_HELP = "ISO 8601 with UTC offset, e.g. 2026-10-01T00:00:00Z."
 LIST_FIELD_MAP = {
     "client_id": "ClientIds",
     "client_ids": "ClientIds",
+    "location_ids": "LocationIds",
     "status_ids": "StatusIds",
     "query": "Query",
     "created_since": "CreatedSince",
@@ -134,6 +146,7 @@ CREATE_FIELD_MAP = {
     "department": "Department",
     "time_zone": "TimeZone",
     "description": "Description",
+    "tag_ids": "TagIds",
 }
 
 # snake_case tool parameter -> UpdateContactCommand field. Body fields only: the contact id travels in the path and
@@ -153,6 +166,7 @@ UPDATE_FIELD_MAP = {
     "department": "Department",
     "time_zone": "TimeZone",
     "description": "Description",
+    "tag_ids": "TagIds",
 }
 
 # What update_contact declares as its field_map: the body fields plus the path placeholder, so that a Gorelo error
@@ -207,6 +221,7 @@ PHONE_PAIRS = (
 CONTACT_STATUS_LABELS = {1: "Active", 3: "Temporary", 4: "Archived"}
 CONTACT_STATUS_SCALE = ", ".join(f"{status} {label}" for status, label in CONTACT_STATUS_LABELS.items())
 STATUS_IDS_MAX = 100  # "Up to 100 values"
+TAG_IDS_MAX = 100  # "At most 100" (the TagIds text of both commands)
 
 
 def _status(param: str, value: Any) -> int:
@@ -227,6 +242,34 @@ def _statuses(param: str, values: Any) -> list[int] | None:
             raise ValueError(f"{param}: at most {STATUS_IDS_MAX} values, got {len(values)}")
         return [_status(f"{param}[{index}]", item) for index, item in enumerate(values)]
     return positive_ids(param, values)
+
+
+def _tags(param: str, values: Any, *, allow_empty: bool) -> list[int] | None:
+    """tag_ids: None stays None, at most TAG_IDS_MAX positive ids (a bad one named by its index), [] only if allowed
+    (update_contact: it clears every tag; create_contact: omit the parameter)."""
+    if values is None:
+        return None
+    if isinstance(values, (list, tuple)):
+        if not values:
+            if allow_empty:
+                return []
+            raise ValueError(f"{param}: must not be an empty list; omit it to create the contact without tags")
+        if len(values) > TAG_IDS_MAX:
+            raise ValueError(f"{param}: at most {TAG_IDS_MAX} values, got {len(values)}")
+    return positive_ids(param, values)
+
+
+def _tags_answered(answer: dict[str, Any], sent: list[int], op_key: str, tool: str) -> None:
+    """Gorelo's answer must show the tags that were sent (as a set; the answer lists them ascending). A TagIds that
+    differs is a write-unconfirmed shape error: the write was answered 2xx, so it may have been applied. An answer
+    that has no TagIds list is not checked (nothing to compare)."""
+    shown = answer.get("TagIds")
+    if isinstance(shown, list) and {str(item) for item in shown} != {str(item) for item in sent}:
+        raise GoreloAPIError(
+            f"{op_key}: Gorelo answered the write but its TagIds differ from the tag_ids that were sent; the write "
+            "may have been applied, so verify it with get_contact before repeating it",
+            status=200, op_key=op_key, kind="shape", write_unconfirmed=True,
+        )
 
 
 def _filled(value: Any) -> bool:
@@ -285,6 +328,10 @@ async def list_contacts(
     client_ids: Annotated[
         list[StrictId] | None, Field(description="Only these clients' contacts (list_clients). Not with client_id.")
     ] = None,
+    location_ids: Annotated[
+        list[StrictId] | None,
+        Field(description="Contacts based at any of these locations (list_client_locations), up to 100."),
+    ] = None,
     status_ids: Annotated[
         list[StrictId] | None,
         Field(
@@ -300,7 +347,7 @@ async def list_contacts(
     cursor: Annotated[str | None, Field(description="next_cursor from the previous call.")] = None,
 ) -> dict:
     """List contacts one page per call; returns {items, has_more, next_cursor, total_count, ...}.
-    Filter by client_id (one) or client_ids (several), not both. Archived contacts are left out unless status_ids asks for status 4; deleted contacts are never listed. Rows can be temporary contacts (IsTemporaryContact true, ClientId null) that belong to no client (Gorelo's release notes of 2026-10-09). Rows never include SecondaryEmail: Gorelo does not return it. Paging: pass next_cursor as cursor, same filters, until has_more is false.
+    Filter by client_id (one) or client_ids (several), not both; location_ids keeps contacts based at those locations. Archived contacts are left out unless status_ids asks for status 4; deleted contacts are never listed. Rows can be temporary contacts (IsTemporaryContact true, ClientId null) that belong to no client (Gorelo's release notes of 2026-10-09). Rows never include SecondaryEmail: Gorelo does not return it. Paging: pass next_cursor as cursor, same filters, until has_more is false.
     """
     if client_id is not None and client_ids is not None:
         raise ValueError(
@@ -310,6 +357,7 @@ async def list_contacts(
         clients = csv_ids("client_id", [positive_id("client_id", client_id)])
     else:
         clients = csv_ids("client_ids", positive_ids("client_ids", client_ids))
+    locations = csv_ids("location_ids", positive_ids("location_ids", location_ids))
     ids = csv_ids("status_ids", _statuses("status_ids", status_ids))
     keyword = non_empty("query", query)
     created_after = utc_iso("created_since", created_since)
@@ -322,6 +370,7 @@ async def list_contacts(
         LIST_OP,
         query={
             "ClientIds": clients,
+            "LocationIds": locations,
             "StatusIds": ids,
             "Query": keyword,
             "CreatedSince": created_after,
@@ -338,6 +387,7 @@ async def list_contacts(
         {
             "client_id": client_id,
             "client_ids": client_ids,
+            "location_ids": location_ids,
             "status_ids": status_ids,
             "query": keyword,
             "created_since": created_after,
@@ -386,6 +436,10 @@ async def create_contact(
     department: Annotated[str | None, Field(description="Department.")] = None,
     time_zone: Annotated[str | None, Field(description="IANA time zone, e.g. America/New_York.")] = None,
     description: Annotated[str | None, Field(description="Free-text notes.")] = None,
+    tag_ids: Annotated[
+        list[StrictId] | None,
+        Field(description="Tag ids (list_contact_tags), at most 100, active tags only."),
+    ] = None,
 ) -> dict:
     """Create a contact under a client; returns the created contact record.
     This tool always creates a contact for a client, never a client-less temporary one. Only client_id, first_name, last_name and primary_email are required; nothing else is inferred or defaulted. Check list_contacts first for a duplicate. Side effects: creates a real contact at once; this server cannot delete contacts, so a mistaken one is removed in the Gorelo app.
@@ -396,6 +450,7 @@ async def create_contact(
     non_empty("primary_email", primary_email)
     lid = None if location_id is None else positive_id("location_id", location_id)
     emails = _addresses("secondary_email", secondary_email, allow_empty=False)
+    tags = _tags("tag_ids", tag_ids, allow_empty=False)
     mobile_region = region_code("mobile_phone_country_code", mobile_phone_country_code)
     office_region = region_code("office_phone_country_code", office_phone_country_code)
     _phone_needs_region("mobile_phone", "mobile_phone_country_code", mobile_phone, mobile_region)
@@ -418,11 +473,14 @@ async def create_contact(
             "department": department,
             "time_zone": time_zone,
             "description": description,
+            "tag_ids": tags,
         },
         CREATE_FIELD_MAP,
     )
     data = await client_of(ctx).post(CREATE_OP, json_body=body, tool="create_contact")
     created_id(data, CREATE_OP, tool="create_contact")  # raises (write_unconfirmed) unless Data carries an Id
+    if tags is not None:
+        _tags_answered(data, tags, CREATE_OP, "create_contact")
     return data
 
 
@@ -559,6 +617,8 @@ def _full_command(
             status=200, op_key=GET_OP, kind="shape",
         )
     merged = {key: changes[key] if key in changes else record[key] for key in COPIED_FIELDS}
+    if "TagIds" in changes:  # sent only when the caller gave tag_ids; the stored tags are never re-sent (see the module note)
+        merged["TagIds"] = changes["TagIds"]
     if merged["ClientId"] is None:
         raise ValueError(
             f"contact_id: contact {contact_id} has no client in Gorelo (ClientId is null) and Gorelo's update "
@@ -638,6 +698,12 @@ async def update_contact(
             "user sees them in the Gorelo app: to change them, ask the user for the complete list. Omit it to keep them."
         ),
     ] = None,
+    tag_ids: Annotated[
+        list[StrictId] | None,
+        Field(
+            description="COMPLETE tag list (list_contact_tags ids, at most 100); replaces ALL tags, [] removes them all. Omit it to keep them."
+        ),
+    ] = None,
 ) -> dict:
     """Update a contact; returns the updated contact record. Pass only the fields to change.
     Gorelo clears the phones, job title, department, time zone and description an update leaves out, so this tool reads the contact and re-sends them. Location and secondary emails you do not send are kept. The API cannot show the secondary emails, the user sees them in the Gorelo app: to change them ask the user for the complete list; secondary_email REPLACES all ([] erases). The location can be moved, not cleared. A stored region code with no phone is left out; the result's `note` names it. Side effects: overwrites the contact; old values are not kept; an app edit made between the read and the write is lost.
@@ -662,15 +728,31 @@ async def update_contact(
         clear,
     )
     addresses = _addresses("secondary_email", secondary_email, allow_empty=True)
+    tags = _tags("tag_ids", tag_ids, allow_empty=True)
+    if tags is not None:
+        changes["TagIds"] = tags
     if not changes and addresses is None:
         raise ValueError(
             "nothing to update: pass at least one of first_name, last_name, primary_email, location_id, "
             "mobile_phone, mobile_phone_country_code, office_phone, office_phone_country_code, job_title, "
-            "department, time_zone, description, secondary_email or clear_fields"
+            "department, time_zone, description, secondary_email, tag_ids or clear_fields"
         )
     client = client_of(ctx)
     record = await client.get_one(GET_OP, path_params={"contactId": cid}, tool="update_contact")
     command, cleared = _full_command(cid, record, changes, addresses)
     data = await client.patch(UPDATE_OP, path_params={"contactId": cid}, json_body=command, tool="update_contact")
     result = expect_object(data, UPDATE_OP, tool="update_contact")  # raises first when the answer is not a record: no note
+    if tags is not None:
+        _tags_answered(result, tags, UPDATE_OP, "update_contact")
     return {**result, "note": _cleared_note(cleared, result)} if cleared else result
+
+
+@gorelo_tool(toolset="core", kind="read", ops=[TAGS_OP])
+async def list_contact_tags(ctx: Context) -> dict:
+    """List the tags a contact can be given (not paged; active tags only); returns {items, count}.
+    A row's Id is a tag_ids value of create_contact and update_contact; a contact's TagIds (get_contact) lists the tags it has. Rows hold Id, Name and Description.
+    Resolve ids first: none.
+    Side effects: None (read-only).
+    """
+    items = await client_of(ctx).get_list(TAGS_OP, tool="list_contact_tags")
+    return list_result(items)

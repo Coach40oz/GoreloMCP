@@ -21,11 +21,15 @@ Ops used by this module (each tool declares exactly the ones it calls, re-read G
     POST /v1/tickets/{ticketId}/conversations/side-conversation
     POST /v1/tickets/{ticketId}/conversations/approval
     GET /v1/tickets/{ticketId}/approvals/{approvalId}
+    PATCH /v1/tickets/{ticketId}/approvals/{approvalId}
 
 Tools: list_ticket_comments, get_ticket_comment, create_ticket_comment, delete_ticket_comment (destructive,
 private comments only), list_ticket_conversations, create_ticket_side_conversation, create_ticket_approval,
-get_ticket_approval. Gorelo answers a comment or approval write with only {"Id": ...}, so those tools re-read
-the record. A side conversation has no single-record GET: its tool returns the API data and points to
+get_ticket_approval, update_ticket_approval. Gorelo answers a comment or approval create with only {"Id": ...}, so
+those tools re-read the record. update_ticket_approval (1.5.0) renames an approval: the name is the only part of an
+approval that can change, the answer is already the GET shape (ApprovalDetailModel), and Gorelo sends no email and adds
+no timeline entry for a rename. The tool still reads the approval back with get_ticket_approval's GET, so its result
+is the stored record. A side conversation has no single-record GET: its tool returns the API data and points to
 list_ticket_conversations.
 
 Ids are checked with the shared helpers (guid, positive_ids, created_id, expect_object): an integer id is typed
@@ -79,6 +83,7 @@ LIST_CONVERSATIONS = "GET /v1/tickets/{ticketId}/conversations"
 CREATE_SIDE_CONVERSATION = "POST /v1/tickets/{ticketId}/conversations/side-conversation"
 CREATE_APPROVAL = "POST /v1/tickets/{ticketId}/conversations/approval"
 GET_APPROVAL = "GET /v1/tickets/{ticketId}/approvals/{approvalId}"
+UPDATE_APPROVAL = "PATCH /v1/tickets/{ticketId}/approvals/{approvalId}"
 
 # ConversationType ids of the comments API: 1 Public, 2 Private, 3 Side Conversation, 4 Approval.
 CONVERSATION_TYPE_IDS: dict[str, int] = {"public": 1, "private": 2, "side_conversation": 3, "approval": 4}
@@ -119,6 +124,7 @@ APPROVAL_FIELDS = {
     "contact_ids": "ContactIds",
     "attach_public_conversation": "AttachPublicConversation",
 }
+UPDATE_APPROVAL_FIELDS = {"name": "Name"}
 
 # Shared parameter text (the tool list is paid for in every conversation, so it stays short).
 TICKET_ID_DOC = "Ticket UUID (list_tickets, get_ticket)."
@@ -592,3 +598,38 @@ async def get_ticket_approval(
         GET_APPROVAL, path_params={"ticketId": ticket, "approvalId": approval}, tool="get_ticket_approval"
     )
     return expect_object(data, GET_APPROVAL, tool="get_ticket_approval")
+
+
+@gorelo_tool(
+    toolset=TOOLSET, kind="write", ops=[UPDATE_APPROVAL, GET_APPROVAL], field_map=UPDATE_APPROVAL_FIELDS,
+    destructive_hint=True,
+)
+async def update_ticket_approval(
+    ctx: Context,
+    ticket_id: Annotated[str, Field(description=TICKET_ID_DOC)],
+    approval_id: Annotated[
+        str, Field(description="Approval UUID (create_ticket_approval, or list_ticket_conversations).")
+    ],
+    name: Annotated[str, Field(description="The approval's new label, not blank. It cannot be cleared.")],
+) -> dict:
+    """Rename an approval on a ticket and return the stored approval. The name is the only part that can change: approvers, their answers and the status stay.
+    Side effects: overwrites the old name; nothing is emailed and the ticket timeline gets no entry. The same name changes nothing. If the read-back fails the result is {Id, warning}: the rename WAS applied, do not repeat it.
+    """
+    ticket = guid("ticket_id", ticket_id)
+    approval = guid("approval_id", approval_id)
+    request = build_body({"name": _required_text("name", name)}, UPDATE_APPROVAL_FIELDS)
+    client = client_of(ctx)
+    written = await client.patch(
+        UPDATE_APPROVAL,
+        path_params={"ticketId": ticket, "approvalId": approval},
+        json_body=request,
+        tool="update_ticket_approval",
+    )
+    expect_object(written, UPDATE_APPROVAL, tool="update_ticket_approval")
+    return await reread_after_write(
+        ctx,
+        GET_APPROVAL,
+        path_params={"ticketId": ticket, "approvalId": approval},
+        tool="update_ticket_approval",
+        written_id=approval,
+    )

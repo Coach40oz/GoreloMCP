@@ -1,12 +1,18 @@
 """Project tasks, task conversations and task approvals (toolset "projects").
 
-The tools in this module (9):
+The tools in this module (10):
 
     list_project_tasks, get_project_task, create_project_task, update_project_task, delete_project_task
     list_task_conversations, create_task_side_conversation, create_task_approval, get_task_approval
+    update_task_comment
 
 Task comments are posted, read and deleted with the comment tools in tools/projects.py (give them
-task_id); the side conversation or approval created here supplies their conversation_id.
+task_id); the side conversation or approval created here supplies their conversation_id. update_task_comment (1.5.0)
+edits a PRIVATE task comment: Body replaces the text, Attachments replaces the files outright (the tool reads the comment
+first, with the GET of get_project_comment, and refuses to drop a file silently), UpdatedByName is the editor. Gorelo
+refuses a public, side conversation or approval comment (409 ResourceUpdateBlocked, they were already sent outside the
+account), notifies nobody and records the edit as UpdatedOn. Its helpers are the ones of update_project_comment in
+tools/projects.py, repeated here on purpose: no tool module imports another.
 
 An API key without the Project scope gets a 403 (code 080203), which reaches the model through
 format_gorelo_error's missing-scope message. The offline tests cover these tools.
@@ -46,15 +52,19 @@ Ops owned by this module:
     POST /v1/projects/{projectId}/tasks/{taskId}/conversations/side-conversation
     POST /v1/projects/{projectId}/tasks/{taskId}/conversations/approval
     GET /v1/projects/{projectId}/tasks/{taskId}/approvals/{approvalId}
+    PATCH /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}
+    GET /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}   (the read before and after the edit)
 """
 
 import re
 from collections.abc import Callable
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from fastmcp import Context
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from gorelo_client import GoreloAPIError
 from tools._common import (
     MAX_ID,
     StrictBool,
@@ -91,6 +101,8 @@ LIST_CONVERSATIONS = "GET /v1/projects/{projectId}/tasks/{taskId}/conversations"
 CREATE_SIDE_CONVERSATION = "POST /v1/projects/{projectId}/tasks/{taskId}/conversations/side-conversation"
 CREATE_APPROVAL = "POST /v1/projects/{projectId}/tasks/{taskId}/conversations/approval"
 GET_APPROVAL = "GET /v1/projects/{projectId}/tasks/{taskId}/approvals/{approvalId}"
+UPDATE_TASK_COMMENT = "PATCH /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}"
+GET_TASK_COMMENT = "GET /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}"
 
 SortOrder = Literal["asc", "desc"]
 # What clear_fields of update_project_task may remove (the explicit opt-in; see the module docstring).
@@ -169,6 +181,11 @@ TASK_CLEAR_VALUES: dict[str, Any] = {
     **{param: [] for param in TASK_LIST_PARAMS},
     "banner": "",
     "lead_assignee_id": 0,
+}
+UPDATE_COMMENT_MAP = {
+    "body": "Body",
+    "attachments": "Attachments",
+    "updated_by_name": "UpdatedByName",
 }
 SIDE_CONVERSATION_MAP = {"name": "Name", "email": "Email", "cc_emails": "CcEmails"}
 APPROVAL_MAP = {"name": "Name", "contact_ids": "ContactIds"}
@@ -700,3 +717,286 @@ async def get_task_approval(
     ids = {**_task_ids(project_id, task_id), "approvalId": guid("approval_id", approval_id)}
     data = await client_of(ctx).get_one(GET_APPROVAL, path_params=ids, tool="get_task_approval")
     return expect_object(data, GET_APPROVAL, tool="get_task_approval")
+
+
+# --------------------------------------------------------------------------
+# Editing a comment (update_task_comment): the attachments are REPLACED outright, so the tool reads first
+# --------------------------------------------------------------------------
+
+ATTACHMENTS_MAX = 100  # UpdateTaskCommentCommand.Attachments: "Max 100"
+
+
+class CommentAttachment(BaseModel):
+    # One {name, url} pair, as upload_attachment returned it. No description text on purpose: this schema is part of the
+    # tool listing (paid for in every conversation) and the attachments parameter explains it.
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    url: str
+
+
+class CommentAttachmentsWouldBeDropped(ValueError):
+    """The edit would remove current attachments the caller did not name. The text names them (the user's own file names,
+    needed to fix the call), so the error carries log_summary: server.LogValueFilter logs that summary alone, without the
+    traceback and without a file name (the same rule as AttachmentsWouldBeDropped in tools/documents.py)."""
+
+    def __init__(self, message: str, log_summary: str = "") -> None:
+        super().__init__(message)
+        self.log_summary = log_summary
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (type(self), (self.args[0], self.log_summary))
+
+
+def _unconfirmed(op_key: str, detail: str) -> GoreloAPIError:
+    """The write-unconfirmed shape error: Gorelo answered 2xx, but the read-back does not show the edit."""
+    return GoreloAPIError(
+        f"{op_key}: {detail}; the write may have been applied, so verify it with a read before repeating it "
+        "(get_project_comment with task_id)",
+        status=200,
+        op_key=op_key,
+        kind="shape",
+        write_unconfirmed=True,
+    )
+
+
+def _url_key(url: str) -> str:
+    """A url without its query string and fragment: the time-limited token is taken to be in the query (not probed), and
+    Gorelo issues a fresh one on every read, so two urls of the same file differ only there."""
+    parts = urlsplit(url.strip())
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path}"
+
+
+def _attachment_pairs(items: list[CommentAttachment] | None) -> list[tuple[str, str]] | None:
+    """The (name, url) pairs of the attachments parameter, checked. [] is an error: nothing is removed by omission."""
+    if items is None:
+        return None
+    if not items:
+        raise ValueError(
+            "attachments: an empty list is not accepted because the list replaces the stored one; to remove files "
+            "name them in remove_attachment_names (naming every current file removes them all)"
+        )
+    pairs: list[tuple[str, str]] = []
+    seen: dict[tuple[str, str], int] = {}
+    for index, item in enumerate(items):
+        name, url = item.name, item.url
+        if not name.strip():
+            raise ValueError(f"attachments[{index}].name: must not be empty or whitespace only")
+        parts = urlsplit(url)
+        if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+            raise ValueError(
+                f"attachments[{index}].url: expected the http or https url that upload_attachment returned "
+                f"(or the one the comment read shows for a current attachment), got {describe_value(url)}"
+            )
+        key = (name, _url_key(url))
+        if key in seen:
+            raise ValueError(f"attachments[{index}]: repeats attachments[{seen[key]}] (same name and same file)")
+        seen[key] = index
+        pairs.append((name, url))
+    return pairs
+
+
+def _drop_names(value: list[str] | None) -> list[str] | None:
+    if value is None:
+        return None
+    if not value:
+        raise ValueError("remove_attachment_names: the list must contain at least one name (omit it to remove nothing)")
+    for index, name in enumerate(value):
+        if not name.strip():
+            raise ValueError(f"remove_attachment_names[{index}]: must not be empty or whitespace only")
+    return list(value)
+
+
+def _current_attachments(record: Any, op_key: str) -> list[dict[str, str]]:
+    """The Attachments of the comment Gorelo returned, each with a usable Name and Url. Anything else is a shape error
+    BEFORE any write: the tool will not compare against a list it cannot read."""
+    rows = record.get("Attachments") if isinstance(record, dict) else None
+    if not isinstance(rows, list):
+        raise GoreloAPIError(
+            f"{op_key}: expected Attachments to be a list but got {describe_value(rows)}; refusing to guess, so "
+            "nothing was changed",
+            status=200,
+            op_key=op_key,
+            kind="shape",
+        )
+    found: list[dict[str, str]] = []
+    for row in rows:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("Name"), str)
+            or not row["Name"].strip()
+            or not isinstance(row.get("Url"), str)
+            or not row["Url"].strip()
+        ):
+            raise GoreloAPIError(
+                f"{op_key}: an attachment of the comment has no usable Name and Url; refusing to guess, so nothing "
+                "was changed",
+                status=200,
+                op_key=op_key,
+                kind="shape",
+            )
+        found.append({"Name": row["Name"], "Url": row["Url"]})
+    return found
+
+
+def _keys(rows: list[dict[str, str]]) -> list[tuple[str, str]]:
+    return [(row["Name"], _url_key(row["Url"])) for row in rows]
+
+
+def _final_attachments(
+    comment_id: str,
+    current: list[dict[str, str]],
+    given: list[tuple[str, str]] | None,
+    drops: list[str] | None,
+) -> list[dict[str, str]]:
+    """The whole attachment list to send, from the current list, the list the caller gave and the names to drop.
+
+    Without `given`, the list is the current one minus the rows of the dropped names (urls from the read); a dropped name
+    that more than one current attachment carries is refused, because it does not say which one. With `given`, an entry
+    that matches a current attachment (same name and same url without its query) is that attachment (the url of the READ is
+    sent, it is the fresher one) and any other entry is a new file. Each current attachment that is neither kept nor named
+    in `drops` is refused: nothing is dropped silently. The result may be empty only when `drops` names every current
+    attachment (the caller said so)."""
+    keys = _keys(current)
+    if given is not None and len(set(keys)) < len(keys):
+        raise ValueError(
+            "attachments: the comment lists the same file twice (same name and file), and this tool cannot keep or "
+            "remove one copy only; change its attachments in the Gorelo app. Nothing was changed."
+        )
+    names = {row["Name"] for row in current}
+    unknown = [index for index, name in enumerate(drops or []) if name not in names]
+    if unknown:
+        listed = ", ".join(f"remove_attachment_names[{index}]" for index in unknown)
+        raise ValueError(f"{listed}: the comment has no current attachment with that name (the comment read lists them)")
+    if given is None:
+        for index, name in enumerate(drops or []):
+            count = len([row for row in current if row["Name"] == name])
+            if count > 1:
+                raise ValueError(
+                    f"remove_attachment_names[{index}]: {count} current attachments have that name, so it does not say "
+                    "which one to remove; list the ones to keep in attachments with their name and url as the comment "
+                    "read shows them, and name it here to remove the others. Nothing was changed."
+                )
+        final = [row for row in current if row["Name"] not in (drops or [])]
+    else:
+        by_key = dict(zip(keys, current))
+        final = []
+        kept: set[tuple[str, str]] = set()
+        for name, url in given:
+            key = (name, _url_key(url))
+            if key in by_key:
+                kept.add(key)
+                final.append(by_key[key])
+            else:
+                final.append({"Name": name, "Url": url})
+        for index, name in enumerate(drops or []):
+            if all(key in kept for key in _keys([row for row in current if row["Name"] == name])):
+                raise ValueError(
+                    f"remove_attachment_names[{index}]: every current attachment with that name is also kept in "
+                    "attachments, so nothing would be removed; give each file in only one of the two lists. "
+                    "Nothing was changed."
+                )
+        missing = [
+            row["Name"] for key, row in zip(keys, current) if key not in kept and row["Name"] not in (drops or [])
+        ]
+        if missing:
+            listed = ", ".join(repr(name) for name in dict.fromkeys(missing))
+            raise CommentAttachmentsWouldBeDropped(
+                f"attachments: Gorelo replaces the whole attachment list, so the current attachment(s) {listed} would "
+                "be removed. Add each to attachments with its name and url as the comment read shows them (an entry "
+                "with the same name but another file is a NEW file, not that attachment), or name it in "
+                "remove_attachment_names to remove it on purpose. Nothing was changed.",
+                log_summary=(
+                    f"update_task_comment on comment {comment_id} refused: {len(missing)} current attachment(s) "
+                    "would be dropped; file names withheld from the log"
+                ),
+            )
+    if len(final) > ATTACHMENTS_MAX:
+        raise ValueError(f"attachments: a comment holds at most {ATTACHMENTS_MAX} files, this would leave {len(final)}")
+    return final
+
+
+@gorelo_tool(
+    toolset=TOOLSET,
+    kind="write",
+    ops=[UPDATE_TASK_COMMENT, GET_TASK_COMMENT],
+    field_map=UPDATE_COMMENT_MAP,
+    destructive_hint=True,
+)
+async def update_task_comment(
+    ctx: Context,
+    project_id: Annotated[str, Field(description="Project id (list_projects).")],
+    task_id: Annotated[str, Field(description="Task id (list_project_tasks).")],
+    comment_id: Annotated[
+        str, Field(description="Id of a PRIVATE task comment (list_project_comments with task_id).")
+    ],
+    body: Annotated[
+        str | None, Field(description="New comment body as HTML, not blank. It replaces the text; it cannot be cleared.")
+    ] = None,
+    attachments: Annotated[
+        list[CommentAttachment] | None,
+        Field(
+            description="The COMPLETE new list (max 100). Pass only name and url: new files as upload_attachment returned "
+            "them, current ones as get_project_comment shows them. One left out is refused unless named in "
+            "remove_attachment_names."
+        ),
+    ] = None,
+    remove_attachment_names: Annotated[
+        list[str] | None,
+        Field(
+            description="Names of current files to remove. Alone, a name shared by several files is refused; naming every "
+            "current file removes them all."
+        ),
+    ] = None,
+    updated_by_name: Annotated[
+        str | None,
+        Field(description="Editor name to record; omitted, Gorelo records API (an API key is not a person)."),
+    ] = None,
+) -> dict:
+    """Edit a PRIVATE comment on a task and return the stored comment. Only a private comment can be edited: a public, side conversation or approval comment has already gone outside the account and is refused (HTTP 409, ResourceUpdateBlocked). Send only what changes. The edit is recorded as the comment's UpdatedOn.
+    Attachments are replaced as a whole: when attachments or remove_attachment_names is given the tool reads the comment first and refuses to drop a current file unless remove_attachment_names names it.
+    Side effects: overwrites the text (and files) of the comment; nobody is notified. For a project comment use update_project_comment. If the read-back fails the result is {Id, warning}: the edit WAS applied, do not repeat it.
+    """
+    ids = {**_task_ids(project_id, task_id), "commentId": guid("comment_id", comment_id)}
+    cid = ids["commentId"]
+    if body is not None and not body.strip():
+        raise ValueError("body: must not be empty or whitespace only (a comment body cannot be cleared)")
+    files = _attachment_pairs(attachments)
+    drops = _drop_names(remove_attachment_names)
+    wire = build_body(
+        {"body": body, "updated_by_name": non_empty("updated_by_name", updated_by_name)}, UPDATE_COMMENT_MAP
+    )
+    if body is None and files is None and drops is None:
+        raise ValueError(
+            "nothing to change: give at least one of body, attachments or remove_attachment_names "
+            "(updated_by_name only names the editor of another change)"
+        )
+    client = client_of(ctx)
+    expected: list[str] | None = None  # the file names the read-back must show (None: files are not touched)
+    if files is not None or drops is not None:
+        before = await client.get_one(GET_TASK_COMMENT, path_params=ids, tool="update_task_comment")
+        current = _current_attachments(
+            expect_object(before, GET_TASK_COMMENT, tool="update_task_comment"), GET_TASK_COMMENT
+        )
+        final = _final_attachments(cid, current, files, drops)
+        if _keys(final) != _keys(current):
+            wire["Attachments"] = final
+            expected = sorted(row["Name"] for row in final)
+        elif body is None:
+            raise ValueError("nothing to change: the comment already has exactly that attachment list")
+    written = await client.patch(UPDATE_TASK_COMMENT, path_params=ids, json_body=wire, tool="update_task_comment")
+    expect_object(written, UPDATE_TASK_COMMENT, tool="update_task_comment")
+    record = await reread_after_write(
+        ctx, GET_TASK_COMMENT, path_params=ids, tool="update_task_comment", written_id=cid
+    )
+    if expected is not None and "warning" not in record:
+        shown = record.get("Attachments")
+        names = (
+            sorted(row["Name"] for row in shown if isinstance(row, dict) and isinstance(row.get("Name"), str))
+            if isinstance(shown, list)
+            else None
+        )
+        if names != expected:
+            raise _unconfirmed(UPDATE_TASK_COMMENT, "the comment read after the edit does not show the files that were asked for")
+    return record

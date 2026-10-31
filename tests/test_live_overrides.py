@@ -168,7 +168,7 @@ def test_the_description_says_what_the_file_is_for_how_to_drop_an_entry_and_what
     assert "move it to retired with the five keys listed above" in text
 
 
-def test_the_raw_index_is_the_spec_of_2026_10_22_and_still_mirrors_the_published_spec():
+def test_the_raw_index_is_the_spec_of_2026_10_29_and_still_mirrors_the_published_spec():
     raw = raw_index()
     # 96 on 2026-10-02, plus the two payments operations of 2026-10-08, plus the five of 2026-10-12 (api keys list and revoke,
     # custom asset create and update, custom asset hardware types); the 2026-10-14 spec (contract 1b1c0cec0e9a) added no
@@ -176,9 +176,10 @@ def test_the_raw_index_is_the_spec_of_2026_10_22_and_still_mirrors_the_published
     # a7954b24844b) added fourteen operations (the twelve document operations, GET /v1/deletions and GET /v1/assets/custom/{customAssetId})
     # and twenty two schemas
     # the 2026-10-22 spec (contract 05200951c89e) added eight operations and 35 schemas, and renamed 12 schemas
-    assert len(raw["ops"]) == 125 and raw["op_count"] == 125
-    assert len(raw["schemas"]) == 333
-    assert raw["contract_sha256"].startswith("05200951c89e") and raw["sha256"] != PREVIOUS_SPEC_SHA256
+    # the 2026-10-29 spec (contract 6c30770dffc0) added 44 operations and 98 schemas (169 and 431 in all)
+    assert len(raw["ops"]) == 169 and raw["op_count"] == 169
+    assert len(raw["schemas"]) == 431
+    assert raw["contract_sha256"].startswith("6c30770dffc0") and raw["sha256"] != PREVIOUS_SPEC_SHA256
     for collection, published_as in PUBLISHED_AS.items():
         assert published_as in raw["ops"] and collection not in raw["ops"]
         name = RETIRED[collection][1]
@@ -237,7 +238,7 @@ def test_no_active_override_is_caught_up_by_the_published_spec_or_stale():
 
 def test_nothing_is_swapped_in_the_loaded_index(spec_index):
     raw = raw_index()
-    assert dict(spec_index.override_ops) == {} and len(spec_index.ops) == 125
+    assert dict(spec_index.override_ops) == {} and len(spec_index.ops) == 169  # 125 until the 2026-10-29 spec
     assert list(spec_index.ops) == list(raw["ops"])  # the published operations, in the published order
     assert spec_index.overrides_path == DEFAULT_OVERRIDES_PATH  # the file was read; it swaps nothing
     assert all(op.overridden_from is None and op.is_live_override is False for op in spec_index.ops.values())

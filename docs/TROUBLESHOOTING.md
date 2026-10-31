@@ -31,7 +31,7 @@ journalctl -u gorelo-mcp.service --since "30 minutes ago" --no-pager
 | Tool error `Phone number is not valid for the specified country code` | Gorelo checks that a number is a real one for the region. A fictional number such as 5555550142 (area code 555) is refused for region `US`. | Use a real number with a real area code, for example 2025550142, and the two-letter region (`US`). |
 | Tool error saying Gorelo did not confirm a write | A timeout or error after sending a change. It may or may not have been applied. | Check with a read (ask Claude to look the record up) before repeating it. |
 | The journal shows `ip=127.0.0.1` on `authorize outcome=` lines | The server does not see the visitor's real address, so the password limits count everyone together. | See "The journal shows ip=127.0.0.1" below. |
-| A delete, void, `create_approved_invoice` or `share_document` tool does not exist | The destructive switch is off (the default), or it lists other names. | See INSTALL step 8.2 if you really need it. |
+| A delete, void, `create_approved_invoice`, `approve_invoice`, `create_contract`, `update_contract` or `share_document` tool does not exist | The destructive switch is off (the default), or it lists other names. | See INSTALL step 8.2 if you really need it. |
 | A document tool is missing | The `documents` toolset is off (the default). | Add `documents` to `GORELO_TOOLSETS`. A non-blank GORELO_TOOLSETS replaces the default set: list every toolset you want, for example `core,tickets,time,billing,uptime,documents`; see "Document tools" below. |
 | `systemctl --failed` lists `gorelo-changelog-watch.service` | The watcher exited with 1 or 3. | See "The watcher failed". |
 | An invoice you voided is still open in your accounting system | Gorelo voids it in Gorelo only. | Void it in the accounting system by hand. |
@@ -124,7 +124,7 @@ The wrong-password limits count visitors by the address the server sees. The `au
 1. Open a NEW conversation. Tool lists are read when a conversation starts, so an old one does not see new tools.
 2. Make sure the connector is switched on for that conversation.
 3. Check the `ready:` line: `journalctl -u gorelo-mcp.service --no-pager | grep ready | tail -n 1`. The `toolsets=` part must contain the toolset you expect (`projects`, `forms` and `documents` are off by default; see INSTALL step 8). The `tools=` number must match [tool-catalog.md](tool-catalog.md).
-4. Delete, void, approved-invoice and sharing tools only exist when `GORELO_ENABLE_DESTRUCTIVE` switches them on: `1` for all of them, or a list that names the tool. The `gorelo-mcp gated tools:` line in the journal and the `gated_tools` field of `health_check` say which are on.
+4. Delete, void, approved-invoice, contract-write and sharing tools only exist when `GORELO_ENABLE_DESTRUCTIVE` switches them on: `1` for all of them, or a list that names the tool. The `gorelo-mcp gated tools:` line in the journal and the `gated_tools` field of `health_check` say which are on.
 5. After you change `.env`, restart the service: `systemctl restart gorelo-mcp.service`.
 
 ## Gorelo errors

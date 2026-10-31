@@ -1,4 +1,4 @@
-"""tools/alerts.py: post_alert and list_alerts."""
+"""tools/alerts.py: post_alert, list_alerts, get_alert and set_alert_status."""
 
 import inspect
 import json
@@ -482,14 +482,18 @@ def test_list_alerts_is_declared_as_a_core_read_tool_over_get_alerts(spec_index)
     assert op.paged and "GET /v1/alerts" in spec_index.ops and not set(spec.ops) & FORBIDDEN_OPS
 
 
-def test_the_module_declares_exactly_the_two_alert_tools_and_names_both_ops():
+def test_the_module_declares_exactly_the_four_alert_tools_and_names_every_op():
     names = {s.name: (s.kind, s.ops) for s in REGISTRY.specs if s.fn.__module__ == alerts_module.__name__}
     assert names == {
         "post_alert": ("write", ["POST /v1/alerts"]),
         "list_alerts": ("read", ["GET /v1/alerts"]),
+        "get_alert": ("read", ["GET /v1/alerts/{alertId}"]),
+        "set_alert_status": ("write", ["PATCH /v1/alerts"]),
     }
     doc = alerts_module.__doc__
-    assert "POST /v1/alerts" in doc and "GET /v1/alerts" in doc
+    assert all(op in doc for ops in (n[1] for n in names.values()) for op in ops)
+    # the single-alert PATCH is deliberately not declared by any tool
+    assert not any("PATCH /v1/alerts/{alertId}" in s.ops for s in REGISTRY.specs)
 
 
 def test_every_query_name_of_the_op_is_a_filter_or_a_paging_name_of_the_tool(spec_index):
@@ -1011,3 +1015,222 @@ async def test_the_post_alert_docstring_and_the_list_alerts_docstring_name_each_
     posting = " ".join(inspect.getdoc(alerts_module.post_alert).split())
     listing = " ".join(inspect.getdoc(alerts_module.list_alerts).split())
     assert "list_alerts" in posting and "post_alert" in listing
+
+
+# --------------------------------------------------------------------------
+# get_alert
+# --------------------------------------------------------------------------
+
+ONE = uid(11)
+ONE_PATH = f"{ALERTS}/{ONE}"
+
+
+def test_get_alert_is_a_core_read_over_the_single_get(spec_index):
+    spec = next(s for s in REGISTRY.specs if s.name == "get_alert")
+    assert (spec.toolset, spec.kind, spec.ops, spec.destructive_hint) == ("core", "read", ["GET /v1/alerts/{alertId}"], False)
+    assert spec.field_map == {"alert_id": "alertId"}
+    assert set(spec.field_map.values()) == set(spec_index.op("GET /v1/alerts/{alertId}").path_placeholders)
+    assert spec_index.op("GET /v1/alerts/{alertId}").response["data"] == "AlertListItemModel"
+    assert not set(spec.ops) & FORBIDDEN_OPS
+
+
+async def test_get_alert_has_one_described_required_parameter_and_names_the_list(server):
+    tool = next(t for t in await list_tools(server) if t.name == "get_alert")
+    assert list(tool.inputSchema["properties"]) == ["alert_id"] and tool.inputSchema["required"] == ["alert_id"]
+    assert "list_alerts" in tool.inputSchema["properties"]["alert_id"]["description"]
+    assert (tool.annotations.readOnlyHint, tool.annotations.destructiveHint) == (True, False)
+    text = flat(tool.description)
+    assert "same fields as a list_alerts row" in text and "DeviceId and UptimeCheckId are deprecated" in text
+    assert "DismissedOn and DismissedBy are set only while an alert is dismissed" in text
+    # the template lines of a read
+    assert "Resolve ids first: alert_id -> list_alerts." in text and "Side effects: None (read-only)." in text
+
+
+async def test_get_alert_sends_one_get_on_the_canonical_path_and_returns_the_record_unchanged(server, mock_gorelo):
+    row = alert_row(11, Status={"Id": 2, "Name": "Dismissed"}, DismissedBy="Ada")
+    mock_gorelo.on("GET", ONE_PATH, envelope(row))
+    assert await call_tool(server, "get_alert", {"alert_id": ONE.upper()}) == row
+    request = mock_gorelo.last
+    assert (request.method, request.path, request.query, request.content) == ("GET", ONE_PATH, {}, b"")
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_get_alert_maps_a_gorelo_404_to_the_parameter(server, mock_gorelo):
+    mock_gorelo.on("GET", ONE_PATH, error_envelope(404, [("070202", "The requested resource was not found.")]))
+    text = await call_tool_error(server, "get_alert", {"alert_id": ONE})
+    assert "get_alert" in text and "HTTP 404" in text and "not found" in text
+
+
+@pytest.mark.parametrize("bad", ["abc", "", 5, None])
+async def test_get_alert_refuses_a_bad_id_before_any_request(server, mock_gorelo, bad):
+    text = await call_tool_error(server, "get_alert", {"alert_id": bad})
+    assert "alert_id" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_get_alert_does_not_accept_a_null_record(server, mock_gorelo):
+    mock_gorelo.on("GET", ONE_PATH, envelope(None))
+    text = await call_tool_error(server, "get_alert", {"alert_id": ONE})
+    assert "get_alert" in text
+
+
+# --------------------------------------------------------------------------
+# set_alert_status
+# --------------------------------------------------------------------------
+
+IDS = [uid(21), uid(22)]
+TICKET = uid(31)
+SET_PARAMS = ["alert_ids", "status", "ticket_id"]
+
+
+def updated(*ids):
+    return envelope({"UpdatedIds": list(ids)})
+
+
+def test_set_alert_status_is_a_core_write_over_the_bulk_patch_and_marked_destructive(spec_index):
+    spec = next(s for s in REGISTRY.specs if s.name == "set_alert_status")
+    assert (spec.toolset, spec.kind, spec.ops) == ("core", "write", ["PATCH /v1/alerts"])
+    assert spec.destructive_hint is True
+    assert not set(spec.ops) & FORBIDDEN_OPS
+    op = spec_index.op("PATCH /v1/alerts")
+    assert op.response["data"] == "UpdateAlertStatusesResult"
+    assert set(spec.field_map.values()) == set(op.body["fields"]) == {"AlertIds", "StatusId", "TicketId"}
+    assert spec.field_map == {"alert_ids": "AlertIds", "status": "StatusId", "ticket_id": "TicketId"}
+
+
+async def test_set_alert_status_parameters_and_annotations(server):
+    tool = next(t for t in await list_tools(server) if t.name == "set_alert_status")
+    assert list(tool.inputSchema["properties"]) == SET_PARAMS
+    assert tool.inputSchema["required"] == ["alert_ids", "status"]
+    properties = tool.inputSchema["properties"]
+    assert all(p.get("description") for p in properties.values())
+    assert properties["status"]["enum"] == ["new", "dismissed", "ticketed"]
+    assert "list_alerts" in properties["alert_ids"]["description"] and "list_tickets" in properties["ticket_id"]["description"]
+    assert (tool.annotations.readOnlyHint, tool.annotations.destructiveHint) == (False, True)
+
+
+def test_set_alert_status_says_what_the_user_needs_to_know():
+    doc = flat(alerts_module.set_alert_status.__doc__)
+    for fragment in (
+        "1 to 100 alerts at once", "{UpdatedIds}", "whole stack", "cannot be undone", "never changes status or ticket again",
+        "a dismissed alert cannot become ticketed (409)", "One refused alert changes nothing", "is a 400 and changes nothing",
+        "left out of UpdatedIds, so a retry is safe", "alert_ids -> list_alerts", "ticket_id -> list_tickets", "Side effects:",
+        "Ask the user before ticketing",
+    ):
+        assert fragment in doc, fragment
+    assert "email" not in doc.lower() and "notif" not in doc.lower()
+
+
+@pytest.mark.parametrize("word, number", [("new", 1), ("dismissed", 2)])
+async def test_set_alert_status_sends_one_patch_with_the_pascal_case_body_and_returns_gorelos_object(server, mock_gorelo, word, number):
+    mock_gorelo.on("PATCH", ALERTS, updated(IDS[0], IDS[1], uid(23)))
+    result = await call_tool(server, "set_alert_status", {"alert_ids": IDS, "status": word})
+    request = mock_gorelo.last
+    assert (request.method, request.path, request.query) == ("PATCH", ALERTS, {})
+    assert request.json == {"AlertIds": IDS, "StatusId": number}
+    assert result == {"UpdatedIds": [IDS[0], IDS[1], uid(23)]}
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_set_alert_status_ticketed_sends_the_ticket_id(server, mock_gorelo):
+    mock_gorelo.on("PATCH", ALERTS, updated(IDS[0]))
+    result = await call_tool(server, "set_alert_status", {"alert_ids": [IDS[0].upper()], "status": "ticketed", "ticket_id": TICKET.upper()})
+    assert mock_gorelo.last.json == {"AlertIds": [IDS[0]], "StatusId": 3, "TicketId": TICKET}
+    assert result == {"UpdatedIds": [IDS[0]]}
+
+
+async def test_set_alert_status_keeps_the_order_and_sends_a_repeated_id_once(server, mock_gorelo):
+    mock_gorelo.on("PATCH", ALERTS, updated(IDS[1], IDS[0]))
+    await call_tool(server, "set_alert_status", {"alert_ids": [IDS[1], IDS[0], IDS[1]], "status": "dismissed"})
+    assert mock_gorelo.last.json["AlertIds"] == [IDS[1], IDS[0]]
+
+
+async def test_set_alert_status_accepts_exactly_one_hundred_distinct_alerts(server, mock_gorelo):
+    many = [uid(1000 + n) for n in range(100)]
+    mock_gorelo.on("PATCH", ALERTS, updated())
+    result = await call_tool(server, "set_alert_status", {"alert_ids": many, "status": "new"})
+    assert mock_gorelo.last.json["AlertIds"] == many
+    assert result == {"UpdatedIds": []}  # all of them already had the status: nothing changed, a retry is safe
+
+
+@pytest.mark.parametrize(
+    "args, param",
+    [
+        ({"alert_ids": [], "status": "new"}, "alert_ids"),
+        ({"alert_ids": [uid(1000 + n) for n in range(101)], "status": "new"}, "alert_ids"),
+        ({"alert_ids": ["abc"], "status": "new"}, "alert_ids[0]"),
+        ({"alert_ids": IDS[0], "status": "new"}, "alert_ids"),
+        ({"alert_ids": [5], "status": "new"}, "alert_ids"),
+        ({"alert_ids": IDS, "status": "ignored"}, "status"),
+        ({"alert_ids": IDS, "status": 2}, "status"),
+        ({"alert_ids": IDS, "status": "ticketed"}, "ticket_id"),
+        ({"alert_ids": IDS, "status": "ticketed", "ticket_id": "T-1"}, "ticket_id"),
+        ({"alert_ids": IDS, "status": "dismissed", "ticket_id": TICKET}, "ticket_id"),
+        ({"alert_ids": IDS, "status": "new", "ticket_id": TICKET}, "ticket_id"),
+    ],
+)
+async def test_set_alert_status_refuses_bad_input_locally_naming_the_parameter(server, mock_gorelo, args, param):
+    text = await call_tool_error(server, "set_alert_status", args)
+    assert param in text
+    assert mock_gorelo.requests == []
+
+
+async def test_a_hundred_and_one_alerts_that_repeat_to_a_hundred_are_accepted(server, mock_gorelo):
+    ids = [uid(2000 + n) for n in range(100)]
+    mock_gorelo.on("PATCH", ALERTS, updated(*ids))
+    await call_tool(server, "set_alert_status", {"alert_ids": [*ids, ids[0]], "status": "dismissed"})
+    assert len(mock_gorelo.last.json["AlertIds"]) == 100
+
+
+async def test_ticketed_without_a_ticket_says_why_and_where_to_find_one(server, mock_gorelo):
+    text = await call_tool_error(server, "set_alert_status", {"alert_ids": IDS, "status": "ticketed"})
+    assert "ticket_id: required when status is 'ticketed'" in text and "list_tickets" in text
+    text = await call_tool_error(server, "set_alert_status", {"alert_ids": IDS, "status": "new", "ticket_id": TICKET})
+    assert "ticket_id: only for status 'ticketed'" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_a_409_from_gorelo_is_shown_with_its_text_and_nothing_else_is_sent(server, mock_gorelo):
+    mock_gorelo.on("PATCH", ALERTS, error_envelope(409, [("070409", "A ticketed alert cannot change status.", None)]))
+    text = await call_tool_error(server, "set_alert_status", {"alert_ids": IDS, "status": "dismissed"})
+    assert "Gorelo rejected set_alert_status (HTTP 409, code 070409)" in text and "A ticketed alert cannot change status." in text
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_an_unknown_alert_id_is_a_400_that_names_the_parameter(server, mock_gorelo):
+    mock_gorelo.on(
+        "PATCH", ALERTS, error_envelope(400, [("070101", "Alert not found in this account.", "AlertIds")])
+    )
+    text = await call_tool_error(server, "set_alert_status", {"alert_ids": IDS, "status": "new"})
+    assert "HTTP 400" in text and "alert_ids: Alert not found in this account." in text
+
+
+async def test_a_ticket_problem_is_mapped_to_ticket_id_and_the_status_to_status(server, mock_gorelo):
+    mock_gorelo.on(
+        "PATCH",
+        ALERTS,
+        error_envelope(400, [("070101", "Ticket is closed.", "TicketId"), ("070101", "Bad status.", "StatusId")]),
+    )
+    text = await call_tool_error(server, "set_alert_status", {"alert_ids": IDS, "status": "ticketed", "ticket_id": TICKET})
+    assert "ticket_id: Ticket is closed." in text and "status: Bad status." in text
+
+
+@pytest.mark.parametrize("answer", [envelope(None), envelope({}), envelope({"UpdatedIds": None}), envelope({"UpdatedIds": "x"}), envelope([IDS[0]])])
+async def test_an_answer_without_an_updated_ids_list_is_an_unconfirmed_write(server, mock_gorelo, answer):
+    mock_gorelo.on("PATCH", ALERTS, answer)
+    text = await call_tool_error(server, "set_alert_status", {"alert_ids": IDS, "status": "dismissed"})
+    assert "set_alert_status" in text and "verify it with a read before repeating it" in text
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_a_timeout_is_reported_as_unconfirmed_and_is_not_sent_again(server, mock_gorelo):
+    mock_gorelo.on("PATCH", ALERTS, httpx.ReadTimeout("slow"))
+    text = await call_tool_error(server, "set_alert_status", {"alert_ids": IDS, "status": "dismissed"})
+    assert "did not confirm set_alert_status" in text and "may or may not have been applied" in text
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_the_single_alert_patch_is_never_called(server, mock_gorelo):
+    mock_gorelo.on("PATCH", ALERTS, updated(IDS[0]))
+    await call_tool(server, "set_alert_status", {"alert_ids": [IDS[0]], "status": "dismissed"})
+    assert [r.path for r in mock_gorelo.requests] == [ALERTS]

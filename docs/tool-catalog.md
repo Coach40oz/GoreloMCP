@@ -11,12 +11,12 @@ uv run --frozen python scripts/gen_tool_catalog.py
 
 `tests/test_tool_catalog.py` fails when the committed file differs from a fresh generation.
 
-The registry holds 119 tools in 8 toolsets. A server started with the default settings (toolsets core, tickets, time, billing, uptime; GORELO_ENABLE_DESTRUCTIVE off, so no gated tool: no delete or void tool, no `remove_document_related_item`, no `create_approved_invoice` and no `share_document`) registers 71 of them.
+The registry holds 160 tools in 8 toolsets. A server started with the default settings (toolsets core, tickets, time, billing, uptime; GORELO_ENABLE_DESTRUCTIVE off, so no gated tool: no delete or void tool, no `remove_document_related_item`, no `create_approved_invoice`, no `approve_invoice`, no `create_contract`, no `update_contract` and no `share_document`) registers 98 of them.
 
 How to read it:
 
 - Toolsets are chosen with `GORELO_TOOLSETS` (a comma list, or `all`). Default: core, tickets, time, billing, uptime.
-- Kind `read` changes nothing in Gorelo. `write` creates or changes data. `write (overwrites data)` also replaces or clears data that already exists (the MCP destructiveHint is set). `destructive` tools are the delete and void tools, `remove_document_related_item` (it removes the link between a document and another record), `create_approved_invoice` (it creates an invoice that is Approved at once, so Gorelo pushes it to the connected accounting system and may email its recipients) and `share_document` (it turns on a document's public link or publishes it to the client portal, so anyone who has the link can read it outside Gorelo): each is registered only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name (1 registers all of them, a comma list of tool names registers just those), and every call also needs `confirm=true`.
+- Kind `read` changes nothing in Gorelo. `write` creates or changes data. `write (overwrites data)` also replaces or clears data that already exists (the MCP destructiveHint is set). `destructive` tools are the delete and void tools, `remove_document_related_item` (it removes the link between a document and another record), `create_approved_invoice` (it creates an invoice that is Approved at once, so Gorelo pushes it to the connected accounting system and may email its recipients), `approve_invoice` (it approves an existing invoice, which Gorelo pushes to the connected accounting system at once), `create_contract` and `update_contract` (they write a billing contract, which can make Gorelo approve and send recurring invoices on its own) and `share_document` (it turns on a document's public link or publishes it to the client portal, so anyone who has the link can read it outside Gorelo): each is registered only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name (1 registers all of them, a comma list of tool names registers just those), and every call also needs `confirm=true`.
 - Ops are the Gorelo operations (`METHOD /v1/path`) the tool may call. Any other operation is refused before any HTTP request.
 - Required params are the parameters a call must supply. Every other parameter is optional.
 - What it does is the first sentence of the tool description; the full text is what claude.ai reads.
@@ -25,15 +25,15 @@ How to read it:
 
 | Toolset | Default | Tools | read | write | destructive |
 |---|---|---|---|---|---|
-| core | yes | 30 | 23 | 7 | 0 |
-| tickets | yes | 19 | 12 | 6 | 1 |
+| core | yes | 52 | 34 | 15 | 3 |
+| tickets | yes | 20 | 12 | 7 | 1 |
 | time | yes | 7 | 4 | 2 | 1 |
-| billing | yes | 15 | 8 | 4 | 3 |
+| billing | yes | 26 | 12 | 7 | 7 |
 | uptime | yes | 6 | 2 | 3 | 1 |
-| projects | no | 22 | 11 | 9 | 2 |
+| projects | no | 25 | 12 | 11 | 2 |
 | forms | no | 3 | 2 | 1 | 0 |
-| documents | no | 17 | 6 | 9 | 2 |
-| Total | | 119 | 68 | 41 | 10 |
+| documents | no | 21 | 10 | 9 | 2 |
+| Total | | 160 | 88 | 55 | 17 |
 
 ## core
 
@@ -41,14 +41,25 @@ In the default set.
 
 | Tool | Kind | Ops | Required params | What it does |
 |---|---|---|---|---|
+| `create_asset_type` | write | `POST /v1/assets/types`, `GET /v1/assets/types` | `name` | Create an asset type; returns its row {Id, Name} (read back from the type list), or {Id, warning} if the read-back fails: then do not repeat the create; check with list_asset_types. |
 | `create_client` | write | `POST /v1/clients` | `name`, `location_name` | Create a client together with its default location; returns the created client record. |
+| `create_client_domain` | write | `POST /v1/clients/{clientId}/domains`, `GET /v1/clients/{clientId}` | `client_id`, `name` | Add a web domain to a client; returns the new domain entry (read back from the client's Domains), or Gorelo's answer with a warning if the read-back fails. |
+| `create_client_location` | write | `POST /v1/clients/{clientId}/locations`, `GET /v1/clients/{clientId}/locations/{locationId}` | `client_id`, `name` | Add a location to a client; returns the new location record (read back with the single GET), or {Id, warning} if the read-back fails. |
 | `create_contact` | write | `POST /v1/contacts` | `client_id`, `first_name`, `last_name`, `primary_email` | Create a contact under a client; returns the created contact record. |
 | `create_custom_asset` | write | `POST /v1/assets/custom`, `GET /v1/assets/custom/{customAssetId}` | `name`, `client_id`, `location_id`, `hardware_type_id` | Create a custom (non-agent) asset at a location of a client; returns the new row (read back by id), or {Id, warning} if the read-back fails: then do not repeat the create; check with get_custom_asset. |
+| `delete_asset_type` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `DELETE /v1/assets/types/{assetTypeId}` | `asset_type_id` | Delete one asset type by Id; returns Gorelo's {Id}. |
+| `delete_client_domain` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `DELETE /v1/clients/{clientId}/domains/{domainId}` | `client_id`, `domain_id` | Delete (deactivate) one web domain of a client; returns {Id}. |
+| `delete_client_location` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `DELETE /v1/clients/{clientId}/locations/{locationId}` | `client_id`, `location_id` | Delete (deactivate) one client location; returns {Id}. |
 | `get_agent` | read | `GET /v1/assets/agents/{agentAssetId}` | `agent_id` | Get one agent (managed device) by UUID; returns Gorelo's full device record, including CustomProperties (a field with IsHidden true has a null Value; IsSet still says whether one is saved). |
 | `get_agent_hardware` | read | `GET /v1/assets/agents/{agentAssetId}/hardware` | `agent_id` | Get the hardware of one agent from its last scan; returns {LastScannedOn, HardwareType, TotalMemoryBytes, Processors, Disks (each with its partitions)}. |
+| `get_alert` | read | `GET /v1/alerts/{alertId}` | `alert_id` | Get one alert by UUID; returns the same fields as a list_alerts row. |
 | `get_client` | read | `GET /v1/clients/{clientId}` | `client_id` | Get one client by id; returns Gorelo's client record. |
+| `get_client_location` | read | `GET /v1/clients/{clientId}/locations/{locationId}` | `client_id`, `location_id` | Get one location of a client; returns Gorelo's location record. |
 | `get_contact` | read | `GET /v1/contacts/{contactId}` | `contact_id` | Get one contact by id; returns Gorelo's contact record (SecondaryEmail is never included). |
 | `get_custom_asset` | read | `GET /v1/assets/custom/{customAssetId}` | `custom_asset_id` | Get one custom (non-agent) asset by UUID; returns the same fields as a list_custom_assets row (Description, SerialNumber, LocalIPAddress and ContactId are null when the asset has none; Type replaces the deprecated HardwareType, HardwareTypeId and IpAddress). |
+| `get_org_group` | read | `GET /v1/organization/groups/{groupId}` | `group_id` | Get one technician group by id, in the same shape as a list_org_groups row. |
+| `get_org_user` | read | `GET /v1/organization/users/{userId}` | `user_id` | Get one user (technician) by id, a disabled one included: RoleId (its name: list_org_roles), GroupIds (names: list_org_groups), TimeZone and the dates. |
+| `get_policy` | read | `GET /v1/assets/policies/{policyId}` | `policy_id` | Get one monitoring policy by id; returns the same fields as a list_policies row (Checks, Scripts, Plugins and Tags included). |
 | `get_script` | read | `GET /v1/scripts/{scriptId}` | `script_id` | Get one script with its current Content; returns Id, Title, Type, Version, IsFavorite, ParentScriptId, RunAsUser, TimeoutSeconds, Content, CreatedOn and UpdatedOn. |
 | `health_check` | read | `GET /v1/clients` | none | Check the Gorelo API answers and this server understands it; returns {ok, api, api_host, total_clients, toolsets, destructive, gated_tools, spec_sha256}. |
 | `list_agent_apps` | read | `GET /v1/assets/agents/{agentAssetId}/apps` | `agent_id` | List the apps installed on one agent, from its last scan; returns {LastScannedOn, Items}. |
@@ -57,18 +68,29 @@ In the default set.
 | `list_agent_tags` | read | `GET /v1/assets/agents/{agentAssetId}/tags` | `agent_id` | List the tags of one agent; returns {items, count}, each item {Id, Name, Type, Conditions}. |
 | `list_agents` | read | `GET /v1/assets/agents` | none | List agents (managed devices) one page per call; returns {items, has_more, next_cursor, total_count, ...}. |
 | `list_alerts` | read | `GET /v1/alerts` | none | List alerts raised in Gorelo, including those sent with post_alert, one page at a time: newest first unless sort_order is asc. |
+| `list_asset_tags` | read | `GET /v1/assets/tags` | none | List the account's asset tags; returns {items, count}, each item {Id, Name, Type, Conditions, Description, CreatedOn, UpdatedOn}. |
 | `list_asset_types` | read | `GET /v1/assets/types` | none | List the asset types; returns {items, count}, each item {Id, Name}. |
+| `list_client_custom_fields` | read | `GET /v1/clients/custom-fields` | none | List the custom fields defined for clients (not paged; active fields only); returns {items, count}. |
 | `list_client_locations` | read | `GET /v1/clients/{clientId}/locations` | `client_id` | List every location of one client (not paged); returns {items, count}. |
+| `list_client_types` | read | `GET /v1/clients/types` | none | List the client types a client can be given (not paged; active types only); returns {items, count}. |
 | `list_clients` | read | `GET /v1/clients` | none | List clients one page per call; returns {items, has_more, next_cursor, total_count, ...}. |
+| `list_contact_tags` | read | `GET /v1/contacts/tags` | none | List the tags a contact can be given (not paged; active tags only); returns {items, count}. |
 | `list_contacts` | read | `GET /v1/contacts` | none | List contacts one page per call; returns {items, has_more, next_cursor, total_count, ...}. |
 | `list_custom_asset_hardware_types` | read | `GET /v1/assets/custom/hardware-types` | none | DEPRECATED by Gorelo: use list_asset_types. |
 | `list_custom_assets` | read | `GET /v1/assets/custom` | none | List custom (non-agent) assets one page per call; returns {items, has_more, next_cursor, total_count, ...}. |
 | `list_deletions` | read | `GET /v1/deletions` | `type_ids` | List records deleted in Gorelo, oldest first, one page per call; returns {items, has_more, next_cursor, ...}. |
 | `list_org_groups` | read | `GET /v1/organization/groups` | none | List every technician group (not paged); returns {items, count}. |
+| `list_org_roles` | read | `GET /v1/organization/roles` | none | List the service provider's user roles, not paged; returns {items, count}. |
 | `list_org_users` | read | `GET /v1/organization/users` | none | List users (technicians); without status_ids Gorelo lists Pending and Active. |
+| `list_policies` | read | `GET /v1/assets/policies` | none | List the monitoring policies one page per call, highest Priority first (the app's order); returns {items, has_more, next_cursor, total_count, ...}. |
 | `list_scripts` | read | `GET /v1/scripts` | none | List the active scripts in the provider's library, one page per call; returns {items, has_more, next_cursor, ...}. |
 | `post_alert` | write | `POST /v1/alerts` | `name`, `client_id`, `resource`, `severity` | Post an external alert for a client's resource; returns {"ok": true} when Gorelo accepts it. |
+| `set_alert_status` | write (overwrites data) | `PATCH /v1/alerts` | `alert_ids`, `status` | Set the status of 1 to 100 alerts at once (also one alert); returns Gorelo's {UpdatedIds}: the alerts named, in order, then the rest of their stacks. |
+| `update_agent` | write (overwrites data) | `PATCH /v1/assets/agents/{agentAssetId}`, `GET /v1/assets/agents/{agentAssetId}` | `agent_id` | Change fields of one agent (managed device); returns the updated record (read back by id), or {Id, warning} if the read-back fails. |
+| `update_asset_type` | write (overwrites data) | `PATCH /v1/assets/types/{assetTypeId}`, `GET /v1/assets/types` | `asset_type_id`, `name` | Rename one asset type; returns its row {Id, Name} (read back from the type list), or {Id, warning} if the read-back fails. |
 | `update_client` | write (overwrites data) | `GET /v1/clients/{clientId}`, `PATCH /v1/clients/{clientId}` | `client_id` | Update a client's name, status, billing name, alternate name or custom fields; returns the updated client record. |
+| `update_client_domain` | write (overwrites data) | `PATCH /v1/clients/{clientId}/domains/{domainId}`, `GET /v1/clients/{clientId}` | `client_id`, `domain_id` | Change the name or expiry of one client web domain; returns the domain entry (read back from the client's Domains), or Gorelo's answer with a warning if the read-back fails. |
+| `update_client_location` | write (overwrites data) | `PATCH /v1/clients/{clientId}/locations/{locationId}`, `GET /v1/clients/{clientId}/locations/{locationId}` | `client_id`, `location_id` | Change fields of one client location; returns the updated location (read back with the single GET), or {Id, warning} if the read-back fails. |
 | `update_contact` | write (overwrites data) | `GET /v1/contacts/{contactId}`, `PATCH /v1/contacts/{contactId}` | `contact_id` | Update a contact; returns the updated contact record. |
 | `update_custom_asset` | write (overwrites data) | `PATCH /v1/assets/custom/{customAssetId}`, `GET /v1/assets/custom/{customAssetId}` | `custom_asset_id` | Change fields of one custom asset, or move it to another client; returns the updated row (read back by id), or {Id, warning} if the read-back fails. |
 
@@ -88,14 +110,15 @@ In the default set.
 | `get_ticket_comment` | read | `GET /v1/tickets/{ticketId}/comments/{commentId}` | `ticket_id`, `comment_id` | Get one ticket comment in full (HTML body, author, attachments, email status). |
 | `list_ticket_comments` | read | `GET /v1/tickets/{ticketId}/comments` | `ticket_id` | List a ticket's comments, one page at a time. |
 | `list_ticket_conversations` | read | `GET /v1/tickets/{ticketId}/conversations` | `ticket_id` | List a ticket's conversations in one call: the Public and Private main thread (null Id) plus each side conversation and approval, whose Id is the conversation_id for comments or the approval_id for get_ticket_approval. |
-| `list_ticket_priorities` | read | `GET /v1/tickets` | none | List the ticket priorities: 0 None, 1 Urgent, 2 High, 3 Normal, 4 Low. |
-| `list_ticket_sources` | read | `GET /v1/tickets` | none | List the ticket sources for create_ticket: 1 Web, 2 Email, 3 Phone, 4 Chat, 5 Alert, 6 Api. |
+| `list_ticket_priorities` | read | `GET /v1/tickets/priorities` | none | List the ticket priorities (Id, Name): the fixed scale, the same for every account (0 None, 1 Urgent, 2 High, 3 Normal, 4 Low). |
+| `list_ticket_sources` | read | `GET /v1/tickets/sources` | none | List the ticket sources (Id, Name): the fixed scale, the same for every account. |
 | `list_ticket_statuses` | read | `GET /v1/tickets/statuses` | none | List the tenant's ticket statuses (Id, Name, ...) for status ids. |
 | `list_ticket_tags` | read | `GET /v1/tickets/tags` | none | List the tenant's ticket tags (Id, Name, ...) for tag ids. |
 | `list_ticket_types` | read | `GET /v1/tickets/types` | none | List the tenant's ticket types (Id, Name, ...) for type ids. |
 | `list_tickets` | read | `GET /v1/tickets` | none | List one page of tickets, newest update first unless sorted. |
-| `search_tickets` | read | `GET /v1/tickets`, `GET /v1/tickets/statuses`, `GET /v1/tickets/types` | none | Find tickets by client, status, priority, type, text, dates and waiting, unassigned, unread or open state, scanning every matching page. |
+| `search_tickets` | read | `GET /v1/tickets`, `GET /v1/tickets/statuses`, `GET /v1/tickets/types` | none | Find tickets by client, status, priority, type, source, text, dates, waiting, unassigned, unread or open state, scanning all matching pages. |
 | `update_ticket` | write (overwrites data) | `PATCH /v1/tickets/{ticketId}`, `GET /v1/tickets/{ticketId}` | `ticket_id` | Change fields of a ticket and return its full record. |
+| `update_ticket_approval` | write (overwrites data) | `PATCH /v1/tickets/{ticketId}/approvals/{approvalId}`, `GET /v1/tickets/{ticketId}/approvals/{approvalId}` | `ticket_id`, `approval_id`, `name` | Rename an approval on a ticket and return the stored approval. |
 | `upload_attachment` | write | `POST /v1/attachments` | `item_type`, `item_id`, `filename` | Upload a file to a ticket, task, project or document; returns name and url to pass, together and unchanged, in a comment's attachments (update_document's for a document; the result's note names the tool). |
 
 ## time
@@ -118,21 +141,32 @@ In the default set.
 
 | Tool | Kind | Ops | Required params | What it does |
 |---|---|---|---|---|
-| `create_approved_invoice` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `POST /v1/invoices`, `GET /v1/invoices/{invoiceId}` | `client_id`, `line_items` | Create an APPROVED invoice for a client and return it. |
-| `create_invoice` | write | `POST /v1/invoices`, `GET /v1/invoices/{invoiceId}` | `client_id`, `line_items` | Create a DRAFT invoice for a client from catalog items and return it with its lines and totals. |
+| `approve_invoice` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `GET /v1/invoices/{invoiceId}`, `PATCH /v1/invoices/{invoiceId}` | `invoice_id` | Approve a Draft or Submitted invoice and return it read back. |
+| `create_approved_invoice` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `POST /v1/invoices`, `GET /v1/invoices/{invoiceId}`, `GET /v1/taxes` | `client_id`, `line_items` | Create an APPROVED invoice for a client and return it. |
+| `create_contract` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `POST /v1/contracts`, `GET /v1/contracts/{contractId}` | `name`, `client_id`, `service_lines` | Create a billing contract with its service lines and return it as get_contract shows it. |
+| `create_invoice` | write | `POST /v1/invoices`, `GET /v1/invoices/{invoiceId}`, `GET /v1/taxes` | `client_id`, `line_items` | Create a DRAFT invoice for a client from catalog items and return it with its lines and totals. |
 | `create_item` | write | `POST /v1/items`, `GET /v1/items/{itemId}` | `type`, `name` | Create a product or a bundle and return it. |
+| `create_product_charge` | write | `POST /v1/product-charges`, `GET /v1/product-charges/{productChargeId}` | `item_id`, `quantity` | Charge a catalog product or bundle to ONE ticket or ONE project task and return the created charge. |
 | `delete_invoice` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `GET /v1/invoices`, `DELETE /v1/invoices/{invoiceId}` | `invoice_number`, `expected_status` | Delete a Draft invoice or void an Approved one, by invoice number, only on the user's request. |
 | `delete_item` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `DELETE /v1/items/{itemId}` | `item_id` | Delete one catalog item by Id. |
+| `delete_product_charge` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `DELETE /v1/product-charges/{productChargeId}` | `product_charge_id` | Remove one product charge from its ticket or task and return {Id}. |
 | `export_invoice_pdf` | write | `GET /v1/invoices/{invoiceId}/pdf` | `invoice_id` | Download one invoice PDF (5 MB cap): a short summary plus the PDF as an embedded file. |
-| `get_contract` | read | `GET /v1/contracts/{contractId}` | `contract_id` | Get one contract in full: client, invoice schedule, contacts and every service line with labor detail and line items. |
+| `get_contract` | read | `GET /v1/contracts/{contractId}` | `contract_id` | Get one contract in full: client, invoice schedule (days before creation, DaysUntilDue, auto approve and send, templates), contacts and every service line with labor detail, auto flags and line items. |
 | `get_invoice` | read | `GET /v1/invoices/{invoiceId}` | `invoice_id` | Get one invoice in full: status, totals, amount due, every line and the attachments. |
 | `get_item` | read | `GET /v1/items/{itemId}` | `item_id` | Get one catalog item by Id, with a bundle's SubItems (null for a product). |
+| `get_payment` | read | `GET /v1/payments/{paymentId}` | `payment_id` | Get one payment: Amount, PaymentDate, Reference, ClientId and the invoices it was applied to. |
+| `get_product_charge` | read | `GET /v1/product-charges/{productChargeId}` | `product_charge_id` | Get one product charge: the same record as a list_product_charges row. |
 | `list_contracts` | read | `GET /v1/contracts` | none | List billing contracts with their service lines, one page at a time. |
 | `list_invoices` | read | `GET /v1/invoices` | none | List invoices, one page at a time; filter by number, client, status or dates. |
 | `list_item_categories` | read | `GET /v1/items/categories` | none | List item categories with their Subcategories; resolves category_id and subcategory_id. |
 | `list_items` | read | `GET /v1/items` | none | List catalog items (products and bundles), one page at a time. |
+| `list_payments` | read | `GET /v1/payments` | none | List payments received from clients, newest first, one page at a time. |
+| `list_product_charges` | read | `GET /v1/product-charges` | none | List products charged to tickets and project tasks, one page at a time; every filter given must match. |
 | `list_taxes` | read | `GET /v1/taxes` | none | List tax rates (unpaged); resolves tax_id. |
+| `update_contract` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `GET /v1/contracts/{contractId}`, `PATCH /v1/contracts/{contractId}` | `contract_id` | Change a contract and return it as get_contract shows it. |
+| `update_invoice` | write (overwrites data) | `GET /v1/invoices/{invoiceId}`, `PATCH /v1/invoices/{invoiceId}`, `GET /v1/taxes` | `invoice_id` | Change a Draft or Submitted invoice and return it read back. |
 | `update_item` | write (overwrites data) | `PATCH /v1/items/{itemId}`, `GET /v1/items/{itemId}` | `item_id` | Change fields of a catalog item (partial update) and return it. |
+| `update_product_charge` | write (overwrites data) | `PATCH /v1/product-charges/{productChargeId}` | `product_charge_id` | Change a product charge and return the updated charge. |
 
 ## uptime
 
@@ -169,12 +203,15 @@ Not in the default set: add it to `GORELO_TOOLSETS`. Needs the `Project` scope o
 | `list_project_sections` | read | `GET /v1/projects/{projectId}/sections` | `project_id` | List a project's sections (board columns) with Id, Title, Color and TaskCount. |
 | `list_project_tags` | read | `GET /v1/projects/tags` | none | List every project tag (Id, Name, Description). |
 | `list_project_tasks` | read | `GET /v1/projects/{projectId}/tasks` | `project_id` | List a project's tasks, in the board's own order by default, and return one page. |
+| `list_project_templates` | read | `GET /v1/projects/templates` | none | List the project templates, newest first, and return one page. |
 | `list_project_types` | read | `GET /v1/projects/types` | none | List every project type (Id, Name, Description). |
 | `list_projects` | read | `GET /v1/projects` | none | List projects, newest activity first by default, and return one page. |
 | `list_task_conversations` | read | `GET /v1/projects/{projectId}/tasks/{taskId}/conversations` | `project_id`, `task_id` | List a task's conversations (Id, Type, Name, Email, CcEmails, CreatedOn). |
 | `update_project` | write (overwrites data) | `PATCH /v1/projects/{projectId}`, `GET /v1/projects/{projectId}` | `project_id` | Change fields of one project and return its updated record. |
+| `update_project_comment` | write (overwrites data) | `PATCH /v1/projects/{projectId}/comments/{commentId}`, `GET /v1/projects/{projectId}/comments/{commentId}` | `project_id`, `comment_id` | Edit a PRIVATE comment on a project and return the stored comment. |
 | `update_project_section` | write (overwrites data) | `PATCH /v1/projects/{projectId}/sections/{sectionId}` | `project_id`, `section_id` | Rename or recolour one section and return its Id. |
 | `update_project_task` | write (overwrites data) | `PATCH /v1/projects/{projectId}/tasks/{taskId}`, `GET /v1/projects/{projectId}/tasks/{taskId}` | `project_id`, `task_id` | Change fields of one task and return its updated record. |
+| `update_task_comment` | write (overwrites data) | `PATCH /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}`, `GET /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}` | `project_id`, `task_id`, `comment_id` | Edit a PRIVATE comment on a task and return the stored comment. |
 
 ## forms
 
@@ -199,9 +236,13 @@ Not in the default set: add it to `GORELO_TOOLSETS`. Needs the `Documents` scope
 | `export_document_pdf` | read | `GET /v1/documents/{documentId}/pdf` | `document_id` | Download one document as a PDF (10 MB cap): a short summary plus the PDF as an embedded file, rendered from the current version (the title as a heading, then the body). |
 | `get_document` | read | `GET /v1/documents/{documentId}` | `document_id` | Get one document in full: the HTML Body of the current version, Children, Attachments, RelatedItems, the sharing flags and PublicLinkUrl. |
 | `get_document_version` | read | `GET /v1/documents/{documentId}/versions/{versionId}` | `document_id`, `version_id` | Get one version of a document with its HTML Body and Attachments (urls carry a time-limited token: never store them). |
+| `get_structured_document` | read | `GET /v1/documents/structured/{structuredDocumentId}` | `structured_document_id` | Get one structured document with its Fields in display order: the questions, headings and text a submission answers (Id, Type such as Question_Short_Answer, Label as HTML, Required, ShowInList, UseForTitle, Options). |
+| `get_structured_document_submission` | read | `GET /v1/documents/structured/{structuredDocumentId}/submissions/{submissionId}` | `structured_document_id`, `submission_id` | Get one submission in full: Answers (shown against the document as it is now) and Attachments, each a Name and a Url. |
 | `list_document_related_items` | read | `GET /v1/documents/{documentId}/related-items` | `document_id` | List the records a document is linked to, not paged: Id (the link itself, what remove_document_related_item, when deletes are enabled, takes), ItemId (a GUID, or a number for a contact) and ItemType (1 Document, 2 Custom asset, 3 Contact, 4 Agent asset, 5 Structured document, 6 Password). |
 | `list_document_versions` | read | `GET /v1/documents/{documentId}/versions` | `document_id` | List a document's saved versions, newest first: VersionId, IsCurrent, Title, EditedById (0: written through the API) and EditedOn. |
 | `list_documents` | read | `GET /v1/documents` | none | List documents (client and internal), one page at a time. |
+| `list_structured_document_submissions` | read | `GET /v1/documents/structured/{structuredDocumentId}/submissions` | `structured_document_id` | List the submissions of one structured document (filled-in copies of it), one page at a time: one row each with Id, Title, ClientId, CreatedById, Version, the dates and Answers, shown against the document as it is now. |
+| `list_structured_documents` | read | `GET /v1/documents/structured` | none | List the structured documents (the account's question templates), one page at a time: one row each with Id, Name, Version, VersionId and the dates, not the fields (get_structured_document returns those). |
 | `move_document` | write (overwrites data) | `PATCH /v1/documents/{documentId}` | `document_id` | Move a document under another document, or to the top level of a client or of the internal documents, and return its updated record. |
 | `remove_document_related_item` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `DELETE /v1/documents/{documentId}/related-items/{relatedItemId}` | `document_id`, `related_item_id` | Remove one link between a document and another record, and return {Id} of the removed link. |
 | `restore_document` | write (overwrites data) | `GET /v1/documents/{documentId}`, `PATCH /v1/documents/{documentId}` | `document_id` | Restore an ARCHIVED document and return its updated record (Status 1 Active). |

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import collections
+import re
 import runpy
 from pathlib import Path
 
@@ -86,10 +87,14 @@ class ReadFake:
         on("/v1/clients", Pages([row(CLIENT_ID), row(102)]))
         on("/v1/clients/{clientId}", self.get_client)
         on("/v1/clients/{clientId}/locations", Items([row(901, ClientId=CLIENT_ID)]))
+        on("/v1/clients/{clientId}/locations/{locationId}", lambda q: envelope(row(int(last(q, 5)), ClientId=int(last(q, 3)))))
         on("/v1/contacts", self.list_contacts)
         on("/v1/contacts/{contactId}", lambda q: envelope(row(int(last(q, 3)))))
         on("/v1/organization/groups", Items([row(7201)]))
+        on("/v1/organization/groups/{groupId}", lambda q: envelope(row(int(last(q, 4)))))
+        on("/v1/organization/roles", Items([row(7301)]))
         on("/v1/organization/users", Pages([row(9700), row(9202)]))
+        on("/v1/organization/users/{userId}", lambda q: envelope(row(int(last(q, 4)))))
         on("/v1/assets/agents", Pages([row(uid(31), Os="macOS 15.1"), row(uid(36), Os="Microsoft Windows 11 Pro")]))
         on("/v1/assets/agents/{agentAssetId}", self.get_agent)
         for leaf in ("apps", "patches", "patches/available"):
@@ -97,6 +102,12 @@ class ReadFake:
         on("/v1/assets/agents/{agentAssetId}/hardware", lambda q: envelope({"LastScannedOn": None, "Processors": [], "Disks": []}))
         on("/v1/assets/agents/{agentAssetId}/tags", Items([row(5)]))
         on("/v1/assets/types", Items([row(3)]))
+        on("/v1/assets/tags", Items([row(uid(71))]))
+        on("/v1/assets/policies", Pages([row(72)]))
+        on("/v1/assets/policies/{policyId}", lambda q: envelope(row(int(last(q, 4)))))
+        on("/v1/clients/types", Items([row(5)]))
+        on("/v1/clients/custom-fields", Items([row(6)]))
+        on("/v1/contacts/tags", Items([row(7)]))
         on("/v1/scripts", Pages([row(uid(34))]))
         on("/v1/scripts/{scriptId}", lambda q: envelope(row(last(q, 3), Content=SECRET)))
         on("/v1/assets/custom", Pages([row(uid(32))]))
@@ -104,9 +115,12 @@ class ReadFake:
         on("/v1/assets/custom/{customAssetId}", lambda q: envelope(row(last(q, 4))))
         on("/v1/deletions", Pages([{"Type": {"Id": 1, "Name": "Client"}, "Id": "1042", "DeletedOn": "2026-10-16T12:00:00Z"}]))
         on("/v1/alerts", Pages([row(uid(33))]))
+        on("/v1/alerts/{alertId}", lambda q: envelope(row(last(q, 3))))
         on("/v1/tickets/statuses", Items([row(1), row(4)]))
         on("/v1/tickets/types", Items([row(7101)]))
         on("/v1/tickets/tags", Items([row(700)]))
+        on("/v1/tickets/priorities", Items([row(3)]))
+        on("/v1/tickets/sources", Items([row(6)]))
         on("/v1/tickets", self.list_tickets)
         on("/v1/tickets/{ticketId}", lambda q: envelope(next(t for t in TICKETS if t["Id"] == last(q, 3))))
         on("/v1/tickets/{ticketId}/comments", Pages([row(COMMENT_ID)]))
@@ -128,6 +142,10 @@ class ReadFake:
         on("/v1/time-entries/{timeEntryId}", lambda q: envelope(row(int(last(q, 3)))))
         on("/v1/contracts", Pages([row(61)]))
         on("/v1/contracts/{contractId}", lambda q: envelope(row(int(last(q, 3)))))
+        on("/v1/payments", Pages([row(uid(81))]))
+        on("/v1/payments/{paymentId}", lambda q: envelope(row(last(q, 3))))
+        on("/v1/product-charges", Pages([row(91)]))
+        on("/v1/product-charges/{productChargeId}", lambda q: envelope(row(int(last(q, 3)))))
         on("/v1/invoices", Pages([row(uid(41))]))
         on("/v1/invoices/{invoiceId}", lambda q: envelope(row(last(q, 3))))
         on("/v1/items", Pages([row(uid(42))]))
@@ -140,6 +158,7 @@ class ReadFake:
         on("/v1/projects/{projectId}", lambda q: envelope(row(last(q, 3))), scope="Project")
         on("/v1/projects/tags", Items([row(uid(51))]), scope="Project")
         on("/v1/projects/types", Items([row(uid(52))]), scope="Project")
+        on("/v1/projects/templates", Pages([row(uid(57))]), scope="Project")
         on("/v1/projects/{projectId}/sections", Items([row(uid(53))]), scope="Project")
         on("/v1/projects/{projectId}/tasks", Pages([row(TASK_ID)]), scope="Project")
         on("/v1/projects/{projectId}/tasks/{taskId}", lambda q: envelope(row(last(q, 5))), scope="Project")
@@ -168,6 +187,14 @@ class ReadFake:
         on(
             "/v1/documents/{documentId}/versions/{versionId}",
             lambda q: envelope({"VersionId": last(q, 5), "IsCurrent": True, "Title": SECRET, "Body": SECRET, "Attachments": []}),
+            scope="Documents",
+        )
+        on("/v1/documents/structured", Pages([row(uid(63))]), scope="Documents")
+        on("/v1/documents/structured/{structuredDocumentId}", lambda q: envelope(row(last(q, 4))), scope="Documents")
+        on("/v1/documents/structured/{structuredDocumentId}/submissions", Pages([row(uid(64))]), scope="Documents")
+        on(
+            "/v1/documents/structured/{structuredDocumentId}/submissions/{submissionId}",
+            lambda q: envelope(row(last(q, 6))),
             scope="Documents",
         )
         on(
@@ -253,18 +280,21 @@ def outcomes(report) -> dict[str, smoke.Row]:
 
 def test_the_plan_covers_exactly_the_registered_read_tools_once_get_ticket_three_times_and_get_client_twice():
     reads = smoke.read_tools()
-    assert len(reads) == 68 and "export_invoice_pdf" not in reads
+    assert len(reads) == 88 and "export_invoice_pdf" not in reads
     assert {"list_alerts", "get_invoice", "get_custom_asset", "list_deletions", "export_document_pdf"} <= set(reads)
     assert {name for name, toolset in reads.items() if toolset == "documents"} == {
         "list_documents", "get_document", "export_document_pdf", "list_document_versions", "get_document_version",
-        "list_document_related_items",
+        "list_document_related_items", "list_structured_documents", "get_structured_document",
+        "list_structured_document_submissions", "get_structured_document_submission",
     }
     assert {spec.name for spec in REGISTRY.specs if spec.kind == "read"} == set(reads)
     assert smoke.plan_problems(smoke.CASES, reads) == ([], [])
     tools = [case.tool for case in smoke.CASES]
-    assert {name: count for name, count in collections.Counter(tools).items() if count > 1} == {"get_ticket": 3, "get_client": 2}
+    assert {name: count for name, count in collections.Counter(tools).items() if count > 1} == {
+        "get_ticket": 3, "get_client": 2, "list_client_locations": 2,
+    }
     labels = [case.row for case in smoke.CASES]
-    assert len(labels) == len(set(labels)) == 71
+    assert len(labels) == len(set(labels)) == 92
     assert [case.row for case in smoke.CASES if case.tool == "get_ticket"] == [
         "get_ticket (guid)", "get_ticket (number)", "get_ticket (display number)",
     ]
@@ -291,15 +321,15 @@ async def test_a_full_run_calls_every_read_tool_once_sends_only_gets_and_passes(
     fake = ReadFake()
     report = await run(fake)
     assert report.ok, "\n".join(lines)
-    assert len(report.rows) == 71 and all(r.outcome == smoke.OK for r in report.rows), [
+    assert len(report.rows) == 92 and all(r.outcome == smoke.OK for r in report.rows), [
         (r.label, r.outcome, r.note) for r in report.rows if r.outcome != smoke.OK
     ]
     assert {r.method for r in fake.mock.requests} == {"GET"}
-    # 68 calls with HTTP (two local tables make none) plus the search behind get_ticket by number and by display number, and
-    # the second get_client (the test client)
-    assert report.requests == len(fake.mock.requests) == 71 and report.refused == 0
-    assert report.counts() == {smoke.OK: 71, smoke.SCOPE_MISSING: 0, smoke.SKIPPED: 0, smoke.FAILED: 0}
-    assert lines[-1] == "result: PASSED" and "71 checks: 71 ok, 0 scope missing, 0 skipped, 0 FAILED; 71 requests sent" in lines[-2]
+    # 92 calls with HTTP (88 read tools; the priorities and the sources are network reads since 1.5.0, there are no local cases left)
+    # plus the search behind get_ticket by number and by display number
+    assert report.requests == len(fake.mock.requests) == 94 and report.refused == 0
+    assert report.counts() == {smoke.OK: 92, smoke.SCOPE_MISSING: 0, smoke.SKIPPED: 0, smoke.FAILED: 0}
+    assert lines[-1] == "result: PASSED" and "92 checks: 92 ok, 0 scope missing, 0 skipped, 0 FAILED; 94 requests sent" in lines[-2]
     assert not fake.mock.unmatched
 
 
@@ -315,8 +345,8 @@ async def test_the_rows_are_printed_as_they_complete_and_make_up_the_rendered_ta
     }
     assert by_start["tool"] == 0  # the header is out before the first request
     assert by_start["health_check"] == 1 and by_start["list_clients"] == 2  # each row appears when its call is done
-    assert by_start["list_form_responses"] == 65  # the forms are not the last any more: 6 document requests follow
-    assert by_start["list_document_related_items"] == 71  # the last row only after the last request
+    assert by_start["list_form_responses"] == 84  # the forms are not the last any more: 6 document requests and 4 structured follow
+    assert by_start["list_document_related_items"] == 90  # the four structured document reads follow it
 
 
 async def test_get_ticket_is_called_with_the_guid_the_number_and_the_display_number_of_a_listed_ticket(run):
@@ -389,7 +419,7 @@ async def test_get_client_is_read_for_the_first_listed_client_and_for_the_test_c
     assert found["get_agent"].note == "Id matches; 3 custom properties (1 set)"
     names = [row_.label for row_ in report.rows]
     assert names.index("get_client") + 1 == names.index("get_client (test client)")  # the test client's read follows the first
-    reads = [r.path for r in fake.mock.requests if r.path.startswith("/v1/clients/") and r.path.count("/") == 3]
+    reads = [r.path for r in fake.mock.requests if re.fullmatch(r"/v1/clients/[0-9]+", r.path)]
     assert reads == [f"/v1/clients/{CLIENT_ID}", f"/v1/clients/{TEST_CLIENT_ID}"]
     assert all(r.method == "GET" for r in fake.mock.requests)
     assert SECRET not in "\n".join(lines).replace(f"{SECRET} broke", "")  # counts only: no custom field value is ever printed
@@ -561,7 +591,7 @@ async def test_a_scope_403_from_projects_and_forms_is_scope_missing_and_not_a_fa
     report = await run(fake)
     assert report.ok
     found = outcomes(report)
-    for name in ("list_projects", "list_project_tags", "list_project_types", "list_forms"):
+    for name in ("list_projects", "list_project_tags", "list_project_types", "list_project_templates", "list_forms"):
         assert found[name].outcome == smoke.SCOPE_MISSING, name
     assert found["list_projects"].note == "Project scope" and found["list_forms"].note == "Forms scope"
     for name in ("get_project", "list_project_sections", "list_project_tasks", "get_project_task", "list_task_conversations",
@@ -570,10 +600,10 @@ async def test_a_scope_403_from_projects_and_forms_is_scope_missing_and_not_a_fa
     assert found["get_project"].note == "needs a project: list_projects: scope missing"
     assert found["get_project_task"].note == "needs a project: list_projects: scope missing"
     assert found["list_form_responses"].note == "needs a form: list_forms: scope missing"
-    assert report.counts()[smoke.SCOPE_MISSING] == 4 and report.counts()[smoke.FAILED] == 0
+    assert report.counts()[smoke.SCOPE_MISSING] == 5 and report.counts()[smoke.FAILED] == 0
     # the missing-scope answers are all the requests those tools made: nothing else was tried
     assert [r.path for r in fake.mock.requests if "project" in r.path or "forms" in r.path] == [
-        "/v1/projects", "/v1/projects/tags", "/v1/projects/types", "/v1/forms",
+        "/v1/projects", "/v1/projects/tags", "/v1/projects/types", "/v1/projects/templates", "/v1/forms",
     ]
     assert lines[-1] == "result: PASSED"
 
@@ -765,8 +795,8 @@ async def test_the_requests_are_paced_one_second_apart(run, monkeypatch):
     monkeypatch.setattr(smoke, "Pacer", lambda interval: _env.Pacer(interval, clock=time.clock, sleep=time.sleep))
     assert smoke.PACE_SECONDS == 1.0
     report = await run(ReadFake(), pace=smoke.PACE_SECONDS)
-    assert report.ok and report.requests == 71
-    assert time.sleeps == [1.0] * 70  # one second between two requests, none before the first
+    assert report.ok and report.requests == 94
+    assert time.sleeps == [1.0] * 93  # one second between two requests, none before the first
 
 
 # --------------------------------------------------------------------------
@@ -934,6 +964,9 @@ DOCUMENT_READS = [
     "list_documents", "get_document", "export_document_pdf", "list_document_versions", "get_document_version",
     "list_document_related_items",
 ]
+STRUCTURED_READS = [
+    "list_structured_documents", "get_structured_document", "list_structured_document_submissions", "get_structured_document_submission",
+]
 
 
 async def test_the_new_reads_run_with_the_ids_the_lists_taught_and_check_only_shapes(run):
@@ -962,13 +995,85 @@ async def test_the_new_reads_run_with_the_ids_the_lists_taught_and_check_only_sh
     assert SECRET not in text and "token=SECRET" not in text  # counts and sizes only: no title, body, file name or url
 
 
+NEW_READS_1_5_0 = {
+    # row -> the request path it must send, with the id its list taught
+    "get_org_group": "/v1/organization/groups/7201",
+    "get_org_user": "/v1/organization/users/9700",
+    "get_alert": f"/v1/alerts/{uid(33)}",
+    "get_policy": "/v1/assets/policies/72",
+    "get_client_location": f"/v1/clients/{TEST_CLIENT_ID}/locations/901",
+    "get_payment": f"/v1/payments/{uid(81)}",
+    "get_product_charge": "/v1/product-charges/91",
+    "get_structured_document": f"/v1/documents/structured/{uid(63)}",
+    "get_structured_document_submission": f"/v1/documents/structured/{uid(63)}/submissions/{uid(64)}",
+}
+
+
+async def test_the_1_5_0_reads_use_the_first_id_their_list_taught_and_the_test_clients_location(run, lines):
+    fake = ReadFake()
+    report = await run(fake)
+    assert report.ok, "\n".join(lines)
+    found = outcomes(report)
+    sent = {r.path for r in fake.mock.requests}
+    for name, path in NEW_READS_1_5_0.items():
+        assert found[name].outcome == smoke.OK and found[name].note == "Id matches", name
+        assert path in sent, path
+    for path in (
+        "/v1/organization/roles", "/v1/assets/tags", "/v1/clients/types", "/v1/clients/custom-fields", "/v1/contacts/tags",
+        "/v1/projects/templates", "/v1/assets/policies", "/v1/payments", "/v1/product-charges", "/v1/documents/structured",
+        f"/v1/documents/structured/{uid(63)}/submissions",
+    ):
+        assert path in sent, path
+    # the location comes from the TEST CLIENT's own list, not the first client's
+    assert f"/v1/clients/{TEST_CLIENT_ID}/locations" in sent and {r.method for r in fake.mock.requests} == {"GET"}
+
+
+async def test_the_priorities_and_the_sources_are_network_reads_since_1_5_0(run):
+    fake = ReadFake()
+    report = await run(fake)
+    found = outcomes(report)
+    assert found["list_ticket_priorities"].outcome == found["list_ticket_sources"].outcome == smoke.OK
+    sent = {r.path for r in fake.mock.requests}
+    assert {"/v1/tickets/priorities", "/v1/tickets/sources"} <= sent
+    assert all(case.shape != "local" for case in smoke.CASES)
+    for name in ("list_ticket_priorities", "list_ticket_sources"):  # an empty answer fails the row: Gorelo always has rows
+        empty = ReadFake(empty={"/v1/tickets/" + name.removeprefix("list_ticket_")})
+        again = await run(empty)
+        assert outcomes(again)[name].outcome == smoke.FAILED, name
+
+
+async def test_a_tenant_with_nothing_behind_the_1_5_0_lists_skips_the_single_reads_and_says_which_list(run):
+    fake = ReadFake(
+        empty={
+            "/v1/alerts", "/v1/assets/policies", "/v1/payments", "/v1/product-charges",
+            "/v1/documents/structured",
+        }
+    )
+    report = await run(fake)
+    found = outcomes(report)
+    assert report.ok
+    for name, why in (
+        ("get_alert", "needs an alert: list_alerts returned no rows"),
+        ("get_policy", "needs a policy: list_assets_policies returned no rows"),
+        ("get_payment", "needs a payment: list_payments returned no rows"),
+        ("get_product_charge", "needs a product charge: list_product_charges returned no rows"),
+        ("get_structured_document", "needs a structured document: list_structured_documents returned no rows"),
+    ):
+        assert found[name].outcome == smoke.SKIPPED, name
+        assert found[name].note == why.replace("list_assets_policies", "list_policies"), name
+    assert found["get_structured_document_submission"].outcome == smoke.SKIPPED
+
+
 async def test_the_order_of_the_new_cases_follows_what_each_one_needs(run):
     report = await run(ReadFake())
     names = [row_.label for row_ in report.rows]
     assert names.index("list_custom_assets") + 1 == names.index("get_custom_asset")
-    assert names.index("list_alerts") + 1 == names.index("list_deletions")
+    assert names.index("list_alerts") + 1 == names.index("get_alert") and names.index("get_alert") + 1 == names.index("list_deletions")
+    assert names.index("list_policies") + 1 == names.index("get_policy")
+    assert names.index("list_client_locations (test client)") + 1 == names.index("get_client_location")
+    assert names.index("list_org_groups") + 1 == names.index("get_org_group") and names.index("list_org_users") + 1 == names.index("get_org_user")
     start = names.index("list_documents")
-    assert names[start : start + 6] == DOCUMENT_READS and names[-1] == "list_document_related_items"
+    assert names[start : start + 6] == DOCUMENT_READS and names[-4:] == STRUCTURED_READS
 
 
 async def test_a_403_with_the_documents_scope_message_is_scope_missing_and_not_a_failure(run):
@@ -979,8 +1084,11 @@ async def test_a_403_with_the_documents_scope_message_is_scope_missing_and_not_a
     for name in DOCUMENT_READS[1:]:
         assert found[name].outcome == smoke.SKIPPED, name
     assert found["get_document"].note == "needs a document: list_documents: scope missing"
-    assert report.counts()[smoke.SCOPE_MISSING] == 1 and smoke.SCOPE_TOOLSETS == ("projects", "forms", "documents")
-    assert [r.path for r in fake.mock.requests if "/documents" in r.path] == ["/v1/documents"]  # nothing else was tried
+    assert found["list_structured_documents"].outcome == smoke.SCOPE_MISSING
+    for name in STRUCTURED_READS[1:]:
+        assert found[name].outcome == smoke.SKIPPED, name
+    assert report.counts()[smoke.SCOPE_MISSING] == 2 and smoke.SCOPE_TOOLSETS == ("projects", "forms", "documents")
+    assert [r.path for r in fake.mock.requests if "/documents" in r.path] == ["/v1/documents", "/v1/documents/structured"]  # nothing else
 
 
 async def test_a_tenant_without_documents_or_custom_assets_skips_the_single_reads_and_fails_nothing(run):
@@ -1141,7 +1249,7 @@ async def test_an_active_test_client_gets_an_ok_row_before_the_cases(run, lines)
     assert report.test_client.outcome == smoke.OK and report.test_client.note == "Active (status 1): the write matrix may start"
     assert lines[1].startswith("tool") and lines[2].startswith("test client status") and lines[3].startswith("health_check")
     assert report.render()[:2] == lines[1:3] and "write matrix: BLOCKED" not in "\n".join(lines)
-    assert len(report.rows) == 71  # the status row is not one of the cases: counts and the summary line keep their shape
+    assert len(report.rows) == 92  # the status row is not one of the cases: counts and the summary line keep their shape
 
 
 # --------------------------------------------------------------------------

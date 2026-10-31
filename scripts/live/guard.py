@@ -23,6 +23,9 @@ Modes:  "read"   only GET (and never the invoice PDF).
                  (see PATCH /assets/custom/{customAssetId} below), and nothing else.
                  `allow_documents=True` (off by default; only write_matrix --with-documents sets it, never a cleanup) opens
                  the document writes named below ("The documents"), and nothing else.
+                 `allow_areas` (empty by default; only write_matrix --with-<area> sets it, never a cleanup) names the opt-in areas
+                 of release 1.5.0 the run enabled (OPT_IN_AREAS: alert_status, asset_types, client_locations, client_domains,
+                 product_charges, invoice_update, contracts); each opens the writes named below ("The 1.5.0 areas"), and nothing else.
 
 How a request is read: method; URL (https, the Gorelo API host, no credentials, base path /v1 stripped);
 every path segment is checked (no empty, dot, percent-encoded or odd segment), then the request is matched
@@ -77,6 +80,8 @@ Allowlist (write mode). "Run-created" means the id is in the manifest of this ru
                                   manifest details task_id is the task of the path
     POST /forms/{formId}/submission-links   TicketId or TaskId run-created
     POST /alerts                  never
+    PATCH /assets/agents/{agentAssetId}   never (the harness has no agent writes; every other write under /assets/ stays refused too,
+                                  but custom assets and asset types)
     POST /api-keys                never (an API key is a credential: the harness never mints one)
     GET, DELETE /api-keys         never (an API key is a credential: the harness never lists or revokes one; this also
                                   holds in read mode, where GET /api-keys is the one GET that is refused besides the PDF)
@@ -114,6 +119,26 @@ Allowlist (write mode). "Run-created" means the id is in the manifest of this ru
                                   the document writes, only with allow_documents, never from a cleanup (except the one archive
                                   described under "The documents" below); the GETs of a document, its PDF, its versions and its
                                   related items are plain reads
+    PATCH /alerts, PATCH /alerts/{alertId}   only with the alert_status area: AlertIds (1 to 100) or the path id are EXISTING alerts the
+                                  manifest recorded (kind alert, written before the first change) as alerts of the test client;
+                                  StatusId exactly 1 (New) or 2 (Dismissed), never 3 (Ticketed), no TicketId; a cleanup restores (1) only
+    POST /assets/types, PATCH /assets/types/{assetTypeId}   only with asset_types; Name starts with the run id; PATCH: a run-created type
+    DELETE /assets/types/{assetTypeId}   a run-created asset type
+    POST /clients/{clientId}/locations, PATCH /clients/{clientId}/locations/{locationId}   only with client_locations; the path client is the
+                                  test client; Name starts with the run id; no IsDefault or IsDefaultBilling true, no primary or billing contact
+    DELETE /clients/{clientId}/locations/{locationId}   the path client is the test client and the location run-created
+    POST /clients/{clientId}/domains, PATCH /clients/{clientId}/domains/{domainId}   only with client_domains; the path client is the test
+                                  client; Name is <run id>[-text].example (the reserved .example TLD)
+    DELETE /clients/{clientId}/domains/{domainId}   the path client is the test client and the domain run-created
+    POST /product-charges, PATCH, DELETE /product-charges/{productChargeId}   only with product_charges (DELETE: a run-created charge);
+                                  TicketId a run-created ticket of the test client, no TaskId, BillableStatusId exactly 2 (No charge)
+    PATCH /invoices/{invoiceId}   a run-created Draft (status_id 1) and only with invoice_update: InvoiceDate, DueDate, Reference, LineItems; the
+                                  body {StatusId: 5} (approve_invoice) only with allow_approved_invoice ("The approved invoice")
+    POST /contracts, PATCH /contracts/{contractId}   only with contracts; the test client, Name starts with the run id, never a Block Hours
+                                  line, never AutoApproveAndSend true; a cleanup may archive a run-created contract ({StatusId: 3})
+    PATCH /projects/{projectId}/comments/{commentId}, PATCH /projects/{projectId}/tasks/{taskId}/comments/{commentId},
+    PATCH /tickets/{ticketId}/approvals/{approvalId}   a comment or approval this run created, recorded under the parent of the path
+    POST, DELETE /payments        never
     everything else               blocked
 
 Rules that apply to every JSON body: every string that looks like an email address must be an allowed
@@ -143,8 +168,10 @@ null or empty); Reference is the label of an open manifest intent of kind "invoi
 that is the only such open intent; LineItems holds exactly one line, whose Quantity is above 0 and whose UnitPrice is given
 explicitly and is above 0 (a line that falls back to the item's own price could total 0, and an Approved invoice whose
 total is exactly 0 is created as Paid, which Gorelo neither deletes nor voids), with no DiscountPercent key and
-BillableStatusId absent or exactly 1, and with a TaxId that is present and exactly null (the line's no_tax: Gorelo falls
-back to the item's own tax when TaxId is omitted and a number picks a tax, but the harness limits the one Approved invoice to $1 with no tax);
+BillableStatusId absent or exactly 1, and with a TaxId that is a JSON integer equal to the `tax_id` the run recorded in the details
+of that same open intent, which must also hold `tax_percentage` exactly 0 (the run picks the one tax-exempt rate of list_taxes at run
+time and records it before the write; Gorelo's 2026-10-29 create text says a null TaxId applies the item's own tax, so null, an omitted
+TaxId and any other number are refused: the harness limits the one Approved invoice to $1 with no tax);
 that line bills no more than APPROVED_INVOICE_LIMIT (1.0, the $1 the harness allows) before tax; and no other approved
 invoice was created in this run (this guard allowed none before, and the manifest holds no invoice record whose
 status_id is not 1). A guard built with cleanup=True never allows the create: a cleanup creates nothing.
@@ -194,6 +221,16 @@ document THIS RUN created (kind "document" in the manifest) and for the test cli
 A CLEANUP guard (cleanup=True) refuses all of these but one: PATCH /documents/{documentId} of a run-created document with the body
 {"StatusId": 2} and nothing else (the archive of what a stopped run left; allow_documents is not needed for it).
 
+The 1.5.0 areas (contract 6c30770dffc0): every create of an opt-in area is announced first (require_intents) and every rule above that
+names an area is closed without it. An alert is NOT created by the run: the area picks an existing New alert of the test client, writes a
+manifest record of kind alert BEFORE the first change (details client_id, status_before 1) and the guard allows PATCH /alerts for recorded
+alerts only; Gorelo changes the whole stack of an alert (its repeats) with it, so the area restores to New and the cleanup restores what a
+stopped run left dismissed. The guard never lets a contract be deleted (a contract is archived: StatusId 3) and never a payment be written.
+The approval of an invoice by update (approve_invoice, PATCH /invoices/{invoiceId} with {StatusId: 5}) is the second way to the one Approved
+invoice of a run: it needs allow_approved_invoice, a Draft the run created whose manifest details hold approve_via_update true, total above 0
+and at most APPROVED_INVOICE_LIMIT and total_tax 0 (the matrix writes them from its read of the Draft), and counts like the approved create:
+this guard allows one approval in all, and none beside an invoice record that is not a Draft.
+
 The tickets' contacts: the guard sees a create request but not its answer, so it cannot learn a new ticket's
 id or who is stored on it. The harness records `contact_id` (int or None) and `cc_contact_ids` in the details of
 the ticket: the write matrix writes the STORED values it read back (manifest.update_details), not the ones it
@@ -230,6 +267,11 @@ has to find again):
     POST /projects/{projectId}/tasks/{taskId}/conversations/side-conversation side_conversation
     POST /documents                                                           document
     POST /documents/{documentId}/duplicate                                    document
+    POST /assets/types                                                        asset_type
+    POST /clients/{clientId}/locations                                        client_location
+    POST /clients/{clientId}/domains                                          client_domain
+    POST /product-charges                                                     product_charge
+    POST /contracts                                                           contract
     POST /forms/{formId}/submission-links
     POST /documents/{documentId}/related-items
     POST /documents/{documentId}/versions/{versionId}/restore
@@ -244,7 +286,7 @@ import json
 import math
 import re
 import unicodedata
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from email import policy
 from email.parser import BytesParser
@@ -287,12 +329,35 @@ CONVERSATION_PUBLIC, CONVERSATION_PRIVATE, CONVERSATION_SIDE, CONVERSATION_APPRO
 INVOICE_DRAFT, INVOICE_APPROVED = 1, 5  # Invoice StatusId: the harness creates (and deletes) Drafts; with
 # allow_approved_invoice it also creates one Approved invoice and voids it (see "The approved invoice" above)
 APPROVED_INVOICE_LIMIT = 1.0  # the most the one Approved invoice's line may bill before tax: the $1 the harness allows (the
-# TaxId rule of the approved invoice keeps the tax at none, so before tax is also the total)
+# TaxId rule of the approved invoice keeps the tax at none (the tax-exempt rate), so before tax is also the total)
 # The Id the negative check of the custom_properties area names: no custom field of the service provider has it. The guard accepts
 # it nowhere (it is no recorded field, like any other Id the run did not record): update_client must refuse it locally, after its
 # read of the client, so no PATCH that carries it is ever sent.
 CUSTOM_PROPERTY_UNKNOWN_ID = 9_000_000_000_000
+# The keys the contracts area sends (an allowlist: the guard refuses any other key of a contract, a service line, its per-hour details or a line item).
+CONTRACT_CREATE_KEYS = frozenset({"Name", "ClientId", "ServiceLines"})
+CONTRACT_CHANGE_KEYS = frozenset({"Name", "ClientId", "StatusId", "ServiceLines"})
+CONTRACT_LINE_KEYS = frozenset({"Id", "Name", "LaborTermsId", "PerHourDetails", "LineItems"})
+CONTRACT_PER_HOUR_KEYS = frozenset({"RateTypeId"})
+CONTRACT_ITEM_KEYS = frozenset({"Id", "ItemId", "Quantity", "UnitPrice", "Description", "BillableStatusId"})
 DOCUMENT_ACTIVE, DOCUMENT_ARCHIVED = 1, 2  # Document StatusId: the run archives what it creates, and restores one document
+# The opt-in areas of release 1.5.0 (contract 6c30770dffc0): `allow_areas` names the ones a run enabled (write_matrix --with-<area>), and a rule
+# of this table is closed without its area (a cleanup guard never has one; it deletes run-created records and undoes, see the module docstring).
+OPT_IN_AREAS: tuple[str, ...] = (
+    "alert_status",  # PATCH /alerts: dismiss and restore one EXISTING alert of the test client that the manifest recorded
+    "asset_types",  # POST and PATCH /assets/types: an MCPTEST asset type
+    "client_locations",  # POST and PATCH /clients/{clientId}/locations: an MCPTEST location of the test client
+    "client_domains",  # POST and PATCH /clients/{clientId}/domains: an MCPTEST domain under .example of the test client
+    "product_charges",  # POST and PATCH /product-charges: a No charge product on a run-created ticket of the test client
+    "invoice_update",  # PATCH /invoices/{invoiceId}: a run-created Draft (the approval is allow_approved_invoice, not an area)
+    "contracts",  # POST and PATCH /contracts: an MCPTEST Hourly contract of the test client
+)
+ALERT_NEW, ALERT_DISMISSED = 1, 2  # Alert StatusId (3, Ticketed, is final and links a ticket: never)
+CONTRACT_ACTIVE, CONTRACT_ARCHIVED = 1, 3  # Contract StatusId: the run archives its contract (a contract cannot be deleted)
+CONTRACT_LABOR_TERMS = (1, 2, 4, 5)  # Unlimited, Hourly, No Labor Terms, Limited; 3 Block Hours raises an invoice and is never allowed
+CHARGE_NO_CHARGE = 2  # product charge BillableStatusId 2 No charge: the only status the harness writes (1 Billable could be invoiced)
+DOMAIN_TLD = ".example"  # the reserved TLD of RFC 2606: a domain under it can route no inbound email
+MAX_ALERT_IDS = 100
 CLIENT_ACTIVE = 1  # Client StatusId 1 Active (3 Credit hold, 4 Archived): the only status a write run accepts for the test client
 # An image embedded in a document body as a data: URL (Gorelo refuses it; the guard repeats the refusal so the rule table is true).
 _DATA_IMAGE = re.compile(r"data\s*:\s*image\s*/", re.IGNORECASE)
@@ -327,6 +392,14 @@ _KIND_NAMES = {
     "custom_asset": "custom asset",
     "custom_property": "custom property",
     "document": "document",
+    "approval": "approval",
+    "side_conversation": "side conversation",
+    "asset_type": "asset type",
+    "client_location": "client location",
+    "client_domain": "client domain",
+    "product_charge": "product charge",
+    "contract": "contract",
+    "alert": "alert",
 }
 
 # The manifest kind a comment's ConversationTypeId 3 or 4 may post into, with the words for it: (one, many).
@@ -341,6 +414,7 @@ _NEVER: dict[str, str] = {
     "GET /v1/api-keys": "the live harness never lists API keys (an API key is a credential)",
     "DELETE /v1/api-keys/{apiKeyId}": "the live harness never revokes API keys (an API key is a credential)",
     "DELETE /v1/assets/agents/{agentAssetId}": "deleting an agent asset UNINSTALLS the RMM agent from the host",
+    "PATCH /v1/assets/agents/{agentAssetId}": "the live harness has no agent writes (an agent asset is a customer's device)",
     "DELETE /v1/assets/custom/{customAssetId}": "this harness never deletes a custom asset (the spec's soft DELETE is not used)",
     "DELETE /v1/contracts/{contractId}": "the live harness never deletes contracts",
     "POST /v1/payments": "the live harness never records payments (a payment is accounting data that reaches the connected system)",
@@ -378,6 +452,15 @@ def _is_custom_asset_write(method: str, segments: tuple[str, ...]) -> bool:
     return (method == "POST" and len(lowered) == 2) or (method == "PATCH" and len(lowered) == 3)
 
 
+def _is_asset_type_write(method: str, segments: tuple[str, ...]) -> bool:
+    """True for the writes under /assets/types that are not refused outright: POST /assets/types, PATCH and DELETE
+    /assets/types/{id} (the rules of LiveGuard decide whether the run may send them)."""
+    lowered = tuple(segment.lower() for segment in segments)
+    if lowered[:2] != ("assets", "types"):
+        return False
+    return (method == "POST" and len(lowered) == 2) or (method in ("PATCH", "DELETE") and len(lowered) == 3)
+
+
 # Writes whose path ids must ALL name records this run created: op key -> ((kind, placeholder), ...).
 _TICKET = (("ticket", "ticketId"),)
 _PROJECT = (("project", "projectId"),)
@@ -399,6 +482,20 @@ _PATH_KINDS: dict[str, tuple[tuple[str, str], ...]] = {
     "PATCH /v1/uptime/{uptimeId}": (("uptime", "uptimeId"),),
     "DELETE /v1/uptime/{uptimeId}": (("uptime", "uptimeId"),),
     "DELETE /v1/invoices/{invoiceId}": (("invoice", "invoiceId"),),
+    "PATCH /v1/invoices/{invoiceId}": (("invoice", "invoiceId"),),
+    "PATCH /v1/alerts/{alertId}": (("alert", "alertId"),),
+    "PATCH /v1/assets/types/{assetTypeId}": (("asset_type", "assetTypeId"),),
+    "DELETE /v1/assets/types/{assetTypeId}": (("asset_type", "assetTypeId"),),
+    "PATCH /v1/clients/{clientId}/locations/{locationId}": (("client_location", "locationId"),),
+    "DELETE /v1/clients/{clientId}/locations/{locationId}": (("client_location", "locationId"),),
+    "PATCH /v1/clients/{clientId}/domains/{domainId}": (("client_domain", "domainId"),),
+    "DELETE /v1/clients/{clientId}/domains/{domainId}": (("client_domain", "domainId"),),
+    "PATCH /v1/product-charges/{productChargeId}": (("product_charge", "productChargeId"),),
+    "DELETE /v1/product-charges/{productChargeId}": (("product_charge", "productChargeId"),),
+    "PATCH /v1/contracts/{contractId}": (("contract", "contractId"),),
+    "PATCH /v1/tickets/{ticketId}/approvals/{approvalId}": (*_TICKET, ("approval", "approvalId")),
+    "PATCH /v1/projects/{projectId}/comments/{commentId}": (*_PROJECT, ("project_comment", "commentId")),
+    "PATCH /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}": (*_PROJECT_TASK, ("project_comment", "commentId")),
     "PATCH /v1/projects/{projectId}": _PROJECT,
     "DELETE /v1/projects/{projectId}": _PROJECT,
     "POST /v1/projects/{projectId}/sections": _PROJECT,
@@ -451,6 +548,11 @@ _CREATES: dict[str, str] = {
     "POST /v1/projects/{projectId}/tasks/{taskId}/conversations/side-conversation": "side_conversation",
     "POST /v1/documents": "document",
     "POST /v1/documents/{documentId}/duplicate": "document",
+    "POST /v1/assets/types": "asset_type",
+    "POST /v1/clients/{clientId}/locations": "client_location",
+    "POST /v1/clients/{clientId}/domains": "client_domain",
+    "POST /v1/product-charges": "product_charge",
+    "POST /v1/contracts": "contract",
 }
 # The POST operations of the documents that are NOT creates, on purpose: a related-items POST adds links to a document and a version
 # restore changes which version of a run-created document is current; neither makes a record the harness has to find again, so
@@ -470,13 +572,18 @@ _APPROVED_TEXT_BY_HANDLER: dict[str, str] = {
     "_post_invoice": (
         "with allow_approved_invoice also StatusId exactly 5 (Approved) for the one announced approved invoice: "
         "no RecipientEmails key, one line with Quantity and an explicit UnitPrice above 0 (at most "
-        f"{APPROVED_INVOICE_LIMIT:g} in all), TaxId present and null (no tax), no DiscountPercent, BillableStatusId "
+        f"{APPROVED_INVOICE_LIMIT:g} in all), TaxId the id of the tax-exempt rate (Percentage 0) the intent recorded as tax_id, no DiscountPercent, BillableStatusId "
         "absent or 1, Reference the label of the open invoice intent with status_id 5, and no other approved invoice in "
         "the run (never from a cleanup)"
     ),
     "_delete_invoice": (
         "with allow_approved_invoice also an invoice recorded with status_id 5, which is voided (StatusId 4, still "
         "listed); Paid (3), Void (4) and an invoice with no recorded status are never deleted"
+    ),
+    "_patch_invoice": (
+        "with allow_approved_invoice also the body exactly {StatusId: 5} (approve_invoice) for ONE run-created Draft whose "
+        "manifest details hold approve_via_update true, total above 0 and at most "
+        f"{APPROVED_INVOICE_LIMIT:g} and total_tax 0, and no other approved invoice in the run (never from a cleanup)"
     ),
 }
 
@@ -751,6 +858,8 @@ class LiveGuard:
     allow_documents: write mode only, off by default: the document writes of the module docstring ("The documents"), for documents this
                run created and for the test client. Only write_matrix --with-documents sets it. A cleanup guard (cleanup=True) never
                has it and still archives (StatusId 2) a run-created document.
+    allow_areas: write mode only, empty by default, never with cleanup: the opt-in areas of release 1.5.0 the run enabled (OPT_IN_AREAS, module
+               docstring "The 1.5.0 areas"). Only write_matrix --with-<area> sets them; a rule of an area is closed without its name.
     Counters: allowed_count is every request let through, writes_allowed the ones among them that are not a GET.
     The other keyword arguments tune the constants of the allowlist (the defaults are the configured values);
     `allowed_hosts` and `spec` exist for tests. base_url: the Settings.base_url of the run; the guard then allows that host only
@@ -782,6 +891,7 @@ class LiveGuard:
         allow_custom_properties: bool = False,
         allow_custom_asset_move: bool = False,
         allow_documents: bool = False,
+        allow_areas: Iterable[str] = (),
         spec: SpecIndex | None = None,
     ) -> None:
         if mode not in ("read", "write"):
@@ -802,6 +912,14 @@ class LiveGuard:
             raise ValueError("allow_custom_asset_move=True needs allow_custom_assets=True: only a custom asset of this run can move")
         if allow_documents and mode != "write":
             raise ValueError("allow_documents=True only makes sense in write mode")
+        areas = frozenset(allow_areas)
+        unknown_areas = sorted(areas - set(OPT_IN_AREAS))
+        if unknown_areas:
+            raise ValueError(f"unknown allow_areas {unknown_areas}; the areas are {', '.join(OPT_IN_AREAS)}")
+        if areas and mode != "write":
+            raise ValueError("allow_areas only makes sense in write mode")
+        if areas and cleanup:
+            raise ValueError("a cleanup guard takes no allow_areas: it deletes run-created records and undoes, nothing else")
         if allowed_hosts is not None and base_url is not None:
             raise ValueError("pass allowed_hosts or base_url, not both")
         hosts = allowed_hosts if allowed_hosts is not None else api_hosts(base_url) if base_url is not None else API_HOSTS
@@ -828,6 +946,7 @@ class LiveGuard:
         self.allow_custom_properties = allow_custom_properties
         self.allow_custom_asset_move = allow_custom_asset_move
         self.allow_documents = allow_documents
+        self.allow_areas = areas
         self.allowed_clients = frozenset(allowed_clients)
         self.operator_contact = operator_contact
         self.operator_user = operator_user
@@ -933,7 +1052,12 @@ class LiveGuard:
                     "(empty, dot, percent-encoded or unusual characters)",
                     label=label,
                 )
-        if method != "GET" and segments[0].lower() == "assets" and not _is_custom_asset_write(method, segments):
+        if (
+            method != "GET"
+            and segments[0].lower() == "assets"
+            and not _is_custom_asset_write(method, segments)
+            and not _is_asset_type_write(method, segments)
+        ):
             raise GuardViolation(f"blocked {label}: writes under /assets/ are never allowed", label=label)
         match = self._match(method, segments)
         if match is None:
@@ -1567,7 +1691,7 @@ class LiveGuard:
             raise req.block("itemId is required")
         self._require_created(req, kind, item_id, "itemId")
 
-    @_rule("POST /v1/time-entries", "TicketId (or TaskId) run-created; UserId is the operator user")
+    @_rule("POST /v1/time-entries", "TicketId (or TaskId) run-created; UserId is the operator user; no CreatedOn (never backdated)")
     def _post_time_entry(self, req: _Req) -> None:
         assert req.body is not None
         ticket, task = req.body.get("TicketId"), req.body.get("TaskId")
@@ -1577,6 +1701,8 @@ class LiveGuard:
             self._body_created(req, "ticket", "TicketId", ticket)
         if task is not None:
             self._body_created(req, "task", "TaskId", task)
+        if "CreatedOn" in req.body:
+            raise req.block("CreatedOn may not be sent on a time entry: the live harness never backdates one")
         if self._scalar_int(req, "UserId") != self.operator_user:
             raise req.block(f"UserId is required and must be the operator user {self.operator_user}")
 
@@ -1929,10 +2055,11 @@ class LiveGuard:
                 "LineItems[0].BillableStatusId must be absent or exactly the JSON integer 1 (Billable): a line that is "
                 "not billable could bring the total to 0"
             )
-        if "TaxId" not in line or line["TaxId"] is not None:
+        tax = line.get("TaxId")
+        if isinstance(tax, bool) or not isinstance(tax, int) or tax <= 0:
             raise req.block(
-                "LineItems[0].TaxId must be given explicitly as null (the line's no_tax): an omitted TaxId falls back to "
-                "the item's own tax and a number picks a tax, but the harness limits the one Approved invoice to $1 with no tax"
+                "LineItems[0].TaxId must be the JSON integer id of the tax-exempt rate the run recorded: a null or an omitted TaxId "
+                "applies the item's own tax (Gorelo's create text), and the harness limits the one Approved invoice to $1 with no tax"
             )
         if quantity * price > APPROVED_INVOICE_LIMIT:
             raise req.block(
@@ -1959,6 +2086,23 @@ class LiveGuard:
             raise req.block(
                 "Reference must be exactly the label of the open invoice intent with details status_id 5 (the label the "
                 "manifest announced), so the invoice can be found again by it"
+            )
+        recorded_tax, percentage = announced[0].details.get("tax_id"), announced[0].details.get("tax_percentage")
+        if (
+            isinstance(recorded_tax, bool)
+            or not isinstance(recorded_tax, int)
+            or isinstance(percentage, bool)
+            or not isinstance(percentage, (int, float))
+            or percentage != 0
+        ):
+            raise req.block(
+                "the open invoice intent with status_id 5 must record tax_id (a whole number) and tax_percentage exactly 0 in its details "
+                "before the create: the tax-exempt rate is chosen and recorded before the write"
+            )
+        if tax != recorded_tax:
+            raise req.block(
+                f"LineItems[0].TaxId ({tax}) is not the tax-exempt rate the run recorded in the intent (tax_id {recorded_tax}, Percentage 0): "
+                "the harness limits the one Approved invoice to $1 with no tax"
             )
         if self._approved_creates:
             raise req.block(
@@ -2070,6 +2214,468 @@ class LiveGuard:
             self._body_created(req, "ticket", "TicketId", ticket)
         if task is not None:
             self._body_created(req, "task", "TaskId", task)
+
+    # -- the 1.5.0 areas (contract 6c30770dffc0) --------------------------------------------
+
+    def _require_area(self, req: _Req, area: str, what: str) -> None:
+        """A write of an opt-in area needs the run to have enabled it (write_matrix --with-<area>), and a cleanup never has one."""
+        if self.cleanup or area not in self.allow_areas:
+            raise req.block(
+                f"{what} is closed unless the run enabled the {area} area (--with-{area.replace('_', '-')}), and a cleanup never "
+                "opens it"
+            )
+
+    def _path_test_client(self, req: _Req) -> int:
+        """The clientId of the path must be the TEST client (locations and domains are never written on another client)."""
+        try:
+            client = normalize_id("client", req.params["clientId"])
+        except ValueError:
+            raise req.block("the path clientId is not a valid client id") from None
+        if client != self.test_client:
+            raise req.block(f"the path clientId must be {self.test_client} (the test client), not {client}")
+        return int(client)
+
+    def _recorded_client(self, req: _Req, kind: str, raw: Any, what: str) -> None:
+        """The manifest details of a run-created record must name the test client (the record was made there)."""
+        assert self.manifest is not None
+        key = normalize_id(kind, raw)
+        if self.manifest.details(kind, key).get("client_id") != self.test_client:
+            raise req.block(f"{what} {key} is not recorded for the test client {self.test_client}")
+
+    @staticmethod
+    def _false_or_absent(req: _Req, field: str) -> None:
+        assert req.body is not None
+        value = req.body.get(field)
+        if value is not None and value is not False:
+            raise req.block(f"{field} must be absent, null or false: the live harness never changes {field}")
+
+    # -- alerts
+
+    def _check_alert_status(self, req: _Req) -> None:
+        """The status a run may set on an alert: 1 (New: restore, also what a cleanup sends) or 2 (Dismissed), never 3 (Ticketed)."""
+        assert req.body is not None
+        status = req.body.get("StatusId")
+        allowed = (ALERT_NEW,) if self.cleanup else (ALERT_NEW, ALERT_DISMISSED)
+        if not any(_is_status(status, wanted) for wanted in allowed):
+            raise req.block(
+                "StatusId must be exactly the JSON integer 1 (New, a restore) or 2 (Dismissed)"
+                + (": a cleanup only restores" if self.cleanup else ": 3 (Ticketed) links a ticket and is final")
+            )
+        if req.body.get("TicketId") is not None:
+            raise req.block("TicketId must be absent or null: the live harness never links an alert to a ticket")
+        if not self.cleanup:
+            self._require_area(req, "alert_status", "an alert status change")
+
+    def _require_test_client_alert(self, req: _Req, raw: Any, where: str) -> None:
+        """An alert the manifest recorded (an existing alert, written BEFORE the first change) as an alert of the test client."""
+        key = self._require_created(req, "alert", raw, where)
+        assert self.manifest is not None
+        if self.manifest.details("alert", key).get("client_id") != self.test_client:
+            raise req.block(f"alert {key} is not recorded as an alert of the test client {self.test_client}")
+
+    @_rule(
+        "PATCH /v1/alerts",
+        "only with the alert_status area; a cleanup only restores (StatusId 1); AlertIds 1 to 100 ids of alerts the manifest recorded "
+        "as alerts of the test client; StatusId exactly 1 (New) or 2 (Dismissed), never 3 (Ticketed); no TicketId",
+    )
+    def _patch_alerts(self, req: _Req) -> None:
+        assert req.body is not None
+        self._check_alert_status(req)
+        ids = req.body.get("AlertIds")
+        if not isinstance(ids, list) or not 1 <= len(ids) <= MAX_ALERT_IDS:
+            raise req.block(f"AlertIds must be a list of 1 to {MAX_ALERT_IDS} alert UUIDs")
+        for index, item in enumerate(ids):
+            if not isinstance(item, str) or not _UUID.fullmatch(item):
+                raise req.block(f"AlertIds[{index}] must be a UUID string")
+            self._require_test_client_alert(req, item, f"AlertIds[{index}]")
+
+    @_rule(
+        "PATCH /v1/alerts/{alertId}",
+        "only with the alert_status area; a cleanup only restores (StatusId 1); the alert is one the manifest recorded as an alert of "
+        "the test client; StatusId exactly 1 (New) or 2 (Dismissed), never 3 (Ticketed); no TicketId",
+    )
+    def _patch_alert(self, req: _Req) -> None:
+        self._check_alert_status(req)
+        self._require_test_client_alert(req, req.params["alertId"], "path alertId")
+
+    # -- asset types
+
+    @_rule("POST /v1/assets/types", "only with the asset_types area; Name starts with the run id")
+    def _post_asset_type(self, req: _Req) -> None:
+        self._require_area(req, "asset_types", "an asset type create")
+        self._require_run_name(req)
+
+    @_rule("PATCH /v1/assets/types/{assetTypeId}", "only with the asset_types area; Name is required and starts with the run id")
+    def _patch_asset_type(self, req: _Req) -> None:
+        self._require_area(req, "asset_types", "an asset type rename")
+        self._require_run_name(req)
+
+    # -- client locations and domains (the test client only)
+
+    def _check_location_body(self, req: _Req, *, creating: bool) -> None:
+        assert req.body is not None
+        body = req.body
+        if creating or "Name" in body:
+            self._require_run_title(req, "Name", body.get("Name"))
+        for flag in ("IsDefault", "IsDefaultBilling"):
+            self._false_or_absent(req, flag)
+        if body.get("PrimaryContactId") is not None:
+            raise req.block("PrimaryContactId must be absent or null: the live harness names no contact on a location")
+        billing = body.get("BillingContactIds")
+        if billing not in (None, "", []):
+            raise req.block("BillingContactIds must be absent, null or empty: a billing contact would receive invoices")
+
+    @_rule(
+        "POST /v1/clients/{clientId}/locations",
+        "only with the client_locations area; the path client is the test client; Name starts with the run id; IsDefault and "
+        "IsDefaultBilling absent or false; no PrimaryContactId, no BillingContactIds",
+    )
+    def _post_client_location(self, req: _Req) -> None:
+        self._require_area(req, "client_locations", "a client location create")
+        self._path_test_client(req)
+        self._check_location_body(req, creating=True)
+
+    @_rule(
+        "PATCH /v1/clients/{clientId}/locations/{locationId}",
+        "only with the client_locations area; the path client is the test client and the location is recorded for it; Name, if "
+        "present, starts with the run id; IsDefault and IsDefaultBilling absent or false; no PrimaryContactId, no BillingContactIds",
+    )
+    def _patch_client_location(self, req: _Req) -> None:
+        self._require_area(req, "client_locations", "a client location change")
+        self._path_test_client(req)
+        self._recorded_client(req, "client_location", req.params["locationId"], "location")
+        self._check_location_body(req, creating=False)
+
+    @_rule(
+        "DELETE /v1/clients/{clientId}/locations/{locationId}",
+        "the path client is the test client and the location is recorded for it (Gorelo marks a deleted location inactive)",
+    )
+    def _delete_client_location(self, req: _Req) -> None:
+        self._path_test_client(req)
+        self._recorded_client(req, "client_location", req.params["locationId"], "location")
+
+    def _require_domain_name(self, req: _Req, value: Any) -> None:
+        assert self.manifest is not None
+        run = self.manifest.run_id.lower()
+        name = value.lower() if isinstance(value, str) and value.isascii() else ""
+        if not re.fullmatch(re.escape(run) + r"[a-z0-9-]*" + re.escape(DOMAIN_TLD), name):
+            raise req.block(
+                f"Name must be a domain under the reserved {DOMAIN_TLD} TLD that starts with the run id, for example "
+                f"{run}{DOMAIN_TLD}: a real domain would route that company's inbound email to the test client"
+            )
+
+    @_rule(
+        "POST /v1/clients/{clientId}/domains",
+        "only with the client_domains area; the path client is the test client; Name is <run id>[-text].example (the reserved .example TLD)",
+    )
+    def _post_client_domain(self, req: _Req) -> None:
+        assert req.body is not None
+        self._require_area(req, "client_domains", "a client domain create")
+        self._path_test_client(req)
+        self._require_domain_name(req, req.body.get("Name"))
+
+    @_rule(
+        "PATCH /v1/clients/{clientId}/domains/{domainId}",
+        "only with the client_domains area; the path client is the test client and the domain is recorded for it; Name, if present, "
+        "is <run id>[-text].example",
+    )
+    def _patch_client_domain(self, req: _Req) -> None:
+        assert req.body is not None
+        self._require_area(req, "client_domains", "a client domain change")
+        self._path_test_client(req)
+        self._recorded_client(req, "client_domain", req.params["domainId"], "domain")
+        if "Name" in req.body:
+            self._require_domain_name(req, req.body["Name"])
+
+    @_rule(
+        "DELETE /v1/clients/{clientId}/domains/{domainId}",
+        "the path client is the test client and the domain is recorded for it",
+    )
+    def _delete_client_domain(self, req: _Req) -> None:
+        self._path_test_client(req)
+        self._recorded_client(req, "client_domain", req.params["domainId"], "domain")
+
+    # -- product charges
+
+    @_rule(
+        "POST /v1/product-charges",
+        "only with the product_charges area; TicketId a run-created ticket of the test client, no TaskId; ItemId a UUID; "
+        "BillableStatusId exactly 2 (No charge)",
+    )
+    def _post_product_charge(self, req: _Req) -> None:
+        assert req.body is not None and self.manifest is not None
+        body = req.body
+        self._require_area(req, "product_charges", "a product charge create")
+        ticket = body.get("TicketId")
+        key = self._body_created(req, "ticket", "TicketId", ticket)
+        if self.manifest.details("ticket", key).get("client_id") != self.test_client:
+            raise req.block(f"ticket {key} is not recorded as a ticket of the test client {self.test_client}")
+        if body.get("TaskId") is not None:
+            raise req.block("TaskId must be absent or null: a product charge goes on a run-created ticket only")
+        item = body.get("ItemId")
+        if not isinstance(item, str) or not _UUID.fullmatch(item):
+            raise req.block("ItemId must be a UUID string")
+        if not _is_status(body.get("BillableStatusId"), CHARGE_NO_CHARGE):
+            raise req.block("BillableStatusId must be exactly the JSON integer 2 (No charge): a Billable charge could be invoiced")
+
+    @_rule(
+        "PATCH /v1/product-charges/{productChargeId}",
+        "only with the product_charges area; BillableStatusId, if present, exactly 2 (No charge)",
+    )
+    def _patch_product_charge(self, req: _Req) -> None:
+        assert req.body is not None
+        self._require_area(req, "product_charges", "a product charge change")
+        if "BillableStatusId" in req.body and not _is_status(req.body["BillableStatusId"], CHARGE_NO_CHARGE):
+            raise req.block("BillableStatusId must be exactly the JSON integer 2 (No charge) or absent")
+
+    # -- invoice update and approval
+
+    def _check_invoice_lines(self, req: _Req, lines: Any) -> None:
+        if not isinstance(lines, list) or not lines:
+            raise req.block("LineItems must be a non-empty list of line objects (an empty list is rejected by Gorelo)")
+        for index, line in enumerate(lines):
+            if not isinstance(line, dict):
+                raise req.block(f"LineItems[{index}] must be an object")
+            ident, item = line.get("Id"), line.get("ItemId")
+            if ident is not None and (not isinstance(ident, str) or not _UUID.fullmatch(ident)):
+                raise req.block(f"LineItems[{index}].Id must be a UUID string")
+            if ident is None and (not isinstance(item, str) or not _UUID.fullmatch(item)):
+                raise req.block(f"LineItems[{index}] has no Id, so it is a new line and its ItemId must be a UUID string")
+            if item is not None and (not isinstance(item, str) or not _UUID.fullmatch(item)):
+                raise req.block(f"LineItems[{index}].ItemId must be a UUID string")
+
+    @_rule(
+        "PATCH /v1/invoices/{invoiceId}",
+        "a run-created invoice recorded as a Draft; only with the invoice_update area; keys InvoiceDate, DueDate, Reference "
+        "(null or starts with the run id) and LineItems (entries with a line Id, or new ones with an ItemId); no StatusId, no "
+        "template or branding keys; a cleanup sends none",
+    )
+    def _patch_invoice(self, req: _Req) -> None:
+        assert req.body is not None
+        body = req.body
+        if "StatusId" in body:
+            self._approve_invoice_by_update(req)
+            return
+        self._require_area(req, "invoice_update", "an invoice update")
+        key = normalize_id("invoice", req.params["invoiceId"])  # _PATH_KINDS already required it to be run-created
+        problem = self._draft_problem(key)
+        if problem is not None:
+            raise req.block(f"{problem}; the live harness changes only a Draft it created")
+        if not body:
+            raise req.block("the body names nothing to change")
+        extra = sorted(set(body) - {"InvoiceDate", "DueDate", "Reference", "LineItems"})
+        if extra:
+            raise req.block(
+                f"{_name(extra[0])} may not be changed: the live harness updates InvoiceDate, DueDate, Reference and LineItems only "
+                "(no template, branding or status)"
+            )
+        for field in ("InvoiceDate", "DueDate"):
+            if field in body and not isinstance(body[field], str):
+                raise req.block(f"{field} must be a date text")
+        reference = body.get("Reference")
+        if "Reference" in body and reference is not None:
+            self._require_run_title(req, "Reference", reference)
+        if "LineItems" in body:
+            self._check_invoice_lines(req, body["LineItems"])
+
+    def _approve_invoice_by_update(self, req: _Req) -> None:
+        """PATCH {StatusId: 5} (approve_invoice): the ONE approval of a run, for a Draft of $1 the matrix recorded for it.
+
+        Gorelo pushes an approved invoice to the connected accounting system (approve_invoice is a gated tool). Allowed only with
+        allow_approved_invoice, never from a cleanup, and only when ALL of these hold: the body is {StatusId: 5} and nothing else;
+        the invoice is a run-created Draft (manifest details status_id 1) whose details say approve_via_update true, total above 0
+        and at most APPROVED_INVOICE_LIMIT, total_tax 0 (the matrix writes them from its read of the Draft, as it does the
+        status_id); and this guard allowed no other approval and the manifest holds no invoice that is not a Draft."""
+        assert req.body is not None and self.manifest is not None
+        body = req.body
+        if self.cleanup or not self.allow_approved_invoice:
+            raise req.block(
+                "StatusId 5 (Approved) is not allowed: approving pushes the invoice to the connected accounting system, so the live "
+                "harness does it only in a --with-approved-invoice run, never from a cleanup"
+            )
+        if set(body) != {"StatusId"} or not _is_status(body["StatusId"], INVOICE_APPROVED):
+            raise req.block("an approval by update is the body {\"StatusId\": 5} and nothing else (no line, date or reference change)")
+        key = normalize_id("invoice", req.params["invoiceId"])
+        problem = self._draft_problem(key)
+        if problem is not None:
+            raise req.block(f"{problem}; only a Draft the run created is approved")
+        if self._approved_creates:
+            raise req.block("this run already approved an invoice: the guard allows one (no other approved invoice may be made)")
+        details = self.manifest.details("invoice", key)
+        total, tax = details.get("total"), details.get("total_tax")
+        if details.get("approve_via_update") is not True:
+            raise req.block(f"invoice {key} is not recorded for an approval by update (details approve_via_update is not true)")
+        if not _positive_number(total) or total > APPROVED_INVOICE_LIMIT:
+            raise req.block(
+                f"invoice {key} is not recorded with a total above 0 and at most {APPROVED_INVOICE_LIMIT:g}: the harness approves "
+                "one invoice of that size only (a total of exactly 0 would be recorded as Paid)"
+            )
+        if isinstance(tax, bool) or not isinstance(tax, (int, float)) or tax != 0:
+            raise req.block(f"invoice {key} is not recorded with total_tax 0: the approved invoice carries no tax")
+        earlier = [
+            record
+            for record in self.manifest.all_created()
+            if record.kind == "invoice" and record.id != key and not _is_status(record.details.get("status_id"), INVOICE_DRAFT)
+        ]
+        if earlier:
+            raise req.block(f"the manifest already holds {len(earlier)} invoice record(s) that are not a Draft: only one invoice is approved")
+        self._approved_creates += 1  # counted only now that every rule held
+
+    # -- contracts
+
+    def _only_keys(self, req: _Req, where: str, node: dict[str, Any], allowed: frozenset[str]) -> None:
+        """An ALLOWLIST: a key the contracts area does not send is refused (a contract can invoice on its own; the many fields that set dates,
+        repeat periods, contacts, templates and the like are never part of a live test)."""
+        extra = sorted(set(node) - allowed)
+        if extra:
+            raise req.block(f"{where} may not carry {', '.join(extra)}: the live harness sends only {', '.join(sorted(allowed))} here")
+
+    def _check_contract_lines(self, req: _Req, lines: Any, *, creating: bool) -> None:
+        if not isinstance(lines, list) or (creating and not lines):
+            raise req.block("ServiceLines must be a non-empty list of line objects" if creating else "ServiceLines must be a list")
+        for index, line in enumerate(lines):
+            if not isinstance(line, dict):
+                raise req.block(f"ServiceLines[{index}] must be an object")
+            terms = line.get("LaborTermsId")
+            if terms is None:
+                if creating or "Id" not in line:
+                    raise req.block(f"ServiceLines[{index}] is a new line, so LaborTermsId is required")
+            else:
+                self._json_int(req, f"ServiceLines[{index}].LaborTermsId", terms)
+                if terms == 3:
+                    raise req.block(
+                        f"ServiceLines[{index}].LaborTermsId 3 is Block Hours: a Block Hours line raises an invoice, so the live "
+                        "harness never creates one"
+                    )
+                if terms not in CONTRACT_LABOR_TERMS:
+                    raise req.block(f"ServiceLines[{index}].LaborTermsId must be one of {CONTRACT_LABOR_TERMS}")
+            if line.get("BlockHoursDetails") is not None:
+                raise req.block(f"ServiceLines[{index}].BlockHoursDetails is never allowed: a Block Hours line raises an invoice")
+            # the specific reasons above come first; then the allowlist of everything else
+            self._only_keys(req, f"ServiceLines[{index}]", line, CONTRACT_LINE_KEYS)
+            if isinstance(line.get("PerHourDetails"), dict):
+                self._only_keys(req, f"ServiceLines[{index}].PerHourDetails", line["PerHourDetails"], CONTRACT_PER_HOUR_KEYS)
+            items = line.get("LineItems")
+            if items is None:
+                continue
+            if not isinstance(items, list):
+                raise req.block(f"ServiceLines[{index}].LineItems must be a list")
+            for number, entry in enumerate(items):
+                where = f"ServiceLines[{index}].LineItems[{number}]"
+                if not isinstance(entry, dict):
+                    raise req.block(f"{where} must be an object")
+                self._only_keys(req, where, entry, CONTRACT_ITEM_KEYS)
+                if "Id" in entry:
+                    self._json_int(req, f"{where}.Id", entry["Id"])
+                elif not isinstance(entry.get("ItemId"), str) or not _UUID.fullmatch(entry["ItemId"]):
+                    raise req.block(f"{where} has no Id, so it is a new entry and its ItemId must be a UUID string")
+
+    def _check_contract_flags(self, req: _Req) -> None:
+        for field in ("AutoApproveAndSend", "AutoInvoiceTicketProducts"):
+            if req.body is not None and req.body.get(field) is not None and req.body[field] is not False:
+                raise req.block(
+                    f"{field} must be absent, null or false: "
+                    + (
+                        "a true flag would approve and email the contract's invoices"
+                        if field == "AutoApproveAndSend"
+                        else "a true flag would sweep a client's ticket products into the contract's invoices"
+                    )
+                )
+
+    @_rule(
+        "POST /v1/contracts",
+        "only with the contracts area; ClientId is the test client; Name starts with the run id; AutoApproveAndSend and "
+        "AutoInvoiceTicketProducts absent or false; ServiceLines never Block Hours (LaborTermsId 3, BlockHoursDetails); contacts as "
+        "for every body; only the keys of the contracts area (Name, ClientId, ServiceLines)",
+    )
+    def _post_contract(self, req: _Req) -> None:
+        assert req.body is not None
+        body = req.body
+        self._require_area(req, "contracts", "a contract create")
+        self._require_test_client(req, self._scalar_int(req, "ClientId"), required=True)
+        self._require_run_title(req, "Name", body.get("Name"))
+        self._check_contract_flags(req)
+        self._check_contract_lines(req, body.get("ServiceLines"), creating=True)
+        self._only_keys(req, "a contract create", body, CONTRACT_CREATE_KEYS)
+
+    @_rule(
+        "PATCH /v1/contracts/{contractId}",
+        "a run-created contract; only with the contracts area, but a cleanup may archive it (the body exactly {StatusId: 3}); "
+        "ClientId, if present, is the test client; Name, if present, starts with the run id; StatusId 1 or 3; "
+        "AutoApproveAndSend and AutoInvoiceTicketProducts absent or false; ServiceLines never Block Hours; only the keys of the contracts "
+        "area (Name, ClientId, StatusId, ServiceLines)",
+    )
+    def _patch_contract(self, req: _Req) -> None:
+        assert req.body is not None
+        body = req.body
+        if self.cleanup:  # the one thing a cleanup does to a contract: archive what a stopped run left (it cannot be deleted)
+            if set(body) != {"StatusId"} or not _is_status(body["StatusId"], CONTRACT_ARCHIVED):
+                raise req.block("a cleanup only archives a contract (the body {\"StatusId\": 3}); it changes nothing else")
+            return
+        self._require_area(req, "contracts", "a contract change")
+        if not body:
+            raise req.block("the body names nothing to change")
+        self._require_test_client(req, self._scalar_int(req, "ClientId"), required=False)
+        if "Name" in body:
+            self._require_run_title(req, "Name", body["Name"])
+        if "StatusId" in body and not any(_is_status(body["StatusId"], wanted) for wanted in (CONTRACT_ACTIVE, CONTRACT_ARCHIVED)):
+            raise req.block("StatusId must be exactly the JSON integer 1 (Active) or 3 (Archived)")
+        self._check_contract_flags(req)
+        if "ServiceLines" in body:
+            self._check_contract_lines(req, body["ServiceLines"], creating=False)
+        self._only_keys(req, "a contract change", body, CONTRACT_CHANGE_KEYS)
+
+    # -- edits of comments and approvals this run made (no area: they change nothing outward)
+
+    def _check_recorded_parent(self, req: _Req, kind: str, raw: Any, key: str, placeholder: str) -> None:
+        """The manifest details `key` of a run-created record must be the id the path names (a comment of another parent is refused)."""
+        assert self.manifest is not None
+        recorded = self.manifest.details(kind, normalize_id(kind, raw)).get(key)
+        if not isinstance(recorded, str) or recorded.lower() != req.params[placeholder].lower():
+            raise req.block(f"the manifest does not record this {_KIND_NAMES[kind]} under the {placeholder} of the path")
+
+    def _check_comment_edit(self, req: _Req, *, task: bool) -> None:
+        assert req.body is not None
+        body = req.body
+        self._check_recorded_parent(req, "project_comment", req.params["commentId"], "project_id", "projectId")
+        assert self.manifest is not None
+        task_id = self.manifest.details("project_comment", normalize_id("project_comment", req.params["commentId"])).get("task_id")
+        if task:
+            self._check_recorded_parent(req, "project_comment", req.params["commentId"], "task_id", "taskId")
+        elif task_id:
+            raise req.block("this comment is recorded as a task comment: it is not edited through the project comment path")
+        if not body:
+            raise req.block("the body names nothing to change")
+        if "Body" in body:
+            self._require_no_data_image(req, "Body", body["Body"])
+        if body.get("Attachments") not in (None, []):
+            raise req.block("Attachments must be absent, null or an empty list: the live harness attaches no file to an edited comment")
+        name = body.get("UpdatedByName")
+        if name is not None and not isinstance(name, str):
+            raise req.block("UpdatedByName must be text")
+
+    @_rule(
+        "PATCH /v1/projects/{projectId}/comments/{commentId}",
+        "the comment is a run-created PROJECT comment recorded under that project; Body without a data: image; no Attachments",
+    )
+    def _patch_project_comment(self, req: _Req) -> None:
+        self._check_comment_edit(req, task=False)
+
+    @_rule(
+        "PATCH /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}",
+        "the comment is a run-created TASK comment recorded under that project and task; Body without a data: image; no Attachments",
+    )
+    def _patch_task_comment(self, req: _Req) -> None:
+        self._check_comment_edit(req, task=True)
+
+    @_rule(
+        "PATCH /v1/tickets/{ticketId}/approvals/{approvalId}",
+        "the approval is one this run created, recorded on that ticket; Name starts with the run id",
+    )
+    def _patch_ticket_approval(self, req: _Req) -> None:
+        self._check_recorded_parent(req, "approval", req.params["approvalId"], "ticket_id", "ticketId")
+        assert req.body is not None
+        self._require_run_title(req, "Name", req.body.get("Name"))
 
 
 # Import-time check (the offline tests also compare every key of these tables exactly with the spec): the tables that

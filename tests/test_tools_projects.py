@@ -7,6 +7,7 @@ error with zero HTTP calls, and the destructive gate.
 
 import json
 import logging
+import pickle
 import re
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from conftest import (
     call_tool_error,
     envelope,
     error_envelope,
+    in_order,
     list_tools,
     make_ctx,
     paged_envelope,
@@ -140,6 +142,8 @@ VALID = {
     "get_project_comment": {"project_id": PROJECT, "comment_id": COMMENT},
     "create_project_comment": {"project_id": PROJECT, "body": "<p>Hi</p>"},
     "delete_project_comment": {"project_id": PROJECT, "comment_id": COMMENT, "confirm": True},
+    "list_project_templates": {},
+    "update_project_comment": {"project_id": PROJECT, "comment_id": COMMENT, "body": "<p>Edited</p>"},
 }
 
 LIST_PROJECTS = "GET /v1/projects"
@@ -167,6 +171,8 @@ EXPECTED = {
         "write", [f"POST {PC}", f"POST {TC}", f"GET {PC}/{{commentId}}", f"GET {TC}/{{commentId}}"], False,
     ),
     "delete_project_comment": ("destructive", [f"DELETE {PC}/{{commentId}}", f"DELETE {TC}/{{commentId}}"], True),
+    "list_project_templates": ("read", ["GET /v1/projects/templates"], False),
+    "update_project_comment": ("write", [f"PATCH {PC}/{{commentId}}", f"GET {PC}/{{commentId}}"], True),
 }
 
 
@@ -2958,3 +2964,421 @@ async def test_project_delete_and_section_delete_cannot_be_reached_through_any_t
         text = await call_tool_error(dserver, name, {"project_id": PROJECT, "confirm": True})
         assert "unknown tool" in text.lower()
     assert mock_gorelo.requests == []
+
+
+# --------------------------------------------------------------------------
+# list_project_templates (1.5.0)
+# --------------------------------------------------------------------------
+
+
+def template_row(n=1, **changes):
+    record = {
+        "Id": uid(60 + n), "Title": f"Onboarding {n}", "ProjectTitle": "New client onboarding", "ProjectDescription": "<p>Steps</p>",
+        "LeadAssigneeId": 9201, "WatcherIds": [9202], "TypeId": TYPE_ID, "TagIds": [TAG_ID], "GroupIds": [7201],
+        "TargetDateInDays": 30, "SectionCount": 3, "TaskCount": 12, "CreatedOn": "2026-09-01T10:00:00Z", "UpdatedOn": None,
+    }
+    record.update(changes)
+    return record
+
+
+async def test_list_project_templates_sends_only_the_paging_names_and_returns_the_paged_shape(server, mock_gorelo):
+    rows = [template_row(1), template_row(2)]
+    mock_gorelo.on("GET", "/v1/projects/templates", paged_envelope(rows, next_cursor="n1", total_count=5))
+    result = await call_tool(server, "list_project_templates", {"page_size": 2, "cursor": "p1"})
+    request = mock_gorelo.last
+    assert (request.method, request.path) == ("GET", "/v1/projects/templates")
+    assert request.query == {"PageSize": "2", "Cursor": "p1"}
+    assert result == {
+        "items": rows, "count": 2, "total_count": 5, "has_more": True, "next_cursor": "n1", "page_size": 2, "filters": {},
+    }
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_list_project_templates_defaults_send_only_the_page_size(server, mock_gorelo):
+    mock_gorelo.on("GET", "/v1/projects/templates", paged_envelope([]))
+    result = await call_tool(server, "list_project_templates")
+    assert mock_gorelo.last.query == {"PageSize": "50"}
+    assert result["items"] == [] and result["count"] == 0 and result["has_more"] is False
+
+
+@pytest.mark.parametrize("given, used", [(0, 1), (-5, 1), (500, 200), (75, 75)])
+async def test_list_project_templates_clamps_the_page_size(server, mock_gorelo, given, used):
+    mock_gorelo.on("GET", "/v1/projects/templates", paged_envelope([]))
+    result = await call_tool(server, "list_project_templates", {"page_size": given})
+    assert mock_gorelo.last.query["PageSize"] == str(used) and result["page_size"] == used
+
+
+async def test_list_project_templates_follows_the_cursor(server, mock_gorelo):
+    pages = [[template_row(1)], [template_row(2)]]
+    mock_gorelo.on("GET", "/v1/projects/templates", paged_responder(pages))
+    first = await call_tool(server, "list_project_templates", {"page_size": 1})
+    second = await call_tool(server, "list_project_templates", {"page_size": 1, "cursor": first["next_cursor"]})
+    assert first["has_more"] is True and second["has_more"] is False and second["items"] == pages[1]
+    assert mock_gorelo.requests[1].query == {"PageSize": "1", "Cursor": "c1"}
+
+
+@pytest.mark.parametrize("cursor", ["", "   "])
+async def test_list_project_templates_a_blank_cursor_is_refused_locally(server, mock_gorelo, cursor):
+    text = await call_tool_error(server, "list_project_templates", {"cursor": cursor})
+    assert "cursor: must not be empty or whitespace only" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_list_project_templates_maps_a_gorelo_error_to_the_param(server, mock_gorelo):
+    mock_gorelo.on(
+        "GET", "/v1/projects/templates", error_envelope(400, [("070101", "PageSize must be between 1 and 200.", "PageSize")])
+    )
+    text = await call_tool_error(server, "list_project_templates", {})
+    assert text == trace_text(
+        "Gorelo rejected list_project_templates (HTTP 400, code 070101): page_size: PageSize must be between 1 and 200."
+    )
+
+
+def test_list_project_templates_says_they_are_for_reference_because_create_project_cannot_apply_one(spec_index):
+    # CreateProjectCommand has no template field, so the claim in the tool text is the spec's truth.
+    create_fields = set(spec_index.ops[CREATE_PROJECT].body["fields"])
+    assert not {name for name in create_fields if "emplate" in name}
+    doc = " ".join(specs()["list_project_templates"].fn.__doc__.split())
+    assert "For reference only: create_project cannot apply a template" in doc
+    assert "newest first" in doc and "Side effects: None (read-only)." in doc
+
+
+@needs_spec_text
+def test_list_project_templates_row_fields_are_the_ones_of_the_schema():
+    schema = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["components"]["schemas"]["ProjectTemplateListItemModel"]
+    doc = specs()["list_project_templates"].fn.__doc__
+    for field in schema["properties"]:
+        assert field in doc, field
+    assert "A deleted template is left out" in spec_text("get", "/v1/projects/templates")
+
+
+# --------------------------------------------------------------------------
+# update_project_comment (1.5.0)
+# --------------------------------------------------------------------------
+
+COMMENT_PATH = f"/v1/projects/{PROJECT}/comments/{COMMENT}"
+PLAN = {"Name": "plan.pdf", "Url": "https://files.example.test/c/plan.pdf?token=old1"}
+SHEET = {"Name": "sheet.xlsx", "Url": "https://files.example.test/c/sheet.xlsx?token=old2"}
+NEW_FILE = {"name": "photo.png", "url": "https://files.example.test/u/photo.png"}
+
+
+def route_edit(mock, before=None, after=None, patch=None):
+    """GET before, PATCH, GET after (the read before is sent only when the files change)."""
+    mock.on("PATCH", COMMENT_PATH, patch if patch is not None else envelope({"Id": COMMENT}))
+    mock.on(
+        "GET", COMMENT_PATH,
+        in_order(
+            envelope(before if before is not None else comment_record()),
+            envelope(after if after is not None else comment_record(BodyHtml="<p>Edited</p>")),
+        ),
+    )
+
+
+async def test_update_project_comment_body_only_sends_the_patch_and_reads_back_without_a_read_first(server, mock_gorelo):
+    after = comment_record(BodyHtml="<p>Edited</p>", UpdatedOn="2026-10-30T10:00:00Z")
+    mock_gorelo.on("PATCH", COMMENT_PATH, envelope({"Id": COMMENT}))
+    mock_gorelo.on("GET", COMMENT_PATH, envelope(after))
+    result = await call_tool(
+        server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, "body": "<p>Edited</p>"}
+    )
+    assert result == after
+    assert sent(mock_gorelo) == [("PATCH", COMMENT_PATH), ("GET", COMMENT_PATH)]
+    assert mock_gorelo.requests[0].json == {"Body": "<p>Edited</p>"}
+    assert mock_gorelo.requests[0].query == {} and mock_gorelo.requests[1].query == {}
+
+
+async def test_update_project_comment_sends_the_editor_name_as_updated_by_name(server, mock_gorelo):
+    mock_gorelo.on("PATCH", COMMENT_PATH, envelope({"Id": COMMENT}))
+    mock_gorelo.on("GET", COMMENT_PATH, envelope(comment_record()))
+    await call_tool(
+        server, "update_project_comment",
+        {"project_id": PROJECT, "comment_id": COMMENT, "body": "<p>x</p>", "updated_by_name": "Import job"},
+    )
+    assert mock_gorelo.requests[0].json == {"Body": "<p>x</p>", "UpdatedByName": "Import job"}
+
+
+async def test_update_project_comment_keeps_a_current_file_and_adds_a_new_one_reading_first(server, mock_gorelo):
+    before = comment_record(Attachments=[PLAN])
+    after = comment_record(Attachments=[PLAN, {"Name": "photo.png", "Url": "https://files.example.test/u/photo.png?t=1"}])
+    route_edit(mock_gorelo, before=before, after=after)
+    # the caller passes the current file with an OLD token: it still counts as the same file, and the url of the READ is sent
+    stale = {"name": "plan.pdf", "url": "https://files.example.test/c/plan.pdf?token=stale"}
+    result = await call_tool(
+        server, "update_project_comment",
+        {"project_id": PROJECT, "comment_id": COMMENT, "attachments": [stale, NEW_FILE]},
+    )
+    assert result == after
+    assert sent(mock_gorelo) == [("GET", COMMENT_PATH), ("PATCH", COMMENT_PATH), ("GET", COMMENT_PATH)]
+    assert mock_gorelo.requests[1].json == {
+        "Attachments": [PLAN, {"Name": "photo.png", "Url": "https://files.example.test/u/photo.png"}]
+    }
+
+
+async def test_update_project_comment_refuses_to_drop_a_current_file_silently_and_sends_no_patch(server, mock_gorelo):
+    mock_gorelo.on("GET", COMMENT_PATH, envelope(comment_record(Attachments=[PLAN, SHEET])))
+    text = await call_tool_error(
+        server, "update_project_comment",
+        {"project_id": PROJECT, "comment_id": COMMENT, "attachments": [{"name": "plan.pdf", "url": PLAN["Url"]}]},
+    )
+    assert "attachments: Gorelo replaces the whole attachment list, so the current attachment(s) 'sheet.xlsx' would be removed" in text
+    assert "remove_attachment_names" in text and "Nothing was changed." in text
+    assert sent(mock_gorelo) == [("GET", COMMENT_PATH)]
+
+
+def test_the_refusal_to_drop_a_file_names_it_for_the_model_but_keeps_the_file_names_out_of_the_log_summary():
+    current = [{"Name": "plan.pdf", "Url": PLAN["Url"]}, {"Name": "sheet.xlsx", "Url": SHEET["Url"]}]
+    with pytest.raises(module.CommentAttachmentsWouldBeDropped) as caught:
+        module._final_attachments(COMMENT, current, [("plan.pdf", PLAN["Url"])], None)
+    error = caught.value
+    assert isinstance(error, ValueError) and "'sheet.xlsx'" in str(error)
+    assert "sheet.xlsx" not in error.log_summary and "plan.pdf" not in error.log_summary
+    assert COMMENT in error.log_summary and "update_project_comment" in error.log_summary
+    copy = pickle.loads(pickle.dumps(error))  # the summary survives a copy and a pickle
+    assert str(copy) == str(error) and copy.log_summary == error.log_summary
+
+
+async def test_update_project_comment_remove_attachment_names_removes_only_the_named_file(server, mock_gorelo):
+    route_edit(mock_gorelo, before=comment_record(Attachments=[PLAN, SHEET]), after=comment_record(Attachments=[SHEET]))
+    result = await call_tool(
+        server, "update_project_comment",
+        {"project_id": PROJECT, "comment_id": COMMENT, "remove_attachment_names": ["plan.pdf"]},
+    )
+    assert mock_gorelo.requests[1].json == {"Attachments": [SHEET]}
+    assert result["Attachments"] == [SHEET]
+
+
+async def test_update_project_comment_naming_every_current_file_removes_them_all_with_an_empty_array(server, mock_gorelo):
+    route_edit(mock_gorelo, before=comment_record(Attachments=[PLAN, SHEET]), after=comment_record(Attachments=[]))
+    await call_tool(
+        server, "update_project_comment",
+        {"project_id": PROJECT, "comment_id": COMMENT, "remove_attachment_names": ["plan.pdf", "sheet.xlsx"]},
+    )
+    assert mock_gorelo.requests[1].json == {"Attachments": []}
+
+
+async def test_update_project_comment_body_and_a_removal_go_in_one_patch(server, mock_gorelo):
+    route_edit(mock_gorelo, before=comment_record(Attachments=[PLAN, SHEET]), after=comment_record(Attachments=[PLAN]))
+    await call_tool(
+        server, "update_project_comment",
+        {"project_id": PROJECT, "comment_id": COMMENT, "body": "<p>New</p>", "remove_attachment_names": ["sheet.xlsx"]},
+    )
+    assert mock_gorelo.requests[1].json == {"Body": "<p>New</p>", "Attachments": [PLAN]}
+
+
+async def test_update_project_comment_attachments_with_a_removal_of_a_file_it_does_not_keep(server, mock_gorelo):
+    route_edit(mock_gorelo, before=comment_record(Attachments=[PLAN, SHEET]), after=comment_record(Attachments=[{"Name": "photo.png", "Url": "u"}, PLAN]))
+    await call_tool(
+        server, "update_project_comment",
+        {"project_id": PROJECT, "comment_id": COMMENT, "attachments": [{"name": "plan.pdf", "url": PLAN["Url"]}, NEW_FILE],
+         "remove_attachment_names": ["sheet.xlsx"]},
+    )
+    assert mock_gorelo.requests[1].json["Attachments"] == [PLAN, {"Name": "photo.png", "Url": NEW_FILE["url"]}]
+
+
+async def test_update_project_comment_a_name_that_is_also_kept_is_refused(server, mock_gorelo):
+    mock_gorelo.on("GET", COMMENT_PATH, envelope(comment_record(Attachments=[PLAN])))
+    text = await call_tool_error(
+        server, "update_project_comment",
+        {"project_id": PROJECT, "comment_id": COMMENT, "attachments": [{"name": "plan.pdf", "url": PLAN["Url"]}],
+         "remove_attachment_names": ["plan.pdf"]},
+    )
+    assert "remove_attachment_names[0]: every current attachment with that name is also kept in attachments" in text
+    assert sent(mock_gorelo) == [("GET", COMMENT_PATH)]
+
+
+async def test_update_project_comment_an_unknown_name_to_remove_is_refused_before_any_write(server, mock_gorelo):
+    mock_gorelo.on("GET", COMMENT_PATH, envelope(comment_record(Attachments=[PLAN])))
+    text = await call_tool_error(
+        server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, "remove_attachment_names": ["nope.pdf"]}
+    )
+    assert "remove_attachment_names[0]: the comment has no current attachment with that name" in text
+    assert sent(mock_gorelo) == [("GET", COMMENT_PATH)]
+
+
+async def test_update_project_comment_a_name_shared_by_two_files_does_not_say_which_to_remove(server, mock_gorelo):
+    twin = {"Name": "plan.pdf", "Url": "https://files.example.test/c/other-plan.pdf?token=t"}
+    mock_gorelo.on("GET", COMMENT_PATH, envelope(comment_record(Attachments=[PLAN, twin])))
+    text = await call_tool_error(
+        server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, "remove_attachment_names": ["plan.pdf"]}
+    )
+    assert "remove_attachment_names[0]: 2 current attachments have that name, so it does not say which one to remove" in text
+    assert sent(mock_gorelo) == [("GET", COMMENT_PATH)]
+
+
+async def test_update_project_comment_a_list_that_is_already_the_current_one_changes_nothing(server, mock_gorelo):
+    mock_gorelo.on("GET", COMMENT_PATH, envelope(comment_record(Attachments=[PLAN])))
+    text = await call_tool_error(
+        server, "update_project_comment",
+        {"project_id": PROJECT, "comment_id": COMMENT, "attachments": [{"name": "plan.pdf", "url": PLAN["Url"] + "x"}]},
+    )
+    assert "nothing to change: the comment already has exactly that attachment list" in text
+    assert sent(mock_gorelo) == [("GET", COMMENT_PATH)]
+
+
+async def test_update_project_comment_an_unchanged_file_list_still_sends_the_body(server, mock_gorelo):
+    route_edit(mock_gorelo, before=comment_record(Attachments=[PLAN]), after=comment_record(Attachments=[PLAN]))
+    await call_tool(
+        server, "update_project_comment",
+        {"project_id": PROJECT, "comment_id": COMMENT, "body": "<p>B</p>", "attachments": [{"name": "plan.pdf", "url": PLAN["Url"]}]},
+    )
+    assert mock_gorelo.requests[1].json == {"Body": "<p>B</p>"}  # the files are already that list: Attachments is not sent
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [None, "x", [None], [{"Name": "a"}], [{"Name": "", "Url": "https://x.test/a"}], [{"Name": "a", "Url": 5}]],
+)
+async def test_update_project_comment_an_unreadable_attachment_list_stops_before_any_write(server, mock_gorelo, rows):
+    mock_gorelo.on("GET", COMMENT_PATH, envelope(comment_record(Attachments=rows)))
+    text = await call_tool_error(
+        server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, "remove_attachment_names": ["a"]}
+    )
+    assert "refusing to guess, so nothing was changed" in text
+    assert sent(mock_gorelo) == [("GET", COMMENT_PATH)]
+
+
+async def test_update_project_comment_the_same_file_listed_twice_on_the_comment_cannot_be_kept_selectively(server, mock_gorelo):
+    mock_gorelo.on("GET", COMMENT_PATH, envelope(comment_record(Attachments=[PLAN, dict(PLAN)])))
+    text = await call_tool_error(
+        server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, "attachments": [NEW_FILE]}
+    )
+    assert "the comment lists the same file twice" in text
+    assert sent(mock_gorelo) == [("GET", COMMENT_PATH)]
+
+
+async def test_update_project_comment_a_read_back_that_does_not_show_the_files_is_an_unconfirmed_write(server, mock_gorelo):
+    route_edit(mock_gorelo, before=comment_record(Attachments=[PLAN, SHEET]), after=comment_record(Attachments=[PLAN, SHEET]))
+    text = await call_tool_error(
+        server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, "remove_attachment_names": ["plan.pdf"]}
+    )
+    assert "does not show the files that were asked for" in text and VERIFY in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH", "GET"]
+
+
+async def test_update_project_comment_a_failed_read_back_returns_the_warning_and_never_repeats_the_write(server, mock_gorelo):
+    mock_gorelo.on("PATCH", COMMENT_PATH, envelope({"Id": COMMENT}))
+    mock_gorelo.on("GET", COMMENT_PATH, error_envelope(404, [("070401", "Comment was not found.")]))
+    result = await call_tool(
+        server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, "body": "<p>x</p>"}
+    )
+    assert set(result) == {"Id", "warning"} and result["Id"] == COMMENT
+    assert result["warning"].endswith("Do not repeat the write; read it again later.")
+    assert [r.method for r in mock_gorelo.requests] == ["PATCH", "GET"]
+
+
+@pytest.mark.parametrize("data", [None, {}, False, [COMMENT], "ok"])
+async def test_update_project_comment_an_answer_that_is_not_an_object_is_an_unconfirmed_write(server, mock_gorelo, data):
+    mock_gorelo.on("PATCH", COMMENT_PATH, envelope(data))
+    text = await call_tool_error(
+        server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, "body": "<p>x</p>"}
+    )
+    assert VERIFY in text
+    assert [r.method for r in mock_gorelo.requests] == ["PATCH"]  # no read-back of an answer that cannot be used
+
+
+async def test_update_project_comment_a_public_comment_is_refused_by_gorelo_with_its_own_words(server, mock_gorelo):
+    mock_gorelo.on(
+        "PATCH", COMMENT_PATH,
+        error_envelope(409, [("070409", "Only a private comment can be edited.", None)]),
+    )
+    text = await call_tool_error(
+        server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, "body": "<p>x</p>"}
+    )
+    assert text.startswith("Gorelo rejected update_project_comment (HTTP 409, code 070409): Only a private comment can be edited.")
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_update_project_comment_maps_gorelo_errors_to_the_param(server, mock_gorelo):
+    mock_gorelo.on(
+        "PATCH", COMMENT_PATH,
+        error_envelope(
+            400,
+            [
+                ("070101", "Body cannot be blank.", "Body"),
+                ("070101", "The url is not valid.", "Attachments[0].Url"),
+                ("070101", "Name is too long.", "UpdatedByName"),
+            ],
+        ),
+    )
+    text = await call_tool_error(
+        server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, "body": "<p>x</p>"}
+    )
+    assert text == trace_text(
+        "Gorelo rejected update_project_comment (HTTP 400, code 070101): body: Body cannot be blank.; "
+        "attachments (item 1, Url): The url is not valid.; updated_by_name: Name is too long."
+    )
+
+
+async def test_update_project_comment_a_timeout_is_an_unconfirmed_write_and_is_not_retried(server, mock_gorelo):
+    mock_gorelo.on("PATCH", COMMENT_PATH, httpx.ReadTimeout("slow"))
+    text = await call_tool_error(
+        server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, "body": "<p>x</p>"}
+    )
+    assert text.startswith("Gorelo did not confirm update_project_comment (")
+    assert "Verify with a read before retrying." in text
+    assert len(mock_gorelo.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "arguments, fragment",
+    [
+        ({}, "nothing to change: give at least one of body, attachments or remove_attachment_names"),
+        ({"updated_by_name": "Import job"}, "updated_by_name only names the editor of another change"),
+        ({"body": ""}, "body: must not be empty or whitespace only (a comment body cannot be cleared)"),
+        ({"body": "   "}, "body: must not be empty or whitespace only"),
+        ({"body": "<p>x</p>", "updated_by_name": " "}, "updated_by_name: must not be empty or whitespace only"),
+        ({"attachments": []}, "attachments: an empty list is not accepted because the list replaces the stored one"),
+        ({"attachments": [{"name": " ", "url": "https://x.test/a"}]}, "attachments[0].name: must not be empty or whitespace only"),
+        ({"attachments": [{"name": "a", "url": "ftp://x.test/a"}]}, "attachments[0].url: expected the http or https url that upload_attachment returned"),
+        ({"attachments": [{"name": "a", "url": "not a url"}]}, "attachments[0].url: expected the http or https url"),
+        (
+            {"attachments": [{"name": "a", "url": "https://x.test/a?t=1"}, {"name": "a", "url": "https://x.test/a?t=2"}]},
+            "attachments[1]: repeats attachments[0] (same name and same file)",
+        ),
+        ({"remove_attachment_names": []}, "remove_attachment_names: the list must contain at least one name"),
+        ({"remove_attachment_names": ["ok", " "]}, "remove_attachment_names[1]: must not be empty or whitespace only"),
+    ],
+)
+async def test_update_project_comment_local_validation_errors_send_nothing(server, mock_gorelo, arguments, fragment):
+    text = await call_tool_error(server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, **arguments})
+    assert fragment in text
+    assert mock_gorelo.requests == []
+
+
+async def test_update_project_comment_more_than_100_files_are_refused_before_the_write(server, mock_gorelo):
+    files = [{"name": f"f{i}.txt", "url": f"https://x.test/f{i}"} for i in range(101)]
+    mock_gorelo.on("GET", COMMENT_PATH, envelope(comment_record()))
+    text = await call_tool_error(server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, "attachments": files})
+    assert "a comment holds at most 100 files, this would leave 101" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_update_project_comment_has_no_task_id_and_no_clear_option(server, mock_gorelo):
+    for arguments in ({"task_id": TASK}, {"clear_fields": ["attachments"]}, {"conversation_type": "public"}):
+        text = await call_tool_error(
+            server, "update_project_comment", {"project_id": PROJECT, "comment_id": COMMENT, "body": "<p>x</p>", **arguments}
+        )
+        assert "Unexpected keyword argument" in text
+    assert mock_gorelo.requests == []
+
+
+def test_update_project_comment_field_map_is_exactly_the_body_of_the_spec(spec_index):
+    fields = set(spec_index.ops["PATCH /v1/projects/{projectId}/comments/{commentId}"].body["fields"])
+    assert fields == {"Body", "Attachments", "UpdatedByName"}
+    assert set(specs()["update_project_comment"].field_map.values()) == fields
+
+
+@needs_spec_text
+def test_update_project_comment_texts_match_the_spec():
+    text = spec_text("patch", "/v1/projects/{projectId}/comments/{commentId}")
+    assert "Only a private comment can be edited" in text and "`ResourceUpdateBlocked` (409)" in text
+    assert "`Attachments` replaces its files outright" in text
+    assert "Nobody is notified of it" in text
+    doc = " ".join(specs()["update_project_comment"].fn.__doc__.split())
+    for fragment in (
+        "PRIVATE comment", "HTTP 409, ResourceUpdateBlocked", "UpdatedOn", "replaced as a whole", "remove_attachment_names",
+        "nobody is notified", "update_task_comment", "the edit WAS applied, do not repeat it",
+    ):
+        assert fragment in doc, fragment
+    fields = schema_fields("UpdateProjectCommentCommand")
+    assert "Max 100" in fields["Attachments"] and "Cannot be cleared: a blank body is a 400" in fields["Body"]

@@ -1,21 +1,50 @@
-"""Invoices: list, read, create (Draft or Approved), PDF export, delete or void (toolset "billing").
+"""Invoices: list, read, create (Draft or Approved), update, approve, PDF export, delete or void, payments (read only)
+(toolset "billing").
 
 Tools:
 
     list_invoices            read         GET /v1/invoices
     get_invoice              read         GET /v1/invoices/{invoiceId}
-    create_invoice           write        POST /v1/invoices, GET /v1/invoices/{invoiceId}
-    create_approved_invoice  destructive  POST /v1/invoices, GET /v1/invoices/{invoiceId}
+    create_invoice           write        POST /v1/invoices, GET /v1/invoices/{invoiceId}, GET /v1/taxes (no_tax only)
+    create_approved_invoice  destructive  POST /v1/invoices, GET /v1/invoices/{invoiceId}, GET /v1/taxes (no_tax only)
+    update_invoice           write        GET, PATCH /v1/invoices/{invoiceId}, GET /v1/taxes (no_tax only); never sends StatusId
+    approve_invoice          destructive  GET, PATCH /v1/invoices/{invoiceId}; sends StatusId 5 and nothing else
     export_invoice_pdf       write        GET /v1/invoices/{invoiceId}/pdf
     delete_invoice           destructive  GET /v1/invoices, DELETE /v1/invoices/{invoiceId}
+    list_payments            read         GET /v1/payments
+    get_payment              read         GET /v1/payments/{paymentId}
 
 Ops owned by this module:
 
     GET /v1/invoices
     GET /v1/invoices/{invoiceId}
     POST /v1/invoices
+    PATCH /v1/invoices/{invoiceId}
     GET /v1/invoices/{invoiceId}/pdf
     DELETE /v1/invoices/{invoiceId}
+    GET /v1/payments
+    GET /v1/payments/{paymentId}
+
+Release 1.5.0 (contract 6c30770dffc0). update_invoice and approve_invoice share one read-and-check
+(_invoice_open_for_change): they read the invoice and refuse unless it is Draft or Submitted (the spec also lets
+Gorelo change an Approved invoice, which this release does not offer). The PATCH of update_invoice is built from
+UPDATE_FIELDS, which has no StatusId, so it cannot approve anything; approve_invoice sends {"StatusId": 5} and nothing
+else. LineItems of the PATCH replaces the set, so update_invoice builds the full list from its read: every current line
+is kept as {Id} unless update_lines changes it or remove_line_ids names it, new lines (add_lines) are appended, and a
+line can never be dropped silently. no_tax: TaxId null is NOT "no tax" (measured live 2026-10-30: a create line of an item taxed
+9.25 percent sent with TaxId null got that tax), so no_tax is resolved ONCE per tool call, before any write, to the id of the
+account's Tax Exempt rate (_resolve_no_tax: GET /v1/taxes, the ONE rate whose Percentage is exactly 0, has no non-zero SubTaxes
+and whose Code or Name, trimmed and case-insensitive, is "tax exempt"). None or several: the call is refused locally and names
+the 0 percent candidates. The id goes out as TaxId on every no_tax line of create, update_lines and add_lines, so it is as safe
+as tax_id, which is why create_approved_invoice accepts no_tax again. The result gets a `note` naming the tax id used. A line that
+still shows a tax amount in the read-back adds a `warning` (a loud one on the approved tool, whose invoice is already pushed).
+Payments are read only (POST and DELETE stay excluded).
+
+update_invoice checks its read-back against the read it made first: every kept line keeps its Quantity, UnitPrice,
+DiscountPercent, tax id, billable status id and Description, every field of update_lines and add_lines shows its value (money
+within a small rounding tolerance), and the set of line Ids is the kept ones plus the new ones. Each difference is listed
+(field, expected, read) in the write-unconfirmed error; text values are not quoted. A cleared template id is not checked
+(Gorelo says the default applies). A read-back whose Status is not Draft or Submitted adds a `note`.
 
 POST /v1/invoices (contract e15cb5a18ec2) raises a manual invoice and answers only {Id}. Both create tools build
 the same validated request (_invoice_request) and read the new invoice back with GET /v1/invoices/{invoiceId}
@@ -79,6 +108,7 @@ from tools._common import (
     expect_object,
     gorelo_tool,
     guid,
+    guids,
     non_empty,
     paged_result,
     positive_id,
@@ -93,6 +123,10 @@ GET_OP = "GET /v1/invoices/{invoiceId}"
 CREATE_OP = "POST /v1/invoices"
 PDF_OP = "GET /v1/invoices/{invoiceId}/pdf"
 DELETE_OP = "DELETE /v1/invoices/{invoiceId}"
+UPDATE_OP = "PATCH /v1/invoices/{invoiceId}"
+TAXES_OP = "GET /v1/taxes"
+PAYMENTS_OP = "GET /v1/payments"
+PAYMENT_OP = "GET /v1/payments/{paymentId}"
 
 PDF_MAX_BYTES = 5 * 1024 * 1024
 
@@ -190,7 +224,86 @@ LINE_ITEMS_TEXT = (
     "discount defaults to 0 and billable status to Billable."
 )
 
-# {line param: CreateInvoiceLineItem field}. no_tax has no field of its own: it sends TaxId as an explicit null.
+# What no_tax says, on a create line and on an update line. TaxId null means "the app's tax" (measured live 2026-10-30), so no_tax
+# sends the id of the account's Tax Exempt rate, looked up in list_taxes (see _resolve_no_tax).
+NO_TAX_TEXT = (
+    "true: bill the line with the account's Tax Exempt rate (code or name 'Tax Exempt', 0%), looked up in list_taxes; "
+    "refused when there is not exactly one. Not with tax_id."
+)
+# The name or code (trimmed, case-insensitive) that marks the tax-exempt rate.
+EXEMPT_NAME = "tax exempt"
+# The id the pure validators put on a no_tax line while the lookup has not happened yet (they run first, so a bad parameter
+# costs no request; the request is built again with the real id).
+_UNRESOLVED_TAX_ID = 1
+_CANDIDATES_SHOWN = 10
+
+
+def _is_zero(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+
+
+def _is_exempt_rate(row: Mapping[str, Any]) -> bool:
+    """True when the rate is exactly 0 percent with no non-zero component and is named "Tax Exempt" by Code or Name."""
+    if not _is_zero(row.get("Percentage")):
+        return False
+    subs = row.get("SubTaxes")
+    if subs is not None:
+        if not isinstance(subs, list):
+            return False
+        for sub in subs:
+            percent = sub.get("Percentage") if isinstance(sub, Mapping) else "?"
+            if percent is not None and not _is_zero(percent):
+                return False
+    return any(
+        isinstance(row.get(key), str) and row[key].strip().casefold() == EXEMPT_NAME for key in ("Code", "Name")
+    )
+
+
+def _tax_id_of(row: Mapping[str, Any]) -> int | None:
+    value = row.get("Id")
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= MAX_ID else None
+
+
+def _candidate_text(rows: list[Mapping[str, Any]]) -> str:
+    """The 0 percent rates as 'Id 12 (Code "Tax Exempt")', Id and Code only, at most _CANDIDATES_SHOWN of them."""
+    shown = []
+    for row in rows[:_CANDIDATES_SHOWN]:
+        code = row.get("Code")
+        code_text = f'Code "{code.strip()[:40]}"' if isinstance(code, str) and code.strip() else "no Code"
+        shown.append(f"Id {row.get('Id')} ({code_text})")
+    more = f" and {len(rows) - _CANDIDATES_SHOWN} more" if len(rows) > _CANDIDATES_SHOWN else ""
+    return ", ".join(shown) + more if shown else "none"
+
+
+async def _resolve_no_tax(ctx: Context, tool: str, where: str) -> int:
+    """The id of the account's Tax Exempt rate, for the no_tax lines of one tool call (ONE GET /v1/taxes). `where` names the
+    first no_tax line ("line_items[0]"). A refusal (ValueError) says to pass tax_id instead; a failed lookup is the normal
+    Gorelo error. Either way nothing has been written: this runs before the write."""
+    rows = await client_of(ctx).get_list(TAXES_OP, tool=tool)
+    rates = [row for row in rows if isinstance(row, Mapping)]
+    found = [row for row in rates if _is_exempt_rate(row) and _tax_id_of(row) is not None]
+    if len(found) == 1:
+        return _tax_id_of(found[0])  # type: ignore[return-value]
+    zero = [row for row in rates if _is_zero(row.get("Percentage"))]
+    why = "the account has no Tax Exempt rate" if not found else f"the account has {len(found)} Tax Exempt rates"
+    raise ValueError(
+        f"{where}.no_tax: {why} (a 0% rate whose Code or Name is 'Tax Exempt'), so no_tax cannot pick one; pass tax_id of "
+        f"the tax-exempt rate from list_taxes instead. 0% rates: {_candidate_text(zero)}. Nothing has been sent to Gorelo."
+    )
+
+
+def _with_note(record: Mapping[str, Any], note: str | None) -> dict[str, Any]:
+    """The record with `note` added (after the one it has, if any)."""
+    if note is None:
+        return dict(record)
+    return {**record, "note": f"{record['note']} {note}" if record.get("note") else note}
+
+
+def _no_tax_note(tax_id: int | None) -> str | None:
+    return None if tax_id is None else f"no_tax used tax id {tax_id} (the account's Tax Exempt rate, 0%, from list_taxes)."
+
+
+# {line param: CreateInvoiceLineItem field}. no_tax has no field of its own: it sends the Tax Exempt rate's id as TaxId.
 LINE_FIELDS = {
     "item_id": "ItemId",
     "quantity": "Quantity",
@@ -221,7 +334,7 @@ class InvoiceLine(BaseModel):
     unit_cost: Annotated[float | None, Strict(), Field(description="Default: the item's cost.")] = None
     discount_percent: Annotated[float | None, Strict(), Field(ge=0, le=100, description="0-100. Default 0.")] = None
     tax_id: Annotated[StrictId | None, Field(description="From list_taxes. Default: the item's tax.")] = None
-    no_tax: Annotated[StrictBool, Field(description="true: no tax, whatever the item says. Not with tax_id.")] = False
+    no_tax: Annotated[StrictBool, Field(description=NO_TAX_TEXT)] = False
     coa_code: Annotated[str | None, Field(description="Chart of accounts code. Default: the item's.")] = None
     billable_status_id: Annotated[
         StrictId | None, Field(description="1 Billable (default), 2 No charge, 3 Non-billable.")
@@ -403,18 +516,13 @@ def _line_text(where: str, value: Any) -> str:
     return value
 
 
-def _invoice_line(where: str, data: Mapping[str, Any]) -> dict[str, Any]:
-    """One entry of LineItems from one line_items entry. Every problem names `line_items[<n>].<field>`."""
-    unknown = sorted(str(key) for key in data if key not in LINE_PARAMS)
-    if unknown:
-        raise ValueError(f"{where}: unknown field(s) {', '.join(unknown)}; allowed: {', '.join(LINE_PARAMS)}")
-    missing = [key for key in ("item_id", "quantity") if data.get(key) is None]
-    if missing:
-        raise ValueError(f"{where}: missing {' and '.join(missing)}")
-    quantity = data["quantity"]
-    if not _is_number(quantity) or quantity <= 0:
-        raise ValueError(f"{where}.quantity: must be a number greater than 0")
-    line: dict[str, Any] = {"ItemId": guid(f"{where}.item_id", data["item_id"]), "Quantity": quantity}
+def _line_fields(where: str, data: Mapping[str, Any], no_tax_id: int | None) -> dict[str, Any]:
+    """The optional fields that a create line and an update line share, checked. Every problem names `<where>.<field>`.
+
+    A field that is not in data (or is None) is left out. `no_tax_id` is the id of the Tax Exempt rate that a no_tax line sends
+    as TaxId (resolved once per tool call; a pure caller passes _UNRESOLVED_TAX_ID).
+    """
+    line: dict[str, Any] = {}
     for key in ("description", "coa_code"):
         if data.get(key) is not None:
             line[LINE_FIELDS[key]] = _line_text(f"{where}.{key}", data[key])
@@ -433,12 +541,14 @@ def _invoice_line(where: str, data: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(f"{where}.no_tax: must be true or false, got {describe_value(no_tax)}")
     if tax_id is not None and no_tax:
         raise ValueError(
-            f"{where}: give tax_id or no_tax, not both (tax_id picks one tax, no_tax sends the line with no tax at all)"
+            f"{where}: give tax_id or no_tax, not both (tax_id picks one tax, no_tax picks the Tax Exempt rate)"
         )
     if tax_id is not None:
         line["TaxId"] = positive_id(f"{where}.tax_id", tax_id)
     elif no_tax:
-        line["TaxId"] = None  # an explicit null is how Gorelo is told "no tax", whatever the item's own tax is
+        if no_tax_id is None:
+            raise RuntimeError("no_tax_id missing: a no_tax line needs the resolved Tax Exempt rate id")
+        line["TaxId"] = no_tax_id
     status = data.get("billable_status_id")
     if status is not None:
         if isinstance(status, bool) or not isinstance(status, int) or status not in BILLABLE_STATUSES:
@@ -449,7 +559,23 @@ def _invoice_line(where: str, data: Mapping[str, Any]) -> dict[str, Any]:
     return line
 
 
-def _invoice_lines(param: str, value: Any) -> list[dict[str, Any]]:
+def _invoice_line(where: str, data: Mapping[str, Any], no_tax_id: int | None = None) -> dict[str, Any]:
+    """One entry of LineItems from one line_items entry. Every problem names `line_items[<n>].<field>`."""
+    unknown = sorted(str(key) for key in data if key not in LINE_PARAMS)
+    if unknown:
+        raise ValueError(f"{where}: unknown field(s) {', '.join(unknown)}; allowed: {', '.join(LINE_PARAMS)}")
+    missing = [key for key in ("item_id", "quantity") if data.get(key) is None]
+    if missing:
+        raise ValueError(f"{where}: missing {' and '.join(missing)}")
+    quantity = data["quantity"]
+    if not _is_number(quantity) or quantity <= 0:
+        raise ValueError(f"{where}.quantity: must be a number greater than 0")
+    line: dict[str, Any] = {"ItemId": guid(f"{where}.item_id", data["item_id"]), "Quantity": quantity}
+    line.update(_line_fields(where, data, no_tax_id))
+    return line
+
+
+def _invoice_lines(param: str, value: Any, no_tax_id: int | None = None) -> list[dict[str, Any]]:
     """The LineItems array of the request from the tool's line_items (objects or InvoiceLine models)."""
     if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, (list, tuple)):
         raise ValueError(
@@ -463,8 +589,19 @@ def _invoice_lines(param: str, value: Any) -> list[dict[str, Any]]:
         data = entry.model_dump() if isinstance(entry, BaseModel) else entry
         if not isinstance(data, Mapping):
             raise ValueError(f"{where}: must be an object with item_id and quantity, got {describe_value(entry)}")
-        lines.append(_invoice_line(where, data))
+        lines.append(_invoice_line(where, data, no_tax_id))
     return lines
+
+
+def _no_tax_positions(value: Any) -> list[int]:
+    """The positions (0 based) of the lines of a line list that ask for no_tax (objects or InvoiceLine models)."""
+    found: list[int] = []
+    if isinstance(value, (list, tuple)):
+        for position, entry in enumerate(value):
+            data = entry.model_dump() if isinstance(entry, BaseModel) else entry
+            if isinstance(data, Mapping) and data.get("no_tax") is True:
+                found.append(position)
+    return found
 
 
 def _invoice_dates(invoice_date: Any, due_date: Any) -> tuple[str | None, str | None]:
@@ -505,14 +642,16 @@ def _invoice_request(
     due_date: Any,
     reference: Any,
     recipient_emails: Any = None,
+    no_tax_id: int | None = None,
 ) -> dict[str, Any]:
     """The body of POST /v1/invoices WITHOUT its StatusId (each tool adds the one it is allowed to send).
 
     Pure: no HTTP. Raises ValueError naming the snake_case param, so a create tool can run it before it asks for
-    confirmation or sends anything.
+    confirmation or sends anything. `no_tax_id` is the Tax Exempt rate id for the no_tax lines: a tool first calls this with
+    None-or-placeholder to validate, then (when a line has no_tax) resolves the id and calls it again.
     """
     cid = positive_id("client_id", client_id)
-    lines = _invoice_lines("line_items", line_items)
+    lines = _invoice_lines("line_items", line_items, no_tax_id if no_tax_id is not None else _UNRESOLVED_TAX_ID)
     start, due = _invoice_dates(invoice_date, due_date)
     if reference is not None and not isinstance(reference, str):
         raise ValueError(f"reference: must be text, got {describe_value(reference)}")
@@ -529,15 +668,94 @@ def _invoice_request(
     )
 
 
-async def _post_and_read_back(ctx: Context, tool: str, body: dict[str, Any]) -> dict[str, Any]:
+def _aligned(sent: list[Mapping[str, Any]], rows: list[Mapping[str, Any]]) -> list[Mapping[str, Any] | None]:
+    """For each line that was sent (no Id), the line of the read that is most likely it: the first unused one with the same
+    ItemId, else the first unused one. None where the read has fewer lines. Order only matters among equal items."""
+    used: set[int] = set()
+    out: list[Mapping[str, Any] | None] = []
+    for line in sent:
+        pick = None
+        item = str(line.get("ItemId") or "").lower()
+        for index, row in enumerate(rows):
+            if index not in used and item and str(row.get("ItemId") or "").lower() == item:
+                pick = index
+                break
+        if pick is None:
+            pick = next((index for index in range(len(rows)) if index not in used), None)
+        if pick is None:
+            out.append(None)
+        else:
+            used.add(pick)
+            out.append(rows[pick])
+    return out
+
+
+def _tax_shown(row: Mapping[str, Any]) -> bool:
+    """True when the line shows a tax amount that is not 0 (a rounding error of a cent counts as 0)."""
+    amount = row.get("TaxAmount")
+    return isinstance(amount, (int, float)) and not isinstance(amount, bool) and abs(amount) >= 0.005
+
+
+def _no_tax_warning(taxed: list[str], tax_id: int | None = None, approved: bool = False) -> str | None:
+    """The warning for the no_tax lines that still show a tax amount, or None. `approved`: the invoice is already pushed."""
+    if not taxed:
+        return None
+    sent = f" although TaxId {tax_id} (the Tax Exempt rate) was sent" if tax_id is not None else ""
+    head = (
+        f"no_tax was asked for {', '.join(taxed)}, but the invoice still shows a tax amount on "
+        f"{'it' if len(taxed) == 1 else 'them'}{sent}."
+    )
+    if approved:
+        return (
+            f"WARNING: {head} This invoice is APPROVED and already pushed to the accounting system: tell the user at once, "
+            "check the amounts with get_invoice and list_taxes, and note that a void with delete_invoice voids it in Gorelo "
+            "ONLY (the user must void the copy in the accounting system too)."
+        )
+    return (
+        f"{head} The invoice is not approved, so fix it with update_invoice (update_lines with line_id and tax_id of your "
+        "tax-exempt rate, from list_taxes) before approving it."
+    )
+
+
+def _with_warning(record: Mapping[str, Any], warning: str | None) -> dict[str, Any]:
+    """The record with `warning` added (after the one it has, if any)."""
+    if warning is None:
+        return dict(record)
+    return {**record, "warning": f"{record['warning']} {warning}" if record.get("warning") else warning}
+
+
+async def _post_and_read_back(
+    ctx: Context,
+    tool: str,
+    body: dict[str, Any],
+    no_tax_lines: list[int] | None = None,
+    no_tax_id: int | None = None,
+    approved: bool = False,
+) -> dict[str, Any]:
     """POST the invoice, then read it back (POST answers only {Id}): the full invoice, or {Id, warning} if the read fails.
 
     Never retried: a POST that did not answer cleanly may already have created the invoice (the client reports it as
-    unconfirmed and the tool text says to check list_invoices before creating it again).
+    unconfirmed and the tool text says to check list_invoices before creating it again). `no_tax_lines` (positions of the
+    lines sent with no_tax) and `no_tax_id` (the Tax Exempt rate they carry) add a `note` naming the tax id, and a line that
+    still shows a tax amount in the read-back adds a `warning` naming it (`approved`: a loud one, the invoice is pushed).
     """
     written = await client_of(ctx).post(CREATE_OP, json_body=body, tool=tool)
     new_id = created_id(written, CREATE_OP, tool=tool)
-    return await reread_after_write(ctx, GET_OP, path_params={"invoiceId": new_id}, tool=tool, written_id=new_id)
+    record = await reread_after_write(ctx, GET_OP, path_params={"invoiceId": new_id}, tool=tool, written_id=new_id)
+    if not no_tax_lines:
+        return record
+    record = _with_note(record, _no_tax_note(no_tax_id))
+    shown = record.get("LineItems")
+    if not isinstance(shown, list):
+        return record
+    sent = body["LineItems"]
+    rows = _aligned(sent, [row for row in shown if isinstance(row, Mapping)])
+    taxed = [
+        f"line_items[{position}]" + (f" (Id {row.get('Id')})" if row.get("Id") else "")
+        for position in no_tax_lines
+        if (row := rows[position] if position < len(rows) else None) is not None and _tax_shown(row)
+    ]
+    return _with_warning(record, _no_tax_warning(taxed, no_tax_id, approved))
 
 
 # --------------------------------------------------------------------------
@@ -545,7 +763,7 @@ async def _post_and_read_back(ctx: Context, tool: str, body: dict[str, Any]) -> 
 # --------------------------------------------------------------------------
 
 
-@gorelo_tool(toolset="billing", kind="write", ops=[CREATE_OP, GET_OP], field_map=CREATE_FIELDS)
+@gorelo_tool(toolset="billing", kind="write", ops=[CREATE_OP, GET_OP, TAXES_OP], field_map=CREATE_FIELDS)
 async def create_invoice(
     ctx: Context,
     client_id: Annotated[StrictId, Field(description="Client to bill (list_clients).")],
@@ -560,20 +778,28 @@ async def create_invoice(
     A Draft is not pushed to accounting or sent to anyone, and nothing here makes it Approved: for that use
     create_approved_invoice, when enabled.
     Resolve ids first: client_id -> list_clients, item_id -> list_items, tax_id -> list_taxes. Unset price, cost, tax
-    and COA code fall back to the item's own values.
+    and COA code fall back to the item's own values. For no tax use no_tax (the account's Tax Exempt rate) or tax_id; a no_tax line that still shows tax gets a warning.
     Side effects: creates a real invoice that gets a number; to remove a mistaken Draft use delete_invoice, when
     deletes are enabled. If the result is {Id, warning} the draft exists: do not create it again (read it with
     get_invoice). After a "did not confirm" error check list_invoices for the client (newest first) before creating
     it again.
     """
-    request = _invoice_request(
-        client_id=client_id,
-        line_items=line_items,
-        invoice_date=invoice_date,
-        due_date=due_date,
-        reference=reference,
+    fields = dict(
+        client_id=client_id, line_items=line_items, invoice_date=invoice_date, due_date=due_date, reference=reference
     )
-    return await _post_and_read_back(ctx, "create_invoice", {**request, "StatusId": DRAFT_STATUS_ID})
+    request = _invoice_request(**fields)
+    no_tax_lines = _no_tax_positions(line_items)
+    no_tax_id = None
+    if no_tax_lines:  # resolved once, before the write
+        no_tax_id = await _resolve_no_tax(ctx, "create_invoice", f"line_items[{no_tax_lines[0]}]")
+        request = _invoice_request(**fields, no_tax_id=no_tax_id)
+    return await _post_and_read_back(
+        ctx,
+        "create_invoice",
+        {**request, "StatusId": DRAFT_STATUS_ID},
+        no_tax_lines=no_tax_lines,
+        no_tax_id=no_tax_id,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -581,7 +807,7 @@ async def create_invoice(
 # --------------------------------------------------------------------------
 
 
-@gorelo_tool(toolset="billing", kind="destructive", ops=[CREATE_OP, GET_OP], field_map=APPROVED_FIELDS)
+@gorelo_tool(toolset="billing", kind="destructive", ops=[CREATE_OP, GET_OP, TAXES_OP], field_map=APPROVED_FIELDS)
 async def create_approved_invoice(
     ctx: Context,
     client_id: Annotated[StrictId, Field(description="Client to bill (list_clients).")],
@@ -597,19 +823,19 @@ async def create_approved_invoice(
     ] = None,
     confirm: Annotated[StrictBool, Field(description="Must be true; only after the user approves.")] = False,
 ) -> dict:
-    """Create an APPROVED invoice for a client and return it. Ids, lines, dates and reference work exactly as in
-    create_invoice.
+    """Create an APPROVED invoice for a client and return it. Arguments work as in create_invoice (no_tax too; a no_tax
+    line that still shows tax gets a loud warning).
     Side effects: approving on create pushes the invoice to the connected accounting system at once. Nothing takes
     that back: delete_invoice, when deletes are enabled, voids it in Gorelo ONLY, so the copy in the accounting
     system stays open (observed with Xero): tell the user, who must void it there too. A total of exactly 0 is created
     as Paid instead: check Status in the result.
     Emails: recipient_emails, when given, are the addresses Gorelo sends the invoice to (it does not say whether
     creating the invoice already sends it): tell the user who.
-    If the result is {Id, warning} the invoice exists: do not create it again (read it with get_invoice). After a
-    "did not confirm" error check list_invoices for the client (newest first) first.
+    If the result is {Id, warning} the invoice exists: do not create it again (get_invoice). After a "did not confirm"
+    error check list_invoices first.
     Ask the user first; needs confirm=true.
     """
-    request = _invoice_request(
+    fields = dict(
         client_id=client_id,
         line_items=line_items,
         invoice_date=invoice_date,
@@ -617,6 +843,8 @@ async def create_approved_invoice(
         reference=reference,
         recipient_emails=recipient_emails,
     )
+    request = _invoice_request(**fields)
+    no_tax_lines = _no_tax_positions(line_items)
     lines = len(request["LineItems"])
     recipients = len(request.get("RecipientEmails", []))
     # the addresses are counted, never quoted: they are personal data and errors end up in the server log
@@ -635,7 +863,18 @@ async def create_approved_invoice(
             "Gorelo."
         ),
     )
-    return await _post_and_read_back(ctx, "create_approved_invoice", {**request, "StatusId": APPROVED_STATUS_ID})
+    no_tax_id = None
+    if no_tax_lines:  # after the confirmation (zero HTTP without it), once, before the write
+        no_tax_id = await _resolve_no_tax(ctx, "create_approved_invoice", f"line_items[{no_tax_lines[0]}]")
+        request = _invoice_request(**fields, no_tax_id=no_tax_id)
+    return await _post_and_read_back(
+        ctx,
+        "create_approved_invoice",
+        {**request, "StatusId": APPROVED_STATUS_ID},
+        no_tax_lines=no_tax_lines,
+        no_tax_id=no_tax_id,
+        approved=True,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -832,3 +1071,758 @@ async def delete_invoice(
     record = expect_object(data, DELETE_OP, tool="delete_invoice")
     # previous_status comes from the answer (via _delete_report), never from expected_status
     return {**record, "invoice_number": number, **_delete_report(record, number, expected_status)}
+
+
+# --------------------------------------------------------------------------
+# update_invoice and approve_invoice: the read they share
+# --------------------------------------------------------------------------
+
+# The statuses Gorelo's PATCH can change that this release offers: Draft and Submitted. (The spec also allows an
+# Approved invoice; editing one is not part of this release.)
+CHANGEABLE_STATUS_IDS = (1, 2)
+CHANGEABLE_TEXT = "Draft (1) and Submitted (2)"
+# StatusId of approving is APPROVED_STATUS_ID (5): the only value the PATCH accepts. approve_invoice is the only code that sends it.
+PAID_STATUS_ID = 3
+# LineItems of the PATCH: "send every line you want to keep (at most 100)".
+MAX_INVOICE_LINES = 100
+
+# {tool param: UpdateInvoiceCommand field} of update_invoice. StatusId is NOT here and no code path adds it: only
+# approve_invoice sends one.
+UPDATE_FIELDS = {
+    "invoice_id": "invoiceId",
+    "invoice_date": "InvoiceDate",
+    "due_date": "DueDate",
+    "reference": "Reference",
+    "invoice_template_id": "InvoiceTemplateId",
+    "invoice_email_template_id": "InvoiceEmailTemplateId",
+    "branding_theme_id": "BrandingThemeId",
+}
+# The line parameters are NOT in the map on purpose: update_lines, add_lines and remove_line_ids all become one LineItems
+# array (kept lines first, in invoice order, then the new ones), so a Gorelo error about LineItems[n] cannot be turned back
+# into one parameter and keeps Gorelo's own name.
+# What clear_fields of update_invoice may clear: the four fields the spec clears with null.
+UPDATE_CLEARABLE = ("reference", "invoice_template_id", "invoice_email_template_id", "branding_theme_id")
+InvoiceClearable = Literal["reference", "invoice_template_id", "invoice_email_template_id", "branding_theme_id"]
+HEADER_CLEAR_VALUES: dict[str, Any] = {name: None for name in UPDATE_CLEARABLE}
+# {line param: UpdateInvoiceLineItem field} of an existing line; ItemId is only for a new line.
+LINE_CHANGE_PARAMS = (
+    "line_id",
+    "quantity",
+    "description",
+    "unit_price",
+    "unit_cost",
+    "discount_percent",
+    "tax_id",
+    "no_tax",
+    "coa_code",
+    "billable_status_id",
+    "clear_fields",
+)
+LINE_CLEARABLE = ("description", "coa_code")
+LineClearable = Literal["description", "coa_code"]
+
+
+class InvoiceLineChange(BaseModel):
+    # A change to one line the invoice already has. Only the fields given change; the rest of the line is kept.
+    # No docstring on purpose (see InvoiceLine).
+
+    model_config = ConfigDict(extra="forbid")
+
+    line_id: Annotated[str, Field(description="Id of a line of this invoice (get_invoice LineItems[].Id).")]
+    quantity: Annotated[
+        float | None, Strict(), Field(gt=0, description="Above 0. Gorelo refuses it on a line billing a time entry.")
+    ] = None
+    description: Annotated[str | None, Field(description="New line text. To remove it use clear_fields.")] = None
+    unit_price: Annotated[float | None, Strict(), Field(description="New unit price.")] = None
+    unit_cost: Annotated[float | None, Strict(), Field(description="New unit cost.")] = None
+    discount_percent: Annotated[float | None, Strict(), Field(ge=0, le=100, description="0-100.")] = None
+    tax_id: Annotated[StrictId | None, Field(description="From list_taxes.")] = None
+    no_tax: Annotated[StrictBool, Field(description=NO_TAX_TEXT)] = False
+    coa_code: Annotated[str | None, Field(description="Chart of accounts code. To remove it use clear_fields.")] = None
+    billable_status_id: Annotated[StrictId | None, Field(description="1 Billable, 2 No charge, 3 Non-billable.")] = None
+    clear_fields: Annotated[
+        list[LineClearable] | None, Field(description="Line fields to remove: description, coa_code. Not with a value for the same field.")
+    ] = None
+
+
+def _unconfirmed_write(op_key: str, detail: str, check_with: str) -> GoreloAPIError:
+    """The write-unconfirmed shape error: Gorelo answered 2xx, but the answer does not show the effect of the write (the
+    shape of _delete_report's and of tools/documents.py's)."""
+    return GoreloAPIError(
+        f"{op_key}: {detail}; the write may have been applied, so verify it with a read before repeating it "
+        f"({check_with})",
+        status=200,
+        op_key=op_key,
+        kind="shape",
+        write_unconfirmed=True,
+    )
+
+
+def _read_shape_error(detail: str) -> GoreloAPIError:
+    """Gorelo's read of the invoice cannot be used: nothing was written."""
+    return GoreloAPIError(f"{GET_OP}: {detail}; nothing was changed", status=200, op_key=GET_OP, kind="shape")
+
+
+def _invoice_status_id(record: Mapping[str, Any]) -> int | None:
+    status = record.get("Status")
+    status_id = status.get("Id") if isinstance(status, Mapping) else None
+    return status_id if isinstance(status_id, int) and not isinstance(status_id, bool) else None
+
+
+def _invoice_name(record: Mapping[str, Any]) -> str:
+    shown = record.get("DisplayNumber") or record.get("Number")
+    return str(shown) if isinstance(shown, (str, int)) and not isinstance(shown, bool) else "this invoice"
+
+
+async def _invoice_open_for_change(ctx: Context, tool: str, invoice_guid: str, *, verb: str) -> dict[str, Any]:
+    """Read the invoice and refuse (ValueError naming invoice_id, nothing sent) unless it is Draft or Submitted."""
+    data = await client_of(ctx).get_one(GET_OP, path_params={"invoiceId": invoice_guid}, tool=tool)
+    record = expect_object(data, GET_OP, tool=tool)
+    status_id = _invoice_status_id(record)
+    if status_id is None:
+        raise _read_shape_error("the invoice has no readable Status.Id")
+    if status_id not in CHANGEABLE_STATUS_IDS:
+        label = INVOICE_STATUSES.get(status_id, "an unknown status")
+        already = " It is already Approved." if status_id == APPROVED_STATUS_ID else ""
+        raise ValueError(
+            f"invoice_id: {_invoice_name(record)} has status {label} (id {status_id}); {tool} {verb} only "
+            f"{CHANGEABLE_TEXT} invoices.{already} Nothing was changed."
+        )
+    return record
+
+
+def _final_record(answer: Mapping[str, Any], read_back: Mapping[str, Any]) -> dict[str, Any]:
+    """The invoice to return and check: the read-back, or the answer of the PATCH (also a full invoice) plus the warning
+    when the read-back failed."""
+    if "warning" in read_back:
+        return {**answer, "warning": read_back["warning"]}
+    return dict(read_back)
+
+
+# --------------------------------------------------------------------------
+# update_invoice
+# --------------------------------------------------------------------------
+
+
+def _current_lines(record: Mapping[str, Any]) -> list[str]:
+    """The line Ids of the read, canonical, in order. A read with no usable LineItems is a shape error (nothing sent)."""
+    lines = record.get("LineItems")
+    if not isinstance(lines, list):
+        raise _read_shape_error("the invoice has no LineItems list, so the lines cannot be kept safely")
+    found: list[str] = []
+    for position, row in enumerate(lines):
+        try:
+            found.append(guid("Id", row.get("Id") if isinstance(row, Mapping) else None))
+        except ValueError:
+            raise _read_shape_error(f"line {position + 1} of the invoice has no usable Id") from None
+    return found
+
+
+def _line_ids(param: str, values: Any) -> list[str] | None:
+    """Canonical line ids, none twice. [] is an error (omit the parameter)."""
+    if values is None:
+        return None
+    non_empty(param, values)
+    if isinstance(values, (str, bytes, Mapping)) or not isinstance(values, (list, tuple)):
+        raise ValueError(f"{param}: expected a list of line ids (GUIDs), got {describe_value(values)}")
+    found = [guid(f"{param}[{index}]", item) for index, item in enumerate(values)]
+    if len(set(found)) != len(found):
+        raise ValueError(f"{param}: the same line id is listed twice")
+    return found
+
+
+def _line_change(where: str, data: Mapping[str, Any], no_tax_id: int | None = None) -> tuple[str, dict[str, Any]]:
+    """(canonical line id, the fields to change) of one update_lines entry. Every problem names `<where>.<field>`."""
+    unknown = sorted(str(key) for key in data if key not in LINE_CHANGE_PARAMS)
+    if unknown:
+        raise ValueError(f"{where}: unknown field(s) {', '.join(unknown)}; allowed: {', '.join(LINE_CHANGE_PARAMS)}")
+    if data.get("line_id") is None:
+        raise ValueError(f"{where}: missing line_id (the Id of a line of the invoice; a new line goes in add_lines)")
+    line_id = guid(f"{where}.line_id", data["line_id"])
+    change: dict[str, Any] = {}
+    quantity = data.get("quantity")
+    if quantity is not None:
+        if not _is_number(quantity) or quantity <= 0:
+            raise ValueError(f"{where}.quantity: must be a number greater than 0")
+        change["Quantity"] = quantity
+    change.update(_line_fields(where, data, no_tax_id))
+    clears = data.get("clear_fields")
+    if clears is not None:
+        non_empty(f"{where}.clear_fields", clears)
+        if isinstance(clears, (str, bytes, Mapping)) or not isinstance(clears, (list, tuple)):
+            raise ValueError(f"{where}.clear_fields: expected a list of field names, got {describe_value(clears)}")
+        for name in dict.fromkeys(clears):
+            if name not in LINE_CLEARABLE:
+                raise ValueError(f"{where}.clear_fields: {describe_value(name)} cannot be cleared; allowed: {', '.join(LINE_CLEARABLE)}")
+            if LINE_FIELDS[name] in change:
+                raise ValueError(f"{where}.{name}: cannot be given a value and cleared in the same call")
+            change[LINE_FIELDS[name]] = None
+    if not change:
+        raise ValueError(f"{where}: give at least one field to change besides line_id")
+    return line_id, change
+
+
+LineRequest = tuple[dict[str, dict[str, Any]], list[dict[str, Any]], list[str]]
+
+
+def _line_request(
+    update_lines: Any, add_lines: Any, remove_line_ids: Any, no_tax_id: int | None = None
+) -> LineRequest | None:
+    """The three line parameters, checked without the invoice: ({line id: fields to change}, new lines, ids to remove), or
+    None when none was given. Pure: no HTTP, so a bad entry costs no request. `no_tax_id`: the Tax Exempt rate id a no_tax line sends
+    (the placeholder while the lookup has not happened)."""
+    if update_lines is None and add_lines is None and remove_line_ids is None:
+        return None
+    changes: dict[str, dict[str, Any]] = {}
+    if update_lines is not None:
+        non_empty("update_lines", update_lines)
+        if isinstance(update_lines, (str, bytes, Mapping)) or not isinstance(update_lines, (list, tuple)):
+            raise ValueError(f"update_lines: expected a list of line changes, got {describe_value(update_lines)}")
+        for position, entry in enumerate(update_lines):
+            where = f"update_lines[{position}]"
+            data = entry.model_dump() if isinstance(entry, BaseModel) else entry
+            if not isinstance(data, Mapping):
+                raise ValueError(f"{where}: must be an object with line_id and the fields to change, got {describe_value(entry)}")
+            line_id, change = _line_change(where, data, no_tax_id)
+            if line_id in changes:
+                raise ValueError(f"{where}.line_id: this line is already changed by an earlier entry of update_lines")
+            changes[line_id] = change
+    new_lines = _invoice_lines("add_lines", add_lines, no_tax_id) if add_lines is not None else []
+    removals = _line_ids("remove_line_ids", remove_line_ids) or []
+    return changes, new_lines, removals
+
+
+def _plan_lines(current: list[str], request: LineRequest | None) -> list[dict[str, Any]] | None:
+    """The complete LineItems of the PATCH, or None when no line parameter was given.
+
+    Every current line is kept as {Id} unless update_lines changes it (the same Id plus the fields to change) or
+    remove_line_ids names it; new lines (add_lines, no Id) are appended. A line is never dropped without being named, and
+    a line id that is not on the invoice is refused. Pure: no HTTP.
+    """
+    if request is None:
+        return None
+    changes, new_lines, removals = request
+    known = set(current)
+    for position, line_id in enumerate(changes):
+        if line_id not in known:
+            raise ValueError(
+                f"update_lines[{position}].line_id: {line_id} is not a line of this invoice; "
+                f"its lines are {', '.join(current[:10]) or 'none'}{' ...' if len(current) > 10 else ''} (get_invoice shows them)"
+            )
+    for position, line_id in enumerate(removals):
+        if line_id not in known:
+            raise ValueError(f"remove_line_ids[{position}]: {line_id} is not a line of this invoice (get_invoice shows its lines)")
+        if line_id in changes:
+            raise ValueError(f"remove_line_ids[{position}]: this line is also in update_lines; remove it or change it, not both")
+    final: list[dict[str, Any]] = []
+    for line_id in current:
+        if line_id in removals:
+            continue
+        final.append({"Id": line_id, **changes.get(line_id, {})})
+    final.extend(new_lines)
+    if not final:
+        raise ValueError(
+            "remove_line_ids: this would remove every line of the invoice and Gorelo refuses an empty list; "
+            "keep or add at least one line (to get rid of a Draft use delete_invoice, when deletes are enabled)"
+        )
+    if len(final) > MAX_INVOICE_LINES:
+        kept = len(final) - len(new_lines)
+        if new_lines:
+            raise ValueError(
+                f"add_lines: the invoice would have {len(final)} lines ({kept} kept plus {len(new_lines)} added) and "
+                f"Gorelo accepts at most {MAX_INVOICE_LINES}; add fewer lines or remove some with remove_line_ids"
+            )
+        raise ValueError(
+            f"remove_line_ids: the invoice would still have {len(final)} lines and Gorelo accepts at most "
+            f"{MAX_INVOICE_LINES}; remove at least {len(final) - MAX_INVOICE_LINES} more with remove_line_ids"
+        )
+    return final
+
+
+def _date_of(record: Mapping[str, Any], key: str) -> date | None:
+    value = record.get(key)
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _header_dates(record: Mapping[str, Any], invoice_date: Any, due_date: Any) -> tuple[str | None, str | None]:
+    """The checked dates, also against the one the invoice already holds when only one of the two is given."""
+    start, due = _invoice_dates(invoice_date, due_date)
+    if start is not None and due is None:
+        current_due = _date_of(record, "DueDate")
+        if current_due is not None and current_due < date.fromisoformat(start):
+            raise ValueError(
+                f"invoice_date: {start} is after the invoice's due date {current_due.isoformat()}; "
+                "give due_date too (it must be the invoice date or later)"
+            )
+    if due is not None and start is None:
+        current_start = _date_of(record, "InvoiceDate")
+        if current_start is not None and date.fromisoformat(due) < current_start:
+            raise ValueError(
+                f"due_date: {due} is before the invoice date {current_start.isoformat()}; "
+                "the due date must be the invoice date or later"
+            )
+    return start, due
+
+
+# Tolerances of the read-back: the invoice rounds prices and costs to the cent, quantities to four decimals and discounts to
+# two (a small margin, so a rounding never raises a false "not confirmed").
+_QUANTITY_TOLERANCE = 0.0001
+_MONEY_TOLERANCE = 0.005
+_PERCENT_TOLERANCE = 0.01
+# (field of InvoiceLineItemModel, tolerance): the numbers that update_invoice compares on a line.
+LINE_NUMBERS = (
+    ("Quantity", _QUANTITY_TOLERANCE),
+    ("UnitPrice", _MONEY_TOLERANCE),
+    ("UnitCost", _MONEY_TOLERANCE),
+    ("DiscountPercent", _PERCENT_TOLERANCE),
+)
+LINE_TEXTS = ("Description", "CoaCode")
+# (field of InvoiceLineItemModel that holds a code object, field of the update line that sends its id)
+LINE_CODES = (("Tax", "TaxId"), ("BillableStatus", "BillableStatusId"))
+
+
+def _is_plain_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _quoted(value: Any) -> str:
+    """A number or None as it is; anything else only by its type (never the value)."""
+    return "none" if value is None else str(value) if _is_plain_number(value) else describe_value(value)
+
+
+def _line_id_of(row: Any) -> str | None:
+    value = row.get("Id") if isinstance(row, Mapping) else None
+    return value.lower() if isinstance(value, str) and value else None
+
+
+def _expected_line(before: Mapping[str, Any] | None, change: Mapping[str, Any]) -> dict[str, Any]:
+    """What the read must show on one line: the values the first read had (a field it did not show is not compared),
+    overlaid with what the call sent (a no_tax line carries the Tax Exempt rate's id, which the read must show)."""
+    expected: dict[str, Any] = {}
+    if before is not None:
+        for key, _ in LINE_NUMBERS:
+            if key in before:
+                expected[key] = before[key]
+        for key in LINE_TEXTS:
+            if key in before:
+                expected[key] = before[key]
+        for model, _ in LINE_CODES:
+            if model in before:
+                code = before[model]
+                expected[model] = code.get("Id") if isinstance(code, Mapping) else None
+    for key, _ in LINE_NUMBERS:
+        if key in change:
+            expected[key] = change[key]
+    for key in LINE_TEXTS:
+        if key in change:
+            expected[key] = change[key]
+    for model, field in LINE_CODES:
+        if field in change:
+            if change[field] is None:
+                expected.pop(model, None)
+            else:
+                expected[model] = change[field]
+    return expected
+
+
+def _line_differences(label: str, expected: Mapping[str, Any], shown: Mapping[str, Any]) -> list[str]:
+    """Each field of `expected` that the line `shown` does not show: "<label>: <field> expected <x>, read <y>". Numbers and
+    ids are quoted; text is not (it is client data and errors reach the server log)."""
+    found: list[str] = []
+    for key, tolerance in LINE_NUMBERS:
+        if key not in expected:
+            continue
+        want, got = expected[key], shown.get(key)
+        if want is None or got is None:
+            same = want is None and got is None
+        else:
+            same = _is_plain_number(want) and _is_plain_number(got) and abs(got - want) <= tolerance
+        if not same:
+            found.append(f"{label}: {key} expected {_quoted(want)}, read {_quoted(got)}")
+    for key in LINE_TEXTS:
+        if key not in expected:
+            continue
+        want, got = expected[key], shown.get(key)
+        want_text = want.strip() if isinstance(want, str) else ""
+        got_text = got.strip() if isinstance(got, str) else ""
+        if want_text != got_text:
+            found.append(f"{label}: {key} is not the text it should be (text not shown)")
+    for model, _ in LINE_CODES:
+        if model not in expected:
+            continue
+        code = shown.get(model)
+        got = code.get("Id") if isinstance(code, Mapping) else None
+        if got != expected[model]:
+            found.append(f"{label}: {model} id expected {expected[model]}, read {got}")
+    return found
+
+
+def _line_set_problems(
+    shown_lines: list[Any], wire_lines: list[Mapping[str, Any]], before: Mapping[str, Any] | None
+) -> list[str]:
+    """The lines of the read-back against the LineItems that were sent and the lines the first read had."""
+    problems: list[str] = []
+    rows = [row for row in shown_lines if isinstance(row, Mapping)]
+    by_id = {line_id: row for row in rows if (line_id := _line_id_of(row))}
+    first = before.get("LineItems") if before is not None else None
+    before_rows = {
+        line_id: row for row in (first if isinstance(first, list) else []) if (line_id := _line_id_of(row))
+    }
+    sent_old = [line for line in wire_lines if _line_id_of(line)]
+    sent_new = [line for line in wire_lines if not _line_id_of(line)]
+    kept_ids = {_line_id_of(line) for line in sent_old}
+    for line_id in kept_ids:
+        if line_id not in by_id:
+            problems.append(f"line {line_id} should stay but the invoice does not show it")
+    for line_id in before_rows:
+        if line_id not in kept_ids and line_id in by_id:
+            problems.append(f"line {line_id} was removed but the invoice still shows it")
+    fresh = [row for row in rows if _line_id_of(row) not in kept_ids and _line_id_of(row) not in before_rows]
+    if len(fresh) != len(sent_new):
+        problems.append(f"the invoice shows {len(fresh)} new line(s), {len(sent_new)} were added")
+    for change in sent_old:
+        line_id = _line_id_of(change)
+        row = by_id.get(line_id)
+        if row is not None:
+            problems.extend(_line_differences(f"line {line_id}", _expected_line(before_rows.get(line_id), change), row))
+    if len(fresh) == len(sent_new):
+        for number, (change, row) in enumerate(zip(sent_new, _aligned(sent_new, fresh)), start=1):
+            if row is not None:
+                expected = _expected_line(None, change)
+                problems.extend(_line_differences(f"new line {number}", expected, row))
+    return problems
+
+
+def _update_problems(
+    record: Mapping[str, Any], wire: Mapping[str, Any], before: Mapping[str, Any] | None = None
+) -> list[str]:
+    """What the read-back does not show of the update that was sent. A cleared template id is not checked: Gorelo says the
+    service provider's default then applies, so the invoice may show that one. With `before` (the first read) every kept
+    line is compared with it and the set of line Ids is checked; without it only what was sent is checked."""
+    problems: list[str] = []
+    for key in ("InvoiceDate", "DueDate"):
+        if key in wire:
+            shown = record.get(key)
+            if not isinstance(shown, str) or shown[:10] != wire[key][:10]:
+                problems.append(f"{key} is not the date that was sent")
+    if "Reference" in wire:
+        want, shown = wire["Reference"], record.get("Reference")
+        if want is None:
+            if shown not in (None, ""):
+                problems.append("Reference is still set")
+        elif not isinstance(shown, str) or shown.strip() != want.strip():
+            problems.append("Reference is not the text that was sent")
+    for key in ("InvoiceTemplateId", "InvoiceEmailTemplateId"):
+        if wire.get(key) is not None and record.get(key) != wire[key]:
+            problems.append(f"{key} is not the id that was sent")
+    if wire.get("BrandingThemeId") is not None:
+        shown = record.get("BrandingThemeId")
+        if not isinstance(shown, str) or shown.lower() != wire["BrandingThemeId"].lower():
+            problems.append("BrandingThemeId is not the id that was sent")
+    if "LineItems" in wire:
+        shown_lines = record.get("LineItems")
+        if not isinstance(shown_lines, list) or len(shown_lines) != len(wire["LineItems"]):
+            count = len(shown_lines) if isinstance(shown_lines, list) else "no list of"
+            problems.append(f"LineItems shows {count} lines, {len(wire['LineItems'])} were sent")
+        if isinstance(shown_lines, list):
+            problems.extend(_line_set_problems(shown_lines, wire["LineItems"], before))
+    return problems
+
+
+@gorelo_tool(
+    toolset="billing",
+    kind="write",
+    ops=[GET_OP, UPDATE_OP, TAXES_OP],
+    field_map=UPDATE_FIELDS,
+    destructive_hint=True,
+)
+async def update_invoice(
+    ctx: Context,
+    invoice_id: Annotated[str, Field(description="Id of a list_invoices row (GUID). Must be Draft or Submitted.")],
+    invoice_date: Annotated[str | None, Field(description="YYYY-MM-DD.")] = None,
+    due_date: Annotated[str | None, Field(description="YYYY-MM-DD, not before the invoice date.")] = None,
+    reference: Annotated[str | None, Field(description="Free text, e.g. a PO number. To remove it use clear_fields.")] = None,
+    invoice_template_id: Annotated[StrictId | None, Field(description="PDF template id.")] = None,
+    invoice_email_template_id: Annotated[StrictId | None, Field(description="Email template id.")] = None,
+    branding_theme_id: Annotated[str | None, Field(description="Branding theme GUID of the accounting system.")] = None,
+    update_lines: Annotated[
+        list[InvoiceLineChange] | None,
+        Field(description="Changes to lines the invoice has, by line_id. Fields left out keep their value."),
+    ] = None,
+    add_lines: Annotated[
+        list[InvoiceLine] | None,
+        Field(description="New lines: item_id and quantity; the rest as in create_invoice."),
+    ] = None,
+    remove_line_ids: Annotated[
+        list[str] | None,
+        Field(description="Line ids to remove; the time or charges they billed return to waiting to be invoiced."),
+    ] = None,
+    clear_fields: Annotated[
+        list[InvoiceClearable] | None,
+        Field(description="Fields to remove: reference, invoice_template_id, invoice_email_template_id, branding_theme_id."),
+    ] = None,
+) -> dict:
+    """Change a Draft or Submitted invoice and return it read back. Send only what changes. It refuses any other status and never changes the status (approve_invoice, when enabled).
+    Lines: update_lines changes lines by line_id, add_lines appends new ones, remove_line_ids removes some; every other line is kept (Gorelo replaces the whole set, so the tool resends them). Quantity cannot change on a line billing a time entry (Gorelo refuses).
+    Resolve ids first: invoice_id -> list_invoices, line ids -> get_invoice, item_id -> list_items, tax_id -> list_taxes. For no tax use no_tax (the account's Tax Exempt rate, looked up in list_taxes; refused unless there is exactly one) or tax_id.
+    Side effects: overwrites what you send; a new price or billable status on a time line carries to the time entry. After a "did not confirm" error read get_invoice before repeating.
+    """
+    invoice_guid = guid("invoice_id", invoice_id)
+    clears = _clear_names(clear_fields)
+    for name, value in (
+        ("reference", reference),
+        ("invoice_template_id", invoice_template_id),
+        ("invoice_email_template_id", invoice_email_template_id),
+        ("branding_theme_id", branding_theme_id),
+    ):
+        if name in clears and value is not None:
+            raise ValueError(f"{name}: cannot be given a value and cleared in the same call")
+    # everything that needs no read is checked first, so a bad parameter costs no request
+    start, due = _invoice_dates(invoice_date, due_date)
+    if reference is not None and not isinstance(reference, str):
+        raise ValueError(f"reference: must be text, got {describe_value(reference)}")
+    if isinstance(reference, str) and not reference.strip():
+        raise ValueError('reference: must not be blank; to remove it pass clear_fields=["reference"]')
+    values = {
+        "invoice_date": None if start is None else f"{start}T00:00:00Z",
+        "due_date": None if due is None else f"{due}T00:00:00Z",
+        "reference": reference,
+        "invoice_template_id": None if invoice_template_id is None else positive_id("invoice_template_id", invoice_template_id),
+        "invoice_email_template_id": (
+            None if invoice_email_template_id is None else positive_id("invoice_email_template_id", invoice_email_template_id)
+        ),
+        "branding_theme_id": None if branding_theme_id is None else guid("branding_theme_id", branding_theme_id),
+    }
+    body_map = {key: name for key, name in UPDATE_FIELDS.items() if key in values}
+    body = build_body(values, body_map, clear=clears, clear_values=HEADER_CLEAR_VALUES)
+    line_request = _line_request(update_lines, add_lines, remove_line_ids, _UNRESOLVED_TAX_ID)
+    if not body and line_request is None:
+        raise ValueError(
+            "nothing to change: give at least one of invoice_date, due_date, reference, invoice_template_id, "
+            "invoice_email_template_id, branding_theme_id, update_lines, add_lines, remove_line_ids or clear_fields"
+        )
+    record = await _invoice_open_for_change(ctx, "update_invoice", invoice_guid, verb="changes")
+    if start is not None or due is not None:
+        _header_dates(record, invoice_date, due_date)
+    # the lines are read only when a line parameter is given: a header-only update must not depend on them
+    no_tax_id = None
+    no_tax_where = [
+        *(f"update_lines[{n}]" for n in _no_tax_positions(update_lines)),
+        *(f"add_lines[{n}]" for n in _no_tax_positions(add_lines)),
+    ]
+    if no_tax_where:  # resolved once, after the status check and before the write
+        no_tax_id = await _resolve_no_tax(ctx, "update_invoice", no_tax_where[0])
+        line_request = _line_request(update_lines, add_lines, remove_line_ids, no_tax_id)
+    lines = _plan_lines(_current_lines(record), line_request) if line_request is not None else None
+    if lines is not None:
+        body["LineItems"] = lines
+    if "StatusId" in body:  # unreachable by construction (UPDATE_FIELDS has no StatusId); a guard, not a feature
+        raise ValueError("update_invoice cannot change the status; use approve_invoice (when enabled) to approve")
+    client = client_of(ctx)
+    answer = await client.patch(UPDATE_OP, path_params={"invoiceId": invoice_guid}, json_body=body, tool="update_invoice")
+    changed = expect_object(answer, UPDATE_OP, tool="update_invoice")
+    read_back = await reread_after_write(
+        ctx, GET_OP, path_params={"invoiceId": invoice_guid}, tool="update_invoice", written_id=invoice_guid
+    )
+    result = _final_record(changed, read_back)
+    problems = _update_problems(result, body, record if lines is not None else None)
+    if problems:
+        raise _unconfirmed_write(UPDATE_OP, f"the invoice does not show the change ({'; '.join(problems)})", "get_invoice")
+    if lines is not None:
+        result = _with_warning(result, _update_no_tax_warning(result, record, update_lines, add_lines, lines, no_tax_id))
+        result = _with_note(result, _no_tax_note(no_tax_id))
+    status_id = _invoice_status_id(result)
+    if status_id not in CHANGEABLE_STATUS_IDS:
+        shown = INVOICE_STATUSES.get(status_id, "an unknown status") if status_id is not None else "no readable status"
+        result = _with_note(
+            result,
+            f"The invoice shows {shown} after the change, not Draft or Submitted: it was Approved when the change "
+            "reached Gorelo, so the copy already pushed to the accounting system may not show this change. Check it "
+            "in the accounting system.",
+        )
+    return result
+
+
+def _update_no_tax_warning(
+    result: Mapping[str, Any],
+    before: Mapping[str, Any],
+    update_lines: Any,
+    add_lines: Any,
+    wire_lines: list[Mapping[str, Any]],
+    no_tax_id: int | None = None,
+) -> str | None:
+    """The warning for the no_tax lines of update_lines and add_lines that the read-back still shows with a tax amount."""
+    shown = result.get("LineItems")
+    if not isinstance(shown, list):
+        return None
+    rows = [row for row in shown if isinstance(row, Mapping)]
+    by_id = {line_id: row for row in rows if (line_id := _line_id_of(row))}
+    taxed: list[str] = []
+    for position in _no_tax_positions(update_lines):
+        entry = update_lines[position]
+        data = entry.model_dump() if isinstance(entry, BaseModel) else entry
+        line_id = str(data.get("line_id") or "").lower()
+        row = by_id.get(line_id)
+        if row is not None and _tax_shown(row):
+            taxed.append(f"update_lines[{position}] (line {line_id})")
+    added = _no_tax_positions(add_lines)
+    if added:
+        first = before.get("LineItems")
+        old_ids = {_line_id_of(row) for row in (first if isinstance(first, list) else [])}
+        fresh = [row for row in rows if _line_id_of(row) not in old_ids]
+        new_wire = [line for line in wire_lines if not _line_id_of(line)]
+        if len(fresh) == len(new_wire):
+            aligned = _aligned(new_wire, fresh)
+            for position in added:
+                row = aligned[position] if position < len(aligned) else None
+                if row is not None and _tax_shown(row):
+                    where = f"add_lines[{position}]" + (f" (line {row.get('Id')})" if row.get("Id") else "")
+                    taxed.append(where)
+    return _no_tax_warning(taxed, no_tax_id)
+
+
+def _clear_names(clear_fields: Any) -> list[str]:
+    """The distinct names in clear_fields, each one update_invoice can clear. [] is an error."""
+    if clear_fields is None:
+        return []
+    non_empty("clear_fields", clear_fields)
+    if isinstance(clear_fields, (str, bytes, Mapping)) or not isinstance(clear_fields, (list, tuple)):
+        raise ValueError(f"clear_fields: expected a list of field names, got {describe_value(clear_fields)}")
+    names = list(dict.fromkeys(clear_fields))
+    for name in names:
+        if name not in UPDATE_CLEARABLE:
+            raise ValueError(f"clear_fields: {describe_value(name)} cannot be cleared; allowed: {', '.join(UPDATE_CLEARABLE)}")
+    return names
+
+
+# --------------------------------------------------------------------------
+# approve_invoice
+# --------------------------------------------------------------------------
+
+
+@gorelo_tool(toolset="billing", kind="destructive", ops=[GET_OP, UPDATE_OP], field_map={"invoice_id": "invoiceId"})
+async def approve_invoice(
+    ctx: Context,
+    invoice_id: Annotated[str, Field(description="Id of a list_invoices row (GUID). Must be Draft or Submitted.")],
+    confirm: Annotated[StrictBool, Field(description="Must be true; only after the user approves.")] = False,
+) -> dict:
+    """Approve a Draft or Submitted invoice and return it read back. It reads the invoice first and refuses any other status.
+    Resolve ids first: invoice_id -> list_invoices.
+    Side effects: approving pushes the invoice to the connected accounting system at once. Nothing takes that back: delete_invoice, when deletes are enabled, voids it in Gorelo ONLY, so the copy in the accounting system stays open (observed with Xero): tell the user, who must void it there too. A total of exactly 0 is recorded as Paid instead: check Status in the result.
+    After a "did not confirm" error read get_invoice before repeating.
+    Ask the user first; needs confirm=true.
+    """
+    invoice_guid = guid("invoice_id", invoice_id)
+    require_confirm(
+        confirm,
+        action=f"approve invoice {invoice_guid}",
+        effect=(
+            "Approving pushes the invoice to the connected accounting system at once, and nothing takes that back: "
+            "voiding it with delete_invoice voids it in Gorelo ONLY, so the copy in the accounting system stays open "
+            "(observed with Xero) and the user must void it there too. Nothing has been sent to Gorelo."
+        ),
+    )
+    await _invoice_open_for_change(ctx, "approve_invoice", invoice_guid, verb="approves")
+    answer = await client_of(ctx).patch(
+        UPDATE_OP, path_params={"invoiceId": invoice_guid}, json_body={"StatusId": APPROVED_STATUS_ID}, tool="approve_invoice"
+    )
+    changed = expect_object(answer, UPDATE_OP, tool="approve_invoice")
+    read_back = await reread_after_write(
+        ctx, GET_OP, path_params={"invoiceId": invoice_guid}, tool="approve_invoice", written_id=invoice_guid
+    )
+    result = _final_record(changed, read_back)
+    status_id = _invoice_status_id(result)
+    if status_id not in (APPROVED_STATUS_ID, PAID_STATUS_ID):
+        shown = INVOICE_STATUSES.get(status_id, "no usable status") if status_id is not None else "no usable status"
+        raise _unconfirmed_write(
+            UPDATE_OP, f"the invoice shows {shown}, expected Approved or Paid after approving", "get_invoice"
+        )
+    if status_id == PAID_STATUS_ID:
+        result = {
+            **result,
+            "note": (
+                "Status is Paid, not Approved: Gorelo records an approved invoice whose total is 0 as Paid. "
+                "Check Total and AmountDue."
+            ),
+        }
+    return result
+
+
+# --------------------------------------------------------------------------
+# list_payments and get_payment (read only: no tool records or deletes a payment)
+# --------------------------------------------------------------------------
+
+PAYMENT_FILTERS = {
+    "client_ids": "ClientIds",
+    "invoice_ids": "InvoiceIds",
+    "payment_date_since": "PaymentDateSince",
+    "payment_date_before": "PaymentDateBefore",
+    "sort_order": "SortOrder",
+}
+PAYMENTS_FIELD_MAP = {**PAYMENT_FILTERS, "page_size": "PageSize", "cursor": "Cursor"}
+
+
+@gorelo_tool(toolset="billing", kind="read", ops=[PAYMENTS_OP], field_map=PAYMENTS_FIELD_MAP)
+async def list_payments(
+    ctx: Context,
+    client_ids: Annotated[list[StrictId] | None, Field(description="Payments received from these clients (list_clients).")] = None,
+    invoice_ids: Annotated[list[str] | None, Field(description="Payments applied to these invoices (GUIDs from list_invoices).")] = None,
+    payment_date_since: Annotated[str | None, Field(description="YYYY-MM-DD, inclusive.")] = None,
+    payment_date_before: Annotated[str | None, Field(description="YYYY-MM-DD, exclusive.")] = None,
+    sort_order: Annotated[Literal["asc", "desc"] | None, Field(description="By payment date. Default desc.")] = None,
+    page_size: Annotated[int, Field(description="1-200, clamped.")] = 50,
+    cursor: Annotated[
+        str | None, Field(description="next_cursor from the previous call; same filters and sort; repeat until has_more is false.")
+    ] = None,
+) -> dict:
+    """List payments received from clients, newest first, one page at a time.
+    Read only: payments are recorded money, and no tool records or deletes one. A row has Amount (the whole payment), Reference, ClientId and Invoices (each invoice it was applied to with its share). Each filter narrows the result.
+    Resolve ids first: client_ids -> list_clients, invoice_ids -> list_invoices.
+    Paging: pass next_cursor back as cursor with the SAME filters until has_more is false.
+    """
+    filters = {
+        "client_ids": positive_ids("client_ids", client_ids),
+        "invoice_ids": guids("invoice_ids", invoice_ids),
+        "payment_date_since": _calendar_date("payment_date_since", payment_date_since),
+        "payment_date_before": _calendar_date("payment_date_before", payment_date_before),
+        "sort_order": sort_order,
+    }
+    wire = {
+        **filters,
+        **{
+            param: f"{filters[param]}T00:00:00Z"
+            for param in ("payment_date_since", "payment_date_before")
+            if filters[param] is not None
+        },
+    }
+    query = {
+        PAYMENT_FILTERS[param]: csv_ids(param, value) if isinstance(value, (list, tuple)) else value
+        for param, value in wire.items()
+    }
+    page = await client_of(ctx).get_page(
+        PAYMENTS_OP,
+        query=query,
+        page_size=clamp_page_size(page_size),
+        cursor=non_empty("cursor", cursor),
+        tool="list_payments",
+    )
+    return paged_result(page, filters)
+
+
+@gorelo_tool(toolset="billing", kind="read", ops=[PAYMENT_OP], field_map={"payment_id": "paymentId"})
+async def get_payment(
+    ctx: Context,
+    payment_id: Annotated[str, Field(description="Id of a list_payments row (GUID).")],
+) -> dict:
+    """Get one payment: Amount, PaymentDate, Reference, ClientId and the invoices it was applied to.
+    Read only: payments are recorded money, and no tool records or deletes one.
+    """
+    data = await client_of(ctx).get_one(
+        PAYMENT_OP, path_params={"paymentId": guid("payment_id", payment_id)}, tool="get_payment"
+    )
+    return expect_object(data, PAYMENT_OP, tool="get_payment")

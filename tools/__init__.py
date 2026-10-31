@@ -26,6 +26,7 @@ from tools import (  # noqa: F401
     invoices,
     meta,
     org,
+    product_charges,
     project_tasks,
     projects,
     scripts,

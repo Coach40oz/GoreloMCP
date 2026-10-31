@@ -76,6 +76,9 @@ ITEM_STATUS_IDS = {"active": 1, "archived": 2}
 # list_items only: the wire value of each choice. "all" is the caller's explicit way to ask for both, because Gorelo leaves archived
 # items out of an unfiltered list (2026-10-17 spec) and StatusIds=1,2 is the way to include them.
 ITEM_LIST_STATUS = {"active": "1", "archived": "2", "all": "1,2"}
+# list_items sort: SortBy createdOn (the default) or updatedOn, SortOrder asc or desc (the default). Any other value is a 400.
+ITEM_SORT_BY = ("updatedOn", "createdOn")
+ITEM_SORT_ORDER = ("asc", "desc")
 QUERY_MAX_CHARS = 200
 
 # {tool param: Gorelo query name} for every filter of GET /v1/items. Like the body maps below it also
@@ -94,6 +97,8 @@ FILTER_FIELDS = {
     "created_before": "CreatedBefore",
     "updated_since": "UpdatedSince",
     "updated_before": "UpdatedBefore",
+    "sort_by": "SortBy",
+    "sort_order": "SortOrder",
 }
 LIST_FIELD_MAP = {**FILTER_FIELDS, "page_size": "PageSize", "cursor": "Cursor"}
 
@@ -171,6 +176,15 @@ def _pick(param: str, value: str | None, table: Mapping[str, int | str]) -> int 
     if value not in table:
         raise ValueError(f"{param}: must be one of {', '.join(repr(name) for name in table)}, got {value!r}")
     return table[value]
+
+
+def _choice(param: str, value: str | None, allowed: tuple[str, ...]) -> str | None:
+    """A sort field or order of GET /v1/items: one of the names the spec gives, anything else is refused before any HTTP call."""
+    if value is None:
+        return None
+    if value not in allowed:
+        raise ValueError(f"{param}: must be one of {', '.join(repr(name) for name in allowed)}, got {value!r}")
+    return value
 
 
 def _search_text(param: str, value: str | None) -> str | None:
@@ -348,6 +362,10 @@ async def list_items(
     created_before: Annotated[str | None, Field(description="At or before.")] = None,
     updated_since: Annotated[str | None, Field(description="At or after.")] = None,
     updated_before: Annotated[str | None, Field(description="At or before.")] = None,
+    sort_by: Annotated[
+        Literal["updatedOn", "createdOn"] | None, Field(description="createdOn (default) or updatedOn.")
+    ] = None,
+    sort_order: Annotated[Literal["asc", "desc"] | None, Field(description="asc or desc (default).")] = None,
     page_size: Annotated[int, Field(description="1-200, clamped.")] = 50,
     cursor: Annotated[
         str | None, Field(description="next_cursor from the previous call; same filters; repeat until has_more is false.")
@@ -370,6 +388,8 @@ async def list_items(
         "created_before": utc_iso("created_before", created_before),
         "updated_since": utc_iso("updated_since", updated_since),
         "updated_before": utc_iso("updated_before", updated_before),
+        "sort_by": _choice("sort_by", sort_by, ITEM_SORT_BY),
+        "sort_order": _choice("sort_order", sort_order, ITEM_SORT_ORDER),
     }
     wire = _to_query(
         {

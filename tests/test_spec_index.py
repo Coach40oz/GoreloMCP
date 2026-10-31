@@ -84,7 +84,7 @@ def _walk_keys(node, path=""):
 # --------------------------------------------------------------------------
 
 
-def test_op_count_is_117(index, ops):
+def test_op_count_is_169(index, ops):
     # 96 operations in contract e15cb5a18ec2 (2026-10-02); the 2026-10-08 spec (contract 56005ff28330) added POST /v1/payments and
     # DELETE /v1/payments/{paymentId}; the 2026-10-12 spec (contract bce2fad59937) added GET /v1/api-keys, DELETE /v1/api-keys/{apiKeyId},
     # POST /v1/assets/custom, PATCH /v1/assets/custom/{customAssetId} and GET /v1/assets/custom/hardware-types; the 2026-10-14 spec
@@ -93,14 +93,18 @@ def test_op_count_is_117(index, ops):
     # GET /v1/assets/custom/{customAssetId}
     # the 2026-10-22 spec (contract 05200951c89e) added eight: five agent asset reads (apps, hardware, patches, available patches,
     # tags), GET /v1/assets/types and the two script reads (GET /v1/scripts, GET /v1/scripts/{scriptId})
-    assert index["op_count"] == 125
-    assert len(ops) == 125
-    assert index["contract_sha256"].startswith("05200951c89e")
+    # the 2026-10-29 spec (contract 6c30770dffc0) added 44 (169 in all): alerts, policies, asset tags and types, client types,
+    # locations and domains, contracts, contact tags, invoice updates and lines, payments reads, product charges, structured
+    # documents, roles, users, groups, project templates, ticket priorities and sources, comment edits and more
+    assert index["op_count"] == 169
+    assert len(ops) == 169
+    assert index["contract_sha256"].startswith("6c30770dffc0")
     # 252 schemas on 2026-10-01, 268 on 2026-10-02, 274 on 2026-10-08, 286 on 2026-10-12; the 2026-10-14 spec added two:
     # CustomPropertyUpdate and CustomPropertyValue; the 2026-10-17 spec added twenty two (310 in all: the document, deletion
     # and related item schemas)
     # the 2026-10-22 spec added 35 and renamed away 12 (333 in all: agent asset, script and uptime schemas)
-    assert len(index["schemas"]) == 333
+    # the 2026-10-29 spec added 98 (431 in all: the new operations' bodies and rows)
+    assert len(index["schemas"]) == 431
 
 
 def test_index_has_no_description_or_summary_keys(index):
@@ -141,17 +145,20 @@ def test_list_tickets_is_paged_with_all_filters(ops):
         "GET /v1/invoices", "GET /v1/items", "GET /v1/uptime",
         # the three paged operations the 2026-10-17 spec added reject an out-of-range page size too
         "GET /v1/deletions", "GET /v1/documents", "GET /v1/documents/{documentId}/versions",
+        # the six paged operations the 2026-10-29 spec added reject an out-of-range page size too
+        "GET /v1/assets/policies", "GET /v1/documents/structured", "GET /v1/documents/structured/{structuredDocumentId}/submissions",
+        "GET /v1/payments", "GET /v1/product-charges", "GET /v1/projects/templates",
     ],
 )
 def test_page_size_is_rejected_not_clamped(ops, key):
     assert ops[key]["page_size_rule"] == "reject"
 
 
-def test_exactly_24_ops_are_paged_and_paged_means_cursor(ops):
+def test_exactly_30_ops_are_paged_and_paged_means_cursor(ops):
     # GET /v1/alerts is the 19th (2026-10-02), GET /v1/api-keys the 20th (2026-10-12); the 2026-10-17 spec added GET /v1/deletions,
     # GET /v1/documents and GET /v1/documents/{documentId}/versions (a document's related items are not paged)
-    # the 2026-10-22 spec added GET /v1/scripts (24th)
-    assert sum(1 for op in ops.values() if op["paged"]) == 24
+    # the 2026-10-22 spec added GET /v1/scripts (24th); the 2026-10-29 spec added six more (30 in all)
+    assert sum(1 for op in ops.values() if op["paged"]) == 30
     assert ops["GET /v1/api-keys"]["paged"] is True
     assert ops["GET /v1/documents/{documentId}/related-items"]["paged"] is False
     for key, op in ops.items():
@@ -164,6 +171,14 @@ def test_page_size_rule_is_null_exactly_without_page_size(ops):
         assert (op["page_size_rule"] is not None) == has_page_size, key
         if op["page_size_rule"] is not None:
             assert op["page_size_rule"] in ("clamp", "reject", "unknown"), key
+    # 2026-10-29 measurement: no page size 139, reject 26, unknown 4 (the description of PageSize does not say what an out-of-range
+    # value does: GET /v1/alerts, the two project comment lists and GET /v1/scripts); every paged operation takes PageSize
+    rules = [op["page_size_rule"] for op in ops.values()]
+    assert {rule: rules.count(rule) for rule in set(rules)} == {None: 139, "reject": 26, "unknown": 4}
+    assert sorted(key for key, op in ops.items() if op["page_size_rule"] == "unknown") == [
+        "GET /v1/alerts", "GET /v1/projects/{projectId}/comments", "GET /v1/projects/{projectId}/tasks/{taskId}/comments",
+        "GET /v1/scripts",
+    ]
 
 
 def test_create_contact_uses_location_id(ops):
@@ -189,7 +204,10 @@ def test_update_contact_and_client_are_path_operations_whose_commands_carry_no_i
     assert client["body"]["schema"] == "UpdateClientCommand" and "Id" not in client["body"]["fields"]
     assert client["body"]["required"] == []
     # Contract 1b1c0cec0e9a (2026-10-14) added CustomProperties to the command: a nullable array of CustomPropertyUpdate, and still no Id
-    assert set(schemas["UpdateClientCommand"]["fields"]) == {"Name", "StatusId", "BillingName", "AlternateName", "CustomProperties", "GroupIds"}  # GroupIds: 2026-10-22
+    # GroupIds: 2026-10-22; ClientTypeId: 2026-10-29
+    assert set(schemas["UpdateClientCommand"]["fields"]) == {
+        "Name", "StatusId", "BillingName", "AlternateName", "CustomProperties", "GroupIds", "ClientTypeId",
+    }
     assert "Id" not in schemas["UpdateClientCommand"]["fields"]
     assert client["body"]["fields"]["CustomProperties"] == {
         "type": "array", "nullable": True, "items": {"ref": "CustomPropertyUpdate", "type": None}
@@ -238,8 +256,21 @@ def test_custom_properties_are_returned_on_the_single_client_and_device_and_set_
     assert sorted(key for key, op in ops.items() if op["response"]["data"] in ("ClientResponse", "AgentAssetResponse")) == [
         "GET /v1/assets/agents/{agentAssetId}", "GET /v1/clients/{clientId}", "PATCH /v1/clients/{clientId}", "POST /v1/clients",
     ]
-    # a device has no update operation: its custom properties can be read, not written
-    assert sorted(op["method"] for op in ops.values() if op["path"] == "/v1/assets/agents/{agentAssetId}") == ["DELETE", "GET"]
+    # a device has no CustomProperties in any body: its custom properties can be read, not written. The 2026-10-29 spec gave the
+    # path a PATCH (UpdateAgentCommand), which carries none of them
+    assert sorted(op["method"] for op in ops.values() if op["path"] == "/v1/assets/agents/{agentAssetId}") == ["DELETE", "GET", "PATCH"]
+    assert ops["PATCH /v1/assets/agents/{agentAssetId}"]["body"]["schema"] == "UpdateAgentCommand"
+    assert "CustomProperties" not in schemas["UpdateAgentCommand"]["fields"]
+
+
+def test_the_2026_10_29_spec_gave_contacts_tags_and_the_client_update_a_type(schemas):
+    # Contract 6c30770dffc0: Create/UpdateContactCommand gained TagIds (nullable list of ids), ContactResponse gained TagIds (never
+    # null) and UpdateClientCommand gained ClientTypeId (nullable id)
+    tag_ids = {"type": "array", "items": {"type": "integer", "format": "int64"}}
+    for name in ("CreateContactCommand", "UpdateContactCommand"):
+        assert schemas[name]["fields"]["TagIds"] == {**tag_ids, "nullable": True}, name
+    assert schemas["ContactResponse"]["fields"]["TagIds"] == {**tag_ids, "nullable": False}
+    assert schemas["UpdateClientCommand"]["fields"]["ClientTypeId"] == {"type": "integer", "format": "int64", "nullable": True}
 
 
 def test_six_families_of_path_placeholders_were_renamed_without_changing_the_urls(ops):
@@ -291,6 +322,7 @@ def test_attachment_upload_is_multipart(ops):
 
 
 def test_every_request_body_of_the_live_spec_is_an_object(ops):
+    # 54 bodies in all on the 2026-10-29 spec (37 until then: it added 17 object bodies).
     # 32 bodies are $ref object schemas (POST /v1/payments is the 30th, 2026-10-08; POST /v1/assets/custom and
     # PATCH /v1/assets/custom/{customAssetId} are the 31st and 32nd, 2026-10-12), the 33rd is the inline multipart object
     # on POST /v1/attachments, and the 2026-10-17 spec added four $ref object bodies (POST /v1/documents, PATCH /v1/documents/{documentId},
@@ -298,7 +330,7 @@ def test_every_request_body_of_the_live_spec_is_an_object(ops):
     # "format" or "items"); if one appears, Gorelo added a new body shape: read the
     # build warnings and the spec_diff.py report before relying on body["fields"].
     bodies = {key: op["body"] for key, op in ops.items() if op["body"] is not None}
-    assert len(bodies) == 37
+    assert len(bodies) == 54
     for key, body in bodies.items():
         assert not {"type", "format", "items"} & set(body), key
 
@@ -395,14 +427,14 @@ def test_live_spec_rejects_unknown_fields_on_every_object_schema(schemas):
     # added twenty two; 282 until the 2026-10-14 spec, which added CustomPropertyUpdate and CustomPropertyValue; 270 until the
     # 2026-10-12 spec, 264 before the payments schemas of 2026-10-08), plus the free-form DataContext property that 82 response schemas carry (77 until the 2026-10-17 spec). The other four schemas are enums.
     objects = {name: schema for name, schema in schemas.items() if schema["type"] == "object"}
-    assert len(objects) == 329  # 306 until the 2026-10-22 spec (35 schemas added, 12 renamed away)
+    assert len(objects) == 427  # 329 until the 2026-10-29 spec (98 schemas added, no enum among them); 306 until the 2026-10-22 spec (35 schemas added, 12 renamed away)
     assert [name for name, schema in objects.items() if schema.get("additional_properties") is not False] == []
     assert {"CustomPropertyUpdate", "CustomPropertyValue"} <= set(objects)  # both new schemas reject unknown fields too
     data_contexts = [
         (name, field) for name, schema in schemas.items() for field, entry in schema["fields"].items()
         if entry.get("additional_properties") is False
     ]
-    assert len(data_contexts) == 89  # 82 until the 2026-10-22 spec
+    assert len(data_contexts) == 115  # 89 until the 2026-10-29 spec; 82 until the 2026-10-22 spec
     assert {field for _, field in data_contexts} == {"DataContext"}
 
 
@@ -420,7 +452,8 @@ def test_index_records_every_default_constraint_and_additional_properties_of_the
         return sum(1 for node in nodes for _, key in _walk_keys(node) if key == name)
 
     raw_counts = {key: count([raw], key) for key in ("default", "minLength", "pattern", "additionalProperties")}
-    assert raw_counts == {"default": 44, "minLength": 23, "pattern": 3, "additionalProperties": 418}  # 41 and 388 until 2026-10-22
+    # until 2026-10-29: 44, 23, 3 and 418 (41, 23, 3 and 388 until 2026-10-22)
+    assert raw_counts == {"default": 59, "minLength": 24, "pattern": 7, "additionalProperties": 542}
     schema_nodes = [index["schemas"]]
     param_nodes = [params for op in index["ops"].values() for params in (op["path_params"], op["query_params"])]
     assert count(param_nodes, "default") == raw_counts["default"]

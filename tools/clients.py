@@ -1,14 +1,57 @@
-"""Clients and their locations: list, read, create, update (toolset "core").
+"""Clients, their locations and their web domains: list, read, create, update, delete (toolset "core").
 
-Tools: list_clients, get_client, create_client, update_client, list_client_locations.
+Tools: list_clients, get_client, create_client, update_client, list_client_types, list_client_custom_fields,
+list_client_locations, get_client_location, create_client_location, update_client_location, delete_client_location
+(gated), create_client_domain, update_client_domain, delete_client_domain (gated).
 
 Ops owned by this module:
 
     GET /v1/clients
-    GET /v1/clients/{clientId}                  (also read by update_client before and after it writes a custom field)
+    GET /v1/clients/{clientId}                  (also read by update_client before and after it writes a custom field, and
+                                                 by the two client domain writes to read their result back)
+    GET /v1/clients/types
+    GET /v1/clients/custom-fields
     GET /v1/clients/{clientId}/locations
+    GET /v1/clients/{clientId}/locations/{locationId}
     POST /v1/clients
+    POST /v1/clients/{clientId}/locations
+    POST /v1/clients/{clientId}/domains
     PATCH /v1/clients/{clientId}
+    PATCH /v1/clients/{clientId}/locations/{locationId}
+    PATCH /v1/clients/{clientId}/domains/{domainId}
+    DELETE /v1/clients/{clientId}/locations/{locationId}
+    DELETE /v1/clients/{clientId}/domains/{domainId}
+
+Client type (contract 6c30770dffc0, 2026-10-29): CreateClientCommand and UpdateClientCommand take ClientTypeId (from GET
+/v1/clients/types, active types only). Create defaults to Business (1) in Gorelo when it is left out; the update text says
+"Leave null to keep the current value", so a type cannot be cleared and the tool offers no clear. ClientResponse.ClientTypeId is
+null when no type is set.
+
+Locations (contract 6c30770dffc0): a location has 15 fields. IsDefault and IsDefaultBilling move that flag from the client's
+current default; the default flags are never cleared, only moved by marking another location (false on the holder is a 409).
+PrimaryContactId and BillingContactIds must be active contacts of the client. The internal client answers 409 to a create. On
+PATCH an omitted field keeps its value and null clears these: PhoneCountryCode, Phone, PhoneExt, Address1, Address2, City, State,
+Country, PostalCode, TimeZone and PrimaryContactId (clear_fields); BillingContactIds clears with [] (a contact taken off the
+list is taken off the client's contracts too); Name, IsDefault and IsDefaultBilling cannot be cleared. DELETE only marks the
+location inactive and is refused (409) while it is the default location, the default billing location, the client's only
+location, or while open tickets, assets, active contacts, contracts, products or bundles are at it; deleting an already deleted
+location succeeds. Both writes read the location back with the single GET.
+
+BillingContactIds on a location (1.5.0 fix): the PATCH list REPLACES the billing contacts and a contact taken
+off is also taken off the client's contracts, while the location record answers the same field as a comma-separated STRING (live:
+the text "[]" when there are none). So update_client_location reads the location first when billing_contact_ids is given, parses
+the current ids ("", "[]", "41,42", "[41, 42]"), and refuses a list that leaves a current id out unless remove_billing_contact_ids
+names it (the update_document pattern); [] therefore clears only together with remove_billing_contact_ids naming every current id.
+A named id must be a current one and must not also be in the list. Nothing is sent when the check fails; the result carries a
+`note` that says which contacts the read-back shows taken off.
+
+Web domains (contract 6c30770dffc0): there is no single-domain GET. The text of the create says the new domain appears in the
+client's Domains, so the two writes read the client (GET /v1/clients/{clientId}) and return that Domains entry; when the read
+fails or does not list the domain they return Gorelo's own answer with a warning. A domain name is held by one client only (a
+name any client holds is a 400 on Name), inbound email from the domain is matched to the client, and an expiry that is not given
+is looked up from the registry where one is published. On PATCH an ExpirationDate sent is kept as set by hand and null returns
+the expiry to the registry's date (reset_expiration_date). DELETE marks the domain inactive and an already deleted one
+succeeds.
 
 Gorelo's client write endpoints answer with the full client record (ClientResponse), so create_client
 and update_client return it as it is (update_client with a custom field is the one exception: it reads the client
@@ -30,7 +73,7 @@ Groups (contract 05200951c89e, 2026-10-22): GET /v1/clients takes GroupIds (comm
 GET /v1/organization/groups; keeps clients subscribed to any of them) and UpdateClientCommand.GroupIds replaces the client's
 group list (the spec text: "Replaces the list; [] clears it; omit to leave unchanged. At most 100; every id must be an
 active group"). Changing the groups changes which technicians can see the client. The tool sends the list only as the
-client's full group list and refuses [] (owner's decision: clearing is not offered in this release).
+client's full group list and refuses [] (clearing is not offered in this release).
 
 The client id travels in the PATH only. The published UpdateClientCommand (contract e15cb5a18ec2, 2026-10-02) has
 no Id field, so update_client sends none. The update used to be published with the id in the body and no id in
@@ -143,7 +186,8 @@ There is no delete tool: DELETE /v1/clients/{clientId} is in FORBIDDEN_OPS.
 import json
 import re
 from collections.abc import Iterable, Mapping
-from typing import Annotated, Any, NamedTuple
+from datetime import date
+from typing import Annotated, Any, Literal, NamedTuple, get_args
 
 from fastmcp import Context
 from pydantic import BaseModel, ConfigDict, Field, Strict
@@ -151,6 +195,7 @@ from pydantic import BaseModel, ConfigDict, Field, Strict
 from gorelo_client import GoreloAPIError
 from tools._common import (
     MAX_ID,
+    StrictBool,
     StrictId,
     build_body,
     clamp_page_size,
@@ -166,6 +211,8 @@ from tools._common import (
     positive_id,
     positive_ids,
     region_code,
+    reread_after_write,
+    require_confirm,
     utc_iso,
 )
 
@@ -174,6 +221,15 @@ GET_OP = "GET /v1/clients/{clientId}"
 LOCATIONS_OP = "GET /v1/clients/{clientId}/locations"
 CREATE_OP = "POST /v1/clients"
 UPDATE_OP = "PATCH /v1/clients/{clientId}"
+TYPES_OP = "GET /v1/clients/types"
+CUSTOM_FIELDS_OP = "GET /v1/clients/custom-fields"
+LOCATION_GET_OP = "GET /v1/clients/{clientId}/locations/{locationId}"
+LOCATION_CREATE_OP = "POST /v1/clients/{clientId}/locations"
+LOCATION_UPDATE_OP = "PATCH /v1/clients/{clientId}/locations/{locationId}"
+LOCATION_DELETE_OP = "DELETE /v1/clients/{clientId}/locations/{locationId}"
+DOMAIN_CREATE_OP = "POST /v1/clients/{clientId}/domains"
+DOMAIN_UPDATE_OP = "PATCH /v1/clients/{clientId}/domains/{domainId}"
+DOMAIN_DELETE_OP = "DELETE /v1/clients/{clientId}/domains/{domainId}"
 
 # The client status scale of UpdateClientCommand.StatusId and of the GET /v1/clients StatusIds filter (contract
 # a7954b24844b, 2026-10-17): "1 Active, 3 Credit hold, 4 Archived", any other value is a 400. 2 (Inactive) is gone.
@@ -205,6 +261,7 @@ CREATE_FIELD_MAP = {
     "billing_name": "BillingName",
     "alternate_name": "AlternateName",
     "domain": "Domain",
+    "client_type_id": "ClientTypeId",
     "location_name": "Location.Name",
     "location_phone_country_code": "Location.PhoneCountryCode",
     "location_phone": "Location.Phone",
@@ -228,6 +285,7 @@ UPDATE_FIELD_MAP = {
     "alternate_name": "AlternateName",
     "custom_properties": "CustomProperties",
     "group_ids": "GroupIds",
+    "client_type_id": "ClientTypeId",
 }
 
 UPDATE_TEXT_PARAMS = ("name", "billing_name", "alternate_name")
@@ -392,12 +450,17 @@ async def create_client(
     location_country: Annotated[str | None, Field(description="Country.")] = None,
     location_postal_code: Annotated[str | None, Field(description="Postal or ZIP code.")] = None,
     location_time_zone: Annotated[str | None, Field(description="IANA time zone, e.g. America/New_York.")] = None,
+    client_type_id: Annotated[
+        StrictId | None,
+        Field(description="Client type id (list_client_types); Gorelo defaults to Business (1)."),
+    ] = None,
 ) -> dict:
     """Create a client together with its default location; returns the created client record.
-    Only name and location_name are required; nothing is guessed. Check list_clients (query) first for a duplicate. Side effects: creates a real client at once; this server cannot delete clients, so a mistaken one is removed in the Gorelo app.
+    Only name and location_name are required; nothing is guessed (client_type_id: list_client_types). Check list_clients (query) first for a duplicate. Side effects: creates a real client at once; this server cannot delete clients, so a mistaken one is removed in the Gorelo app.
     """
     non_empty("name", name)
     non_empty("location_name", location_name)
+    type_id = None if client_type_id is None else positive_id("client_type_id", client_type_id)
     region = region_code("location_phone_country_code", location_phone_country_code)
     if location_phone is not None and region is None:
         raise ValueError(
@@ -410,6 +473,7 @@ async def create_client(
             "billing_name": billing_name,
             "alternate_name": alternate_name,
             "domain": domain,
+            "client_type_id": type_id,
             "location_name": location_name,
             "location_phone_country_code": region,
             "location_phone": location_phone,
@@ -1244,6 +1308,10 @@ async def update_client(
             description="The client's FULL group list (list_org_groups ids, 1-100); replaces the current one: start from get_client's GroupIds ([9] alone drops the rest). [] is refused."
         ),
     ] = None,
+    client_type_id: Annotated[
+        StrictId | None,
+        Field(description="New client type id (list_client_types); a type cannot be cleared."),
+    ] = None,
 ) -> dict:
     """Update a client's name, status, billing name, alternate name or custom fields; returns the updated client record.
     Pass at least one field; only custom fields can be cleared. group_ids REPLACES the whole group list: start from get_client's GroupIds ([9] alone drops the rest). Custom fields: ids from get_client's CustomProperties, values are text whatever the Type. Compare each returned CustomProperties Value with what you sent; tell the user if one differs. A hidden field (IsHidden) shows no Value: only IsSet is checked (see warning). It reads the client first: ids must be listed there, and other custom fields must come back unchanged. Side effects: overwrites current values; status_id 4 (Archived) hides the client from default lists; group_ids changes which technicians see the client.
@@ -1259,18 +1327,29 @@ async def update_client(
                 f"string or null leaves the value unchanged), so omit {param} to keep the current value"
             )
     groups = _groups("group_ids", group_ids)
+    type_id = None if client_type_id is None else positive_id("client_type_id", client_type_id)
     saved, cleared = _custom_property_changes(custom_properties, clear_custom_property_ids)
-    if sid is None and groups is None and not saved and not cleared and all(value is None for value in texts.values()):
+    if (
+        sid is None and groups is None and type_id is None and not saved and not cleared
+        and all(value is None for value in texts.values())
+    ):
         raise ValueError(
             "nothing to update: pass at least one of name, status_id, billing_name, alternate_name, group_ids, "
-            "custom_properties or clear_custom_property_ids (only the fields you pass are changed)"
+            "client_type_id, custom_properties or clear_custom_property_ids (only the fields you pass are changed)"
         )
     # the saved entries first, then the cleared ones with a real JSON null (build_body leaves what is inside the list
     # alone); the client id is in the path, never in the body
     entries = [{"Id": identifier, "Value": text} for identifier, text in saved]
     entries += [{"Id": identifier, "Value": None} for identifier in cleared]
     body = build_body(
-        {"status_id": sid, **texts, "group_ids": groups, "custom_properties": entries or None}, UPDATE_FIELD_MAP
+        {
+            "status_id": sid,
+            **texts,
+            "group_ids": groups,
+            "client_type_id": type_id,
+            "custom_properties": entries or None,
+        },
+        UPDATE_FIELD_MAP,
     )
     saved_ids = [identifier for identifier, _ in saved]
     before: dict[int, _CustomField] = {}
@@ -1322,3 +1401,667 @@ async def list_client_locations(
     cid = positive_id("client_id", client_id)
     items = await client_of(ctx).get_list(LOCATIONS_OP, path_params={"clientId": cid}, tool="list_client_locations")
     return list_result(items)
+
+
+# --------------------------------------------------------------------------
+# Client types and client custom fields (reads)
+# --------------------------------------------------------------------------
+
+
+@gorelo_tool(toolset="core", kind="read", ops=[TYPES_OP])
+async def list_client_types(ctx: Context) -> dict:
+    """List the client types a client can be given (not paged; active types only); returns {items, count}.
+    A row's Id is the client_type_id of create_client and update_client. Rows hold Id, Name and IsBuiltIn (true for the types every account has, such as Business and Consumer).
+    Resolve ids first: none.
+    Side effects: None (read-only).
+    """
+    items = await client_of(ctx).get_list(TYPES_OP, tool="list_client_types")
+    return list_result(items)
+
+
+@gorelo_tool(toolset="core", kind="read", ops=[CUSTOM_FIELDS_OP])
+async def list_client_custom_fields(ctx: Context) -> dict:
+    """List the custom fields defined for clients (not paged; active fields only); returns {items, count}.
+    A row's Id is the id that update_client's custom_properties and clear_custom_property_ids take. Rows hold Id, Name, Type, IsRequired, DefaultValue, Options (the allowed values of a Dropdown) and IsHidden (a hidden field's value is never returned). An empty list means no client custom field is defined.
+    Resolve ids first: none.
+    Side effects: None (read-only).
+    """
+    items = await client_of(ctx).get_list(CUSTOM_FIELDS_OP, tool="list_client_custom_fields")
+    return list_result(items)
+
+
+# --------------------------------------------------------------------------
+# Client locations
+# --------------------------------------------------------------------------
+
+# snake_case tool parameter -> CreateClientLocationCommand / UpdateClientLocationCommand field (the two commands carry the
+# same 15 fields). client_id and location_id are the path placeholders: kept in the tools' field maps so that a Gorelo error
+# about an id names the parameter, never given to build_body.
+LOCATION_BODY_MAP = {
+    "name": "Name",
+    "phone_country_code": "PhoneCountryCode",
+    "phone": "Phone",
+    "phone_ext": "PhoneExt",
+    "address1": "Address1",
+    "address2": "Address2",
+    "city": "City",
+    "state": "State",
+    "country": "Country",
+    "postal_code": "PostalCode",
+    "time_zone": "TimeZone",
+    "primary_contact_id": "PrimaryContactId",
+    "billing_contact_ids": "BillingContactIds",
+    "is_default": "IsDefault",
+    "is_default_billing": "IsDefaultBilling",
+}
+LOCATION_CREATE_TOOL_MAP = {**LOCATION_BODY_MAP, "client_id": "clientId"}
+LOCATION_PATH_MAP = {"client_id": "clientId", "location_id": "locationId"}
+LOCATION_UPDATE_TOOL_MAP = {**LOCATION_BODY_MAP, **LOCATION_PATH_MAP}
+
+# What clears with null on PATCH (the UpdateClientLocationCommand texts: "Send null to clear it"). Name, IsDefault and
+# IsDefaultBilling cannot be cleared; BillingContactIds clears with [] and is a parameter of its own.
+LocationClearable = Literal[
+    "phone_country_code",
+    "phone",
+    "phone_ext",
+    "address1",
+    "address2",
+    "city",
+    "state",
+    "country",
+    "postal_code",
+    "time_zone",
+    "primary_contact_id",
+]
+LOCATION_CLEARABLE = get_args(LocationClearable)
+LOCATION_CLEAR_VALUES = {param: None for param in LOCATION_CLEARABLE}
+BILLING_CONTACTS_MAX = 100  # "At most 100" (the BillingContactIds text)
+
+
+def _location_values(
+    *,
+    name: str | None,
+    phone_country_code: str | None,
+    phone: str | None,
+    phone_ext: str | None,
+    address1: str | None,
+    address2: str | None,
+    city: str | None,
+    state: str | None,
+    country: str | None,
+    postal_code: str | None,
+    time_zone: str | None,
+    primary_contact_id: int | None,
+    billing_contact_ids: list[int] | None,
+    is_default: bool | None,
+    is_default_billing: bool | None,
+    updating: bool,
+) -> dict[str, Any]:
+    """The location parameters, checked: {param: value} with None for "not given". Local errors name the parameter.
+    A blank text is refused (on update with a pointer to clear_fields). billing_contact_ids is at most 100 positive ids; []
+    is refused on create (omit it) and kept as [] on update, where it clears the billing contacts."""
+    texts = {
+        "phone": phone, "phone_ext": phone_ext, "address1": address1, "address2": address2, "city": city,
+        "state": state, "country": country, "postal_code": postal_code, "time_zone": time_zone,
+    }
+    for param, value in texts.items():
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            hint = f'; to remove the stored value pass clear_fields=["{param}"]' if updating else ""
+            raise ValueError(f"{param}: must be text that is not empty or whitespace only{hint}")
+    if name is not None and (not isinstance(name, str) or not name.strip()):
+        raise ValueError("name: must be text that is not empty or whitespace only (Gorelo requires a name)")
+    billing = billing_contact_ids
+    if isinstance(billing, (list, tuple)) and len(billing) > BILLING_CONTACTS_MAX:
+        raise ValueError(f"billing_contact_ids: at most {BILLING_CONTACTS_MAX} values, got {len(billing)}")
+    if isinstance(billing, (list, tuple)) and not billing:
+        if not updating:
+            raise ValueError("billing_contact_ids: must not be an empty list; omit it to create the location without billing contacts")
+        billing = []
+    else:
+        billing = positive_ids("billing_contact_ids", billing)
+    return {
+        "name": name,
+        "phone_country_code": region_code("phone_country_code", phone_country_code),
+        **texts,
+        "primary_contact_id": None if primary_contact_id is None else positive_id("primary_contact_id", primary_contact_id),
+        "billing_contact_ids": billing,
+        "is_default": is_default,
+        "is_default_billing": is_default_billing,
+    }
+
+
+def _location_answer(data: Any, op_key: str, tool: str) -> Any:
+    """The Id of a location Gorelo answered a write with (a write_unconfirmed shape error when the answer has none)."""
+    return created_id(data, op_key, tool=tool)
+
+
+def _billing_ids_of(record: Mapping[str, Any], op_key: str, tool: str) -> list[int]:
+    """The billing contact ids of a location record, in order. ClientLocationResponse.BillingContactIds is a comma-separated
+    STRING (live: the text "[]" when there are none), read here as "", "[]", "41,42" or "[41, 42]" (a JSON list of integers is
+    tolerated too). Anything else is a shape error BEFORE any write: the tool will not compare against a list it cannot read."""
+    raw = record.get("BillingContactIds")
+    problem = None
+    ids: list[int] = []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("[") != text.endswith("]"):
+            problem = "unbalanced brackets"
+        else:
+            if text.startswith("["):
+                text = text[1:-1]
+            for part in (piece.strip() for piece in text.split(",")) if text.strip() else ():
+                if part.isascii() and part.isdigit() and int(part) > 0:
+                    ids.append(int(part))
+                else:
+                    problem = "an entry that is not a positive integer"
+                    break
+    elif isinstance(raw, list) and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in raw):
+        ids = list(raw)
+    else:
+        problem = f"a value of type {describe_value(raw)}"
+    if problem:
+        raise GoreloAPIError(
+            f"{op_key}: could not read BillingContactIds of the location ({problem}); refusing to guess which billing "
+            "contacts it has, so nothing was changed",
+            status=200,
+            op_key=op_key,
+            kind="shape",
+        )
+    return list(dict.fromkeys(ids))
+
+
+def _billing_plan(current: list[int], given: list[int], removes: list[int] | None) -> list[int]:
+    """The ids the call takes off the location: the current ones the given list leaves out. A local error (nothing is sent)
+    when one of them is not named in `removes`, or when `removes` names an id that is not current or is also in the list."""
+    listed = ", ".join(str(c) for c in current) or "none"
+    for index, ident in enumerate(removes or []):
+        if ident not in current:
+            raise ValueError(
+                f"remove_billing_contact_ids[{index}]: {ident} is not a current billing contact of this location "
+                f"(get_client_location shows BillingContactIds: {listed}). Nothing was changed."
+            )
+        if ident in given:
+            raise ValueError(
+                f"remove_billing_contact_ids[{index}]: {ident} is also in billing_contact_ids, so nothing would be removed; "
+                "name it in only one of the two lists. Nothing was changed."
+            )
+    dropped = [ident for ident in current if ident not in given]
+    missing = [ident for ident in dropped if ident not in (removes or [])]
+    if missing:
+        raise ValueError(
+            "billing_contact_ids: Gorelo replaces the whole billing contact list and takes a contact left off also off the "
+            f"client's contracts, so the current billing contact(s) {', '.join(str(i) for i in missing)} would be removed "
+            f"(current list: {listed}). Add each to billing_contact_ids, or name it in remove_billing_contact_ids to remove "
+            "it on purpose; billing_contact_ids=[] needs every current id named there. Nothing was changed."
+        )
+    return dropped
+
+
+def _billing_note(result: dict[str, Any], current: list[int], given: list[int], dropped: list[int]) -> dict[str, Any]:
+    """The result with a `note` (and a `warning` when the answer disagrees) about the billing contacts taken off, from the
+    read-back: a tool reports what Gorelo's answer shows."""
+    if set(result) == {"Id", "warning"}:
+        if not dropped:
+            return result
+        names = ", ".join(str(i) for i in dropped)
+        return {
+            **result,
+            "note": f"asked to take billing contact(s) {names} off this location and off the client's contracts; the read-back failed, so check with get_client_location",
+        }
+    try:
+        shown = _billing_ids_of(result, LOCATION_GET_OP, "update_client_location")
+    except GoreloAPIError:
+        return {**result, "warning": "the read-back does not show BillingContactIds in a form this tool can read; check it with get_client_location"}
+    out = dict(result)
+    gone = [ident for ident in current if ident not in shown]
+    if gone:
+        names = ", ".join(str(i) for i in gone)
+        out["note"] = f"billing contact(s) {names} are taken off this location, and so off the client's contracts"
+    if set(shown) != set(given):
+        out["warning"] = (
+            f"the read-back shows billing contacts {', '.join(str(i) for i in shown) or 'none'} but the call asked for "
+            f"{', '.join(str(i) for i in given) or 'none'}; check it with get_client_location"
+        )
+    return out
+
+
+@gorelo_tool(toolset="core", kind="read", ops=[LOCATION_GET_OP], field_map=LOCATION_PATH_MAP)
+async def get_client_location(
+    ctx: Context,
+    client_id: Annotated[StrictId, Field(description="Client id (list_clients).")],
+    location_id: Annotated[StrictId, Field(description="Location id (list_client_locations).")],
+) -> dict:
+    """Get one location of a client; returns Gorelo's location record.
+    A 404 means the client does not exist or was deleted, the location belongs to another client, or the location was deleted.
+    Resolve ids first: client_id -> list_clients, location_id -> list_client_locations.
+    Side effects: None (read-only).
+    """
+    cid = positive_id("client_id", client_id)
+    lid = positive_id("location_id", location_id)
+    record = await client_of(ctx).get_one(
+        LOCATION_GET_OP, path_params={"clientId": cid, "locationId": lid}, tool="get_client_location"
+    )
+    return expect_object(record, LOCATION_GET_OP, tool="get_client_location")
+
+
+@gorelo_tool(
+    toolset="core", kind="write", ops=[LOCATION_CREATE_OP, LOCATION_GET_OP], field_map=LOCATION_CREATE_TOOL_MAP
+)
+async def create_client_location(
+    ctx: Context,
+    client_id: Annotated[StrictId, Field(description="Client id (list_clients). The internal client is refused (409).")],
+    name: Annotated[str, Field(description="Location name, e.g. Branch Office.")],
+    phone_country_code: Annotated[
+        str | None,
+        Field(description="ISO region code in capitals (US, NZ), not a dial code. Required with phone, and only with it."),
+    ] = None,
+    phone: Annotated[str | None, Field(description="Phone as dialled within its country, no country code.")] = None,
+    phone_ext: Annotated[str | None, Field(description="Phone extension.")] = None,
+    address1: Annotated[str | None, Field(description="Address line 1.")] = None,
+    address2: Annotated[str | None, Field(description="Address line 2.")] = None,
+    city: Annotated[str | None, Field(description="City.")] = None,
+    state: Annotated[str | None, Field(description="State or province.")] = None,
+    country: Annotated[str | None, Field(description="Country.")] = None,
+    postal_code: Annotated[str | None, Field(description="Postal or ZIP code.")] = None,
+    time_zone: Annotated[str | None, Field(description="IANA time zone, e.g. America/New_York.")] = None,
+    primary_contact_id: Annotated[
+        StrictId | None, Field(description="Primary contact (list_contacts): an ACTIVE contact of this client.")
+    ] = None,
+    billing_contact_ids: Annotated[
+        list[StrictId] | None,
+        Field(description="Billing contacts (list_contacts): ACTIVE contacts of this client, at most 100."),
+    ] = None,
+    is_default: Annotated[
+        StrictBool | None,
+        Field(description="True makes this the client's default location; the current default stops being it. Omit for false."),
+    ] = None,
+    is_default_billing: Annotated[
+        StrictBool | None,
+        Field(description="True makes this the default billing location (used on invoices); the current one stops being it. Omit for false."),
+    ] = None,
+) -> dict:
+    """Add a location to a client; returns the new location record (read back with the single GET), or {Id, warning} if the read-back fails.
+    Only client_id and name are required. is_default and is_default_billing MOVE that flag from the client's current default location. Contacts must be active contacts of this client. The internal client answers 409.
+    Resolve ids first: client_id -> list_clients, contacts -> list_contacts.
+    Side effects: creates a real location at once; moving a default changes the address invoices and the accounting system use. A location is removed with delete_client_location, when deletes are enabled.
+    """
+    cid = positive_id("client_id", client_id)
+    values = _location_values(
+        name=name, phone_country_code=phone_country_code, phone=phone, phone_ext=phone_ext, address1=address1,
+        address2=address2, city=city, state=state, country=country, postal_code=postal_code, time_zone=time_zone,
+        primary_contact_id=primary_contact_id, billing_contact_ids=billing_contact_ids, is_default=is_default,
+        is_default_billing=is_default_billing, updating=False,
+    )
+    if values["phone"] is not None and values["phone_country_code"] is None:
+        raise ValueError(
+            "phone_country_code: required when phone is given. Gorelo needs the ISO region code of the number "
+            "(for example US or NZ) and this tool assumes none"
+        )
+    if values["phone_country_code"] is not None and values["phone"] is None:
+        raise ValueError(
+            "phone_country_code: Gorelo refuses a region code without its phone number; pass phone too, or leave "
+            "phone_country_code out"
+        )
+    body = build_body(values, LOCATION_BODY_MAP)
+    data = await client_of(ctx).post(
+        LOCATION_CREATE_OP, path_params={"clientId": cid}, json_body=body, tool="create_client_location"
+    )
+    new_id = _location_answer(data, LOCATION_CREATE_OP, "create_client_location")
+    return await reread_after_write(
+        ctx, LOCATION_GET_OP, path_params={"clientId": cid, "locationId": new_id},
+        tool="create_client_location", written_id=new_id,
+    )
+
+
+@gorelo_tool(
+    toolset="core",
+    kind="write",
+    ops=[LOCATION_UPDATE_OP, LOCATION_GET_OP],
+    field_map=LOCATION_UPDATE_TOOL_MAP,
+    destructive_hint=True,
+)
+async def update_client_location(
+    ctx: Context,
+    client_id: Annotated[StrictId, Field(description="Client id (list_clients).")],
+    location_id: Annotated[StrictId, Field(description="Location id (list_client_locations).")],
+    name: Annotated[str | None, Field(description="New location name, not blank. A name cannot be cleared.")] = None,
+    phone_country_code: Annotated[
+        str | None,
+        Field(description="ISO region code in capitals (US, NZ), not a dial code. A location with a phone needs one."),
+    ] = None,
+    phone: Annotated[str | None, Field(description="New phone as dialled within its country, no country code.")] = None,
+    phone_ext: Annotated[str | None, Field(description="New phone extension.")] = None,
+    address1: Annotated[str | None, Field(description="New address line 1.")] = None,
+    address2: Annotated[str | None, Field(description="New address line 2.")] = None,
+    city: Annotated[str | None, Field(description="New city.")] = None,
+    state: Annotated[str | None, Field(description="New state or province.")] = None,
+    country: Annotated[str | None, Field(description="New country.")] = None,
+    postal_code: Annotated[str | None, Field(description="New postal or ZIP code.")] = None,
+    time_zone: Annotated[str | None, Field(description="New IANA time zone, e.g. America/New_York.")] = None,
+    primary_contact_id: Annotated[
+        StrictId | None, Field(description="New primary contact (list_contacts): an ACTIVE contact of this client.")
+    ] = None,
+    billing_contact_ids: Annotated[
+        list[StrictId] | None,
+        Field(
+            description="The COMPLETE new billing contact list (active contacts of this client, max 100); current one: "
+            "get_client_location. A current contact left off is refused unless in remove_billing_contact_ids."
+        ),
+    ] = None,
+    remove_billing_contact_ids: Annotated[
+        list[StrictId] | None,
+        Field(
+            description="Current billing contacts to take off (also off the client's contracts). Name every current id the "
+            "list leaves out ([] needs all). Only with billing_contact_ids."
+        ),
+    ] = None,
+    is_default: Annotated[
+        StrictBool | None,
+        Field(description="True makes this the default location (the current one stops being it). False on the default is refused (409): mark another location instead."),
+    ] = None,
+    is_default_billing: Annotated[
+        StrictBool | None,
+        Field(description="True makes this the default billing location (the current one stops being it). False on the default billing location is refused (409)."),
+    ] = None,
+    clear_fields: Annotated[
+        list[LocationClearable] | None,
+        Field(description="Fields to clear (sent as null). Not with a value for the same field."),
+    ] = None,
+) -> dict:
+    """Change fields of one client location; returns the updated location (read back with the single GET), or {Id, warning} if the read-back fails. Send only what changes.
+    clear_fields empties phone, address, city, state, country, postal code, time zone and primary contact fields; name and the two default flags cannot be cleared (the default only moves by marking another location). billing_contact_ids replaces the whole list ([] clears); the tool reads the location first and a current contact left off is refused unless remove_billing_contact_ids names it.
+    Resolve ids first: client_id -> list_clients, location_id -> list_client_locations.
+    Side effects: overwrites or clears values; a default flag moves from the current holder; a contact taken off the billing list leaves the client's contracts.
+    """
+    cid = positive_id("client_id", client_id)
+    lid = positive_id("location_id", location_id)
+    clear = _location_clear_list(clear_fields)
+    removes = positive_ids("remove_billing_contact_ids", remove_billing_contact_ids)
+    if removes is not None and billing_contact_ids is None:
+        raise ValueError(
+            "remove_billing_contact_ids: only together with billing_contact_ids, the complete new list "
+            "(get_client_location shows the current one)"
+        )
+    values = _location_values(
+        name=name, phone_country_code=phone_country_code, phone=phone, phone_ext=phone_ext, address1=address1,
+        address2=address2, city=city, state=state, country=country, postal_code=postal_code, time_zone=time_zone,
+        primary_contact_id=primary_contact_id, billing_contact_ids=billing_contact_ids, is_default=is_default,
+        is_default_billing=is_default_billing, updating=True,
+    )
+    for param in clear:
+        if values[param] is not None:
+            raise ValueError(f"{param}: cannot be given a value and listed in clear_fields in the same call")
+    if values["phone_country_code"] is not None and "phone" in clear:
+        raise ValueError(
+            "phone_country_code: cannot be set while phone is cleared; Gorelo refuses a region code without its "
+            "phone number. Clear phone_country_code as well"
+        )
+    if "phone_country_code" in clear and values["phone"] is not None:
+        raise ValueError(
+            "phone_country_code: cannot be cleared while phone is given; Gorelo needs the region code whenever the "
+            "location has a phone number"
+        )
+    clears_billing = values["billing_contact_ids"] == []
+    body = build_body(
+        {**values, "billing_contact_ids": None if clears_billing else values["billing_contact_ids"]},
+        LOCATION_BODY_MAP,
+        clear=clear,
+        clear_values=LOCATION_CLEAR_VALUES,
+    )
+    if clears_billing:
+        body["BillingContactIds"] = []
+    if not body:
+        raise ValueError(
+            "nothing to update: pass at least one of name, phone_country_code, phone, phone_ext, address1, address2, "
+            "city, state, country, postal_code, time_zone, primary_contact_id, billing_contact_ids, is_default, "
+            "is_default_billing or clear_fields"
+        )
+    client = client_of(ctx)
+    current: list[int] = []
+    dropped: list[int] = []
+    if values["billing_contact_ids"] is not None:
+        # the read before the write: the list is replaced whole, and a contact left off also leaves the client's contracts
+        before = await client.get_one(
+            LOCATION_GET_OP, path_params={"clientId": cid, "locationId": lid}, tool="update_client_location"
+        )
+        current = _billing_ids_of(
+            expect_object(before, LOCATION_GET_OP, tool="update_client_location"), LOCATION_GET_OP, "update_client_location"
+        )
+        dropped = _billing_plan(current, values["billing_contact_ids"], removes)
+    data = await client.patch(
+        LOCATION_UPDATE_OP,
+        path_params={"clientId": cid, "locationId": lid},
+        json_body=body,
+        tool="update_client_location",
+    )
+    written = _location_answer(data, LOCATION_UPDATE_OP, "update_client_location")
+    result = await reread_after_write(
+        ctx, LOCATION_GET_OP, path_params={"clientId": cid, "locationId": lid},
+        tool="update_client_location", written_id=written,
+    )
+    if values["billing_contact_ids"] is None:
+        return result
+    return _billing_note(result, current, values["billing_contact_ids"], dropped)
+
+
+def _location_clear_list(clear_fields: list[str] | None) -> list[str]:
+    """clear_fields as a list of distinct accepted names (a local error otherwise)."""
+    if clear_fields is None:
+        return []
+    non_empty("clear_fields", clear_fields)
+    names: list[str] = []
+    for index, name in enumerate(clear_fields):
+        if name == "billing_contact_ids":
+            raise ValueError("clear_fields: billing_contact_ids is cleared by passing billing_contact_ids=[]")
+        if name in ("name", "is_default", "is_default_billing"):
+            raise ValueError(
+                f"clear_fields: {name} cannot be cleared"
+                + (
+                    "; a default location only moves by marking another location as the default"
+                    if name != "name" else "; pass a new name instead"
+                )
+            )
+        if not isinstance(name, str) or name not in LOCATION_CLEARABLE:
+            raise ValueError(f"clear_fields[{index}]: {name!r} cannot be cleared; allowed: {', '.join(LOCATION_CLEARABLE)}")
+        if name not in names:
+            names.append(name)
+    return names
+
+
+@gorelo_tool(
+    toolset="core", kind="destructive", ops=[LOCATION_DELETE_OP], field_map=LOCATION_PATH_MAP
+)
+async def delete_client_location(
+    ctx: Context,
+    client_id: Annotated[StrictId, Field(description="Client id (list_clients).")],
+    location_id: Annotated[StrictId, Field(description="Location id (list_client_locations).")],
+    confirm: Annotated[StrictBool, Field(description="Must be true to delete; ask the user first.")] = False,
+) -> dict:
+    """Delete (deactivate) one client location; returns {Id}.
+    Gorelo refuses (409, the message names each kind and how many) while the location is the client's default location, its default billing location or its only location, and while open tickets, assets, active contacts, contracts, products or bundles are still at it: move them to another location, then retry. Deleting an already deleted location succeeds.
+    Side effects: the location is marked inactive, not removed, and leaves the client's lists; no tool restores it.
+    Ask the user first; needs confirm=true.
+    """
+    cid = positive_id("client_id", client_id)
+    lid = positive_id("location_id", location_id)
+    require_confirm(
+        confirm,
+        action=f"delete location {lid} of client {cid}",
+        effect=(
+            "The location is marked inactive and leaves the client's locations; Gorelo refuses (409) while it is the "
+            "default or default billing location, the client's only location, or while open tickets, assets, active "
+            "contacts, contracts, products or bundles are at it. Nothing has been sent to Gorelo."
+        ),
+    )
+    data = await client_of(ctx).delete(
+        LOCATION_DELETE_OP, path_params={"clientId": cid, "locationId": lid}, tool="delete_client_location"
+    )
+    return expect_object(data, LOCATION_DELETE_OP, tool="delete_client_location")
+
+
+# --------------------------------------------------------------------------
+# Client web domains
+# --------------------------------------------------------------------------
+
+DOMAIN_BODY_MAP = {"name": "Name", "expiration_date": "ExpirationDate"}
+DOMAIN_CREATE_TOOL_MAP = {**DOMAIN_BODY_MAP, "client_id": "clientId"}
+DOMAIN_PATH_MAP = {"client_id": "clientId", "domain_id": "domainId"}
+DOMAIN_UPDATE_TOOL_MAP = {**DOMAIN_BODY_MAP, **DOMAIN_PATH_MAP}
+_CALENDAR_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _calendar_date(param: str, value: Any) -> str | None:
+    """A calendar date "yyyy-MM-dd" (the ExpirationDate format); None passes."""
+    if value is None:
+        return None
+    if isinstance(value, str) and _CALENDAR_DATE.fullmatch(value):
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            pass
+        else:
+            return value
+    raise ValueError(f"{param}: expected a calendar date as YYYY-MM-DD (no time, no zone), got {describe_value(value)}")
+
+
+def _domain_name(param: str, value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{param}: must be text that is not empty or whitespace only (a domain such as contoso.com)")
+    return value
+
+
+async def _domain_result(ctx: Context, *, client_id: int, answer: Any, op_key: str, tool: str) -> dict[str, Any]:
+    """The domain a write just saved, read back. There is no single-domain GET, but the text of the create says the new
+    domain appears in the client's Domains, so the client is read (GET /v1/clients/{clientId}) and the Domains entry with
+    the answered Id is returned. When the read fails or does not list the domain, Gorelo's own answer is returned with a
+    `warning` that says so (never an error: the write was applied)."""
+    record = expect_object(answer, op_key, tool=tool)
+    domain_id = created_id(record, op_key, tool=tool)
+    read = await reread_after_write(
+        ctx, GET_OP, path_params={"clientId": client_id}, tool=tool, written_id=domain_id
+    )
+    if set(read) == {"Id", "warning"}:
+        return {**record, "warning": read["warning"]}
+    domains = read.get("Domains")
+    if isinstance(domains, list):
+        for entry in domains:
+            if isinstance(entry, dict) and str(entry.get("Id")) == str(domain_id):
+                return entry
+    return {
+        **record,
+        "warning": (
+            f"the write succeeded; re-reading the client did not list domain {domain_id} in its Domains, so this is "
+            f"Gorelo's own answer. Do not repeat the write; check with get_client({client_id})."
+        ),
+    }
+
+
+@gorelo_tool(
+    toolset="core", kind="write", ops=[DOMAIN_CREATE_OP, GET_OP], field_map=DOMAIN_CREATE_TOOL_MAP
+)
+async def create_client_domain(
+    ctx: Context,
+    client_id: Annotated[StrictId, Field(description="Client id (list_clients).")],
+    name: Annotated[str, Field(description="Domain, e.g. contoso.com. No other client may hold it.")],
+    expiration_date: Annotated[
+        str | None,
+        Field(description="Registration expiry, YYYY-MM-DD. Omit it and Gorelo looks it up from the registry where one is published."),
+    ] = None,
+) -> dict:
+    """Add a web domain to a client; returns the new domain entry (read back from the client's Domains), or Gorelo's answer with a warning if the read-back fails.
+    Inbound email from the domain is matched to this client, so a domain belongs to ONE client only: a name any client already holds is a 400 on name.
+    Resolve ids first: client_id -> list_clients.
+    Side effects: creates the domain at once and routes that domain's inbound email to this client. A domain is removed with delete_client_domain, when deletes are enabled.
+    """
+    cid = positive_id("client_id", client_id)
+    domain = _domain_name("name", name)
+    expiry = _calendar_date("expiration_date", expiration_date)
+    body = build_body({"name": domain, "expiration_date": expiry}, DOMAIN_BODY_MAP)
+    data = await client_of(ctx).post(
+        DOMAIN_CREATE_OP, path_params={"clientId": cid}, json_body=body, tool="create_client_domain"
+    )
+    return await _domain_result(ctx, client_id=cid, answer=data, op_key=DOMAIN_CREATE_OP, tool="create_client_domain")
+
+
+@gorelo_tool(
+    toolset="core",
+    kind="write",
+    ops=[DOMAIN_UPDATE_OP, GET_OP],
+    field_map=DOMAIN_UPDATE_TOOL_MAP,
+    destructive_hint=True,
+)
+async def update_client_domain(
+    ctx: Context,
+    client_id: Annotated[StrictId, Field(description="Client id (list_clients).")],
+    domain_id: Annotated[StrictId, Field(description="Domain id: the Id in the Domains of get_client.")],
+    name: Annotated[str | None, Field(description="New domain name; no other client may hold it. A name cannot be cleared.")] = None,
+    expiration_date: Annotated[
+        str | None,
+        Field(description="Expiry, YYYY-MM-DD; a date sent is kept as set by hand. To go back to the registry's date use reset_expiration_date."),
+    ] = None,
+    reset_expiration_date: Annotated[
+        StrictBool | None,
+        Field(description="True sends null: the expiry goes back to the date looked up from the domain registry. Not with expiration_date."),
+    ] = None,
+) -> dict:
+    """Change the name or expiry of one client web domain; returns the domain entry (read back from the client's Domains), or Gorelo's answer with a warning if the read-back fails. Send only what changes.
+    A new name is checked as on create (one client per domain). A sent expiry is kept as set by hand; reset_expiration_date returns it to the registry's date.
+    Resolve ids first: client_id -> list_clients, domain_id -> get_client (Domains).
+    Side effects: overwrites the value; a renamed domain changes which client its inbound email is matched to.
+    """
+    cid = positive_id("client_id", client_id)
+    did = positive_id("domain_id", domain_id)
+    domain = _domain_name("name", name)
+    expiry = _calendar_date("expiration_date", expiration_date)
+    reset = reset_expiration_date is True
+    if reset and expiry is not None:
+        raise ValueError(
+            "expiration_date: cannot be given a value together with reset_expiration_date (a date sent is kept as "
+            "set by hand; the reset returns the expiry to the registry's date)"
+        )
+    body = build_body(
+        {"name": domain, "expiration_date": expiry},
+        DOMAIN_BODY_MAP,
+        clear=["expiration_date"] if reset else [],
+        clear_values={"expiration_date": None},
+    )
+    if not body:
+        raise ValueError(
+            "nothing to update: pass name, expiration_date or reset_expiration_date (only the fields you pass are changed)"
+        )
+    data = await client_of(ctx).patch(
+        DOMAIN_UPDATE_OP, path_params={"clientId": cid, "domainId": did}, json_body=body, tool="update_client_domain"
+    )
+    return await _domain_result(ctx, client_id=cid, answer=data, op_key=DOMAIN_UPDATE_OP, tool="update_client_domain")
+
+
+@gorelo_tool(toolset="core", kind="destructive", ops=[DOMAIN_DELETE_OP], field_map=DOMAIN_PATH_MAP)
+async def delete_client_domain(
+    ctx: Context,
+    client_id: Annotated[StrictId, Field(description="Client id (list_clients).")],
+    domain_id: Annotated[StrictId, Field(description="Domain id: the Id in the Domains of get_client.")],
+    confirm: Annotated[StrictBool, Field(description="Must be true to delete; ask the user first.")] = False,
+) -> dict:
+    """Delete (deactivate) one web domain of a client; returns {Id}.
+    The domain leaves the client's Domains and inbound email from it is no longer matched to the client. Deleting an already deleted domain succeeds.
+    Side effects: the domain is marked inactive; no tool restores it, but create_client_domain can add the name again.
+    Ask the user first; needs confirm=true.
+    """
+    cid = positive_id("client_id", client_id)
+    did = positive_id("domain_id", domain_id)
+    require_confirm(
+        confirm,
+        action=f"delete domain {did} of client {cid}",
+        effect=(
+            "The domain leaves the client's Domains and inbound email from it is no longer matched to the client. "
+            "Nothing has been sent to Gorelo."
+        ),
+    )
+    data = await client_of(ctx).delete(
+        DOMAIN_DELETE_OP, path_params={"clientId": cid, "domainId": did}, tool="delete_client_domain"
+    )
+    return expect_object(data, DOMAIN_DELETE_OP, tool="delete_client_domain")

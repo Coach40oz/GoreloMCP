@@ -18,8 +18,8 @@ EN_DASH = chr(0x2013)
 # They are pinned here so the guard needs no git (a checkout without tags, a release tree and a sandbox without git all still
 # check). If a dependency change is made on purpose, replace them in the same commit.
 PINNED_SHA256 = {
-    "pyproject.toml": "62a527004fc2ac480baa64b73da0d53242fd7fb9db06ec3bf2e12ee117b38076",
-    "uv.lock": "acc1bc51c5fbd4da46b384f77cda726469ac34969326b25cfc4e7cc51115722f",
+    "pyproject.toml": "ae0d2f5afae65f7c387cf27d2b70166f5215a7bfc13a41906c982d1ccd1dca31",
+    "uv.lock": "e99a9fb2fe9c1fdb58f3d1c9419d94256ee713781bfb73114ccf2fac7140b360",
 }
 
 

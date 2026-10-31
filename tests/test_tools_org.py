@@ -1,4 +1,4 @@
-"""tools/org.py: list_org_groups, list_org_users."""
+"""tools/org.py: list_org_roles, list_org_groups, get_org_group, list_org_users, get_org_user."""
 
 import json
 import re
@@ -30,13 +30,34 @@ EM_DASH, EN_DASH = chr(0x2014), chr(0x2013)
 LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-latest.json"
 needs_spec_text = pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
 
+ROLES = "/v1/organization/roles"
 GROUPS = "/v1/organization/groups"
 USERS = "/v1/organization/users"
+GROUP_PATH = f"{GROUPS}/7201"
+USER_PATH = f"{USERS}/9201"
 
 TOOLS = {
+    "list_org_roles": ["GET /v1/organization/roles"],
     "list_org_groups": ["GET /v1/organization/groups"],
+    "get_org_group": ["GET /v1/organization/groups/{groupId}"],
     "list_org_users": ["GET /v1/organization/users"],
+    "get_org_user": ["GET /v1/organization/users/{userId}"],
 }
+
+# Arguments that each tool does not take: a paged list takes page_size and cursor only, the others take none of them.
+NOT_TAKEN = {
+    "list_org_roles": ["page_size", "cursor", "query"],
+    "list_org_groups": ["page_size", "cursor", "query"],
+    "get_org_group": ["page_size", "cursor", "query"],
+    "list_org_users": ["page_size", "cursor"],
+    "get_org_user": ["page_size", "cursor", "query"],
+}
+
+
+def role_record(role_id=3, name="Technician", **extra):
+    record = {"Id": role_id, "Name": name, "CreatedOn": "2024-01-02T03:04:05Z", "UpdatedOn": None}
+    record.update(extra)
+    return record
 
 
 @pytest.fixture
@@ -105,31 +126,49 @@ async def test_list_org_groups_takes_no_parameter(server):
     assert (tool.annotations.readOnlyHint, tool.annotations.destructiveHint) == (True, False)
 
 
-async def test_list_org_users_takes_only_status_ids(server):
+async def test_list_org_users_takes_its_four_filters_and_no_paging(server):
     tool = next(t for t in await list_tools(server) if t.name == "list_org_users")
     schema = tool.inputSchema
-    assert set(schema["properties"]) == {"status_ids"}
+    assert set(schema["properties"]) == {"status_ids", "group_ids", "query", "updated_since"}
     status = schema["properties"]["status_ids"]
     assert status["type"] == "array" and status["items"]["type"] == "integer"
     assert status["description"] == org_module.USER_STATUSES
     assert "given, only those statuses" in status["description"]
-    assert "status_ids" not in (schema.get("required") or [])
+    assert schema["properties"]["group_ids"]["items"]["type"] == "integer"
+    assert schema["properties"]["query"]["type"] == "string"
+    assert schema["properties"]["updated_since"]["type"] == "string"
+    assert not set(schema.get("required") or [])
     assert (tool.annotations.readOnlyHint, tool.annotations.destructiveHint) == (True, False)
 
 
 @pytest.mark.parametrize("name", sorted(TOOLS))
-@pytest.mark.parametrize("extra", ["page_size", "cursor", "query"])
-async def test_a_paging_or_filter_argument_is_refused_before_any_http_call(server, mock_gorelo, name, extra):
-    # the legacy list_org_groups sent pageSize=200 and Gorelo answered 400
-    text = await call_tool_error(server, name, {extra: 5 if extra == "page_size" else "x"})
-    assert extra in text
+async def test_a_paging_or_filter_argument_the_tool_does_not_take_is_refused_before_any_http_call(
+    server, mock_gorelo, name
+):
+    # the legacy list_org_groups sent pageSize=200 and Gorelo answered 400; a tool that takes no query has no query param
+    for extra in NOT_TAKEN[name]:
+        text = await call_tool_error(server, name, {extra: 5 if extra == "page_size" else "x"})
+        assert extra in text
     assert mock_gorelo.requests == []
 
 
 @pytest.mark.parametrize("name", sorted(TOOLS))
 def test_docstrings_follow_the_template(name):
     doc = next(s for s in REGISTRY.specs if s.name == name).fn.__doc__
-    assert "Side effects:" not in doc and "Paging:" not in doc  # read only, and no paging for the caller
+    assert "Paging:" not in doc  # no paging for the caller
+    if name in TEMPLATE_READS:  # the 1.5.0 reads state their ids and that they change nothing
+        assert "Resolve ids first:" in doc and "Side effects: None (read-only)." in doc
+    else:
+        assert "Side effects:" not in doc
+
+
+# the 1.5.0 reads that carry the full template lines
+TEMPLATE_READS = {"list_org_roles", "get_org_group", "get_org_user"}
+
+
+def test_the_template_reads_name_the_tool_that_resolves_their_id():
+    assert "group_id -> list_org_groups" in org_module.get_org_group.__doc__
+    assert "user_id -> list_org_users" in org_module.get_org_user.__doc__
 
 
 def test_the_groups_docstring_says_it_is_not_paged_and_the_users_docstring_says_every_page_is_read():
@@ -360,6 +399,258 @@ async def test_list_org_users_maps_a_status_ids_rejection_to_the_snake_case_name
     assert text == trace("Gorelo rejected list_org_users (HTTP 400, code 070101): status_ids: Not valid.")
 
 
+def user_detail_record(user_id=9201, **extra):
+    """A UserDetailModel: the list row plus RoleId and GroupIds."""
+    record = user_record(user_id)
+    record.update({"RoleId": 3, "GroupIds": [7201]})
+    record.update(extra)
+    return record
+
+
+# --------------------------------------------------------------------------
+# The rows the fixtures serve are the spec's schemas
+# --------------------------------------------------------------------------
+
+
+def test_the_fixtures_are_shaped_like_the_spec(spec_index):
+    def fields(name):
+        return set(spec_index.schema(name)["fields"])
+
+    assert set(role_record()) == fields("RoleModel")
+    assert set(group_record()) == fields("GetGroupsResponseModel")
+    assert set(user_record()) == fields("UserModel")
+    assert set(user_detail_record()) == fields("UserDetailModel")
+
+
+# --------------------------------------------------------------------------
+# list_org_roles
+# --------------------------------------------------------------------------
+
+
+async def test_list_org_roles_makes_a_plain_get_with_no_query_string(server, mock_gorelo):
+    rows = [role_record(1, "Administrator"), role_record(3, "Technician")]
+    mock_gorelo.on("GET", ROLES, envelope(rows))
+    result = await call_tool(server, "list_org_roles")
+    request = mock_gorelo.last
+    assert (request.method, request.path, request.query, request.content) == ("GET", ROLES, {}, b"")
+    assert len(mock_gorelo.requests) == 1
+    assert result == {"items": rows, "count": 2}
+
+
+async def test_list_org_roles_returns_an_empty_list_as_an_empty_list(server, mock_gorelo):
+    mock_gorelo.on("GET", ROLES, envelope([]))
+    assert await call_tool(server, "list_org_roles") == {"items": [], "count": 0}
+
+
+@pytest.mark.parametrize("data", [None, {"Items": []}, "none", True])
+async def test_list_org_roles_refuses_an_answer_that_is_not_a_list(server, mock_gorelo, data):
+    mock_gorelo.on("GET", ROLES, envelope(data))
+    text = await call_tool_error(server, "list_org_roles")
+    assert text.startswith("Gorelo returned an unexpected response for list_org_roles")
+    assert "expected Data to be a list" in text
+
+
+async def test_list_org_roles_maps_a_gorelo_error_to_a_tool_error(server, mock_gorelo):
+    mock_gorelo.on("GET", ROLES, error_envelope(401, [("070401", "Invalid API key.")]))
+    text = await call_tool_error(server, "list_org_roles")
+    assert text == trace("Gorelo rejected list_org_roles (HTTP 401, code 070401): Invalid API key.")
+
+
+async def test_list_org_roles_names_a_missing_scope(server, mock_gorelo):
+    mock_gorelo.on("GET", ROLES, error_envelope(403, [("080203", "API key does not have 'Organization' scope")]))
+    text = await call_tool_error(server, "list_org_roles")
+    assert "the API key does not have the 'Organization' scope" in text
+
+
+def test_the_roles_docstring_says_it_resolves_the_role_id_of_a_user():
+    text = flat(org_module.list_org_roles.__doc__)
+    assert "not paged" in text and "get_org_user" in text and "RoleId" in text
+
+
+# --------------------------------------------------------------------------
+# get_org_group
+# --------------------------------------------------------------------------
+
+
+async def test_get_org_group_reads_one_record_by_its_id(server, mock_gorelo):
+    record = group_record(7201, "Everyone")
+    mock_gorelo.on("GET", GROUP_PATH, envelope(record))
+    result = await call_tool(server, "get_org_group", {"group_id": 7201})
+    request = mock_gorelo.last
+    assert (request.method, request.path, request.query, request.content) == ("GET", GROUP_PATH, {}, b"")
+    assert len(mock_gorelo.requests) == 1
+    assert result == record
+
+
+async def test_get_org_group_maps_a_404_to_the_group_id_param(server, mock_gorelo):
+    mock_gorelo.on("GET", GROUP_PATH, error_envelope(404, [("070404", "Group not found.", "groupId")]))
+    text = await call_tool_error(server, "get_org_group", {"group_id": 7201})
+    assert text == trace("Gorelo rejected get_org_group (HTTP 404, code 070404): group_id: Group not found.")
+
+
+@pytest.mark.parametrize("data", [None, [], "group", True])
+async def test_get_org_group_refuses_an_answer_that_is_not_one_object(server, mock_gorelo, data):
+    mock_gorelo.on("GET", GROUP_PATH, envelope(data))
+    text = await call_tool_error(server, "get_org_group", {"group_id": 7201})
+    assert text.startswith("Gorelo returned an unexpected response for get_org_group")
+    assert "refusing to guess" in text
+
+
+@pytest.mark.parametrize("bad", [True, "7201", 7201.0])
+async def test_get_org_group_refuses_a_group_id_that_is_not_an_integer(server, mock_gorelo, bad):
+    text = await call_tool_error(server, "get_org_group", {"group_id": bad})
+    assert "group_id" in text and "valid integer" in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    ("bad", "kind"),
+    [(0, "zero or a negative number"), (-3, "zero or a negative number"), (MAX_ID + 1, "a number above")],
+)
+async def test_get_org_group_refuses_an_out_of_range_id_before_any_http_call(client_factory, mock_gorelo, bad, kind):
+    with pytest.raises(ToolError) as info:
+        await call_directly(client_factory, org_module.get_org_group, group_id=bad)
+    assert str(info.value).startswith("group_id: expected a positive whole number such as 123, got ")
+    assert kind in str(info.value)
+    assert mock_gorelo.requests == []
+
+
+def test_the_group_docstring_says_its_members_come_from_list_org_users():
+    text = flat(org_module.get_org_group.__doc__)
+    assert "same shape as a list_org_groups row" in text and "list_org_users with group_ids" in text
+
+
+# --------------------------------------------------------------------------
+# list_org_users: the new filters
+# --------------------------------------------------------------------------
+
+
+async def test_list_org_users_sends_group_query_and_updated_since_under_their_spec_names(server, mock_gorelo):
+    mock_gorelo.on("GET", USERS, paged_envelope([user_record(9201)], total_count=1))
+    result = await call_tool(
+        server,
+        "list_org_users",
+        {"group_ids": [7201, 7202], "query": "alex", "updated_since": "2026-10-01T09:30:00-05:00"},
+    )
+    assert mock_gorelo.last.query == {
+        "GroupIds": "7201,7202",
+        "Query": "alex",
+        "UpdatedSince": "2026-10-01T14:30:00Z",
+        "PageSize": "200",
+    }
+    assert result["filters"] == {
+        "group_ids": [7201, 7202],
+        "query": "alex",
+        "updated_since": "2026-10-01T14:30:00Z",
+    }
+    assert (result["count"], result["total_count"], result["complete_scan"], result["truncated"]) == (1, 1, True, False)
+
+
+async def test_list_org_users_sends_the_new_filters_on_every_page(server, mock_gorelo):
+    mock_gorelo.on("GET", USERS, paged_responder([[user_record(1)], [user_record(2)]], total_count=2))
+    result = await call_tool(server, "list_org_users", {"group_ids": [7201], "query": "Example"})
+    assert [r.query for r in mock_gorelo.requests] == [
+        {"GroupIds": "7201", "Query": "Example", "PageSize": "200"},
+        {"GroupIds": "7201", "Query": "Example", "PageSize": "200", "Cursor": "c1"},
+    ]
+    assert result["count"] == 2 and result["filters"] == {"group_ids": [7201], "query": "Example"}
+
+
+@pytest.mark.parametrize(
+    ("args", "fragment"),
+    [
+        ({"group_ids": []}, "group_ids: expected at least one id, got an empty list"),
+        ({"group_ids": [0]}, "group_ids[0]: expected a positive whole number such as 123, got zero or a negative number"),
+        ({"group_ids": [1] * 101}, "group_ids: Gorelo accepts at most 100 ids in one filter, got 101"),
+        ({"query": ""}, "query: must not be empty or whitespace only"),
+        ({"query": "   "}, "query: must not be empty or whitespace only"),
+        ({"query": "x" * 201}, "query: at most 200 characters, got 201"),
+        ({"updated_since": "2026-10-01T09:30:00"}, "updated_since: '2026-10-01T09:30:00' has no UTC offset"),
+        ({"updated_since": "last week"}, "updated_since: 'last week' is not an ISO 8601 datetime"),
+    ],
+)
+async def test_list_org_users_refuses_a_bad_new_filter_before_any_http_call(server, mock_gorelo, args, fragment):
+    text = await call_tool_error(server, "list_org_users", args)
+    assert fragment in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    ("property_name", "param"),
+    [("GroupIds", "group_ids"), ("Query", "query"), ("UpdatedSince", "updated_since"), ("StatusIds", "status_ids")],
+)
+async def test_list_org_users_maps_a_gorelo_rejection_of_each_filter_to_its_param(server, mock_gorelo, property_name, param):
+    mock_gorelo.on("GET", USERS, error_envelope(400, [("070101", "Not valid.", property_name)]))
+    args = {"status_ids": [2]} if param == "status_ids" else {"group_ids": [7201]}
+    text = await call_tool_error(server, "list_org_users", args)
+    assert text == trace(f"Gorelo rejected list_org_users (HTTP 400, code 070101): {param}: Not valid.")
+
+
+def test_the_users_docstring_says_where_the_role_and_the_groups_are():
+    text = flat(org_module.list_org_users.__doc__)
+    assert "Rows lack RoleId and GroupIds: get_org_user has them." in text
+
+
+# --------------------------------------------------------------------------
+# get_org_user
+# --------------------------------------------------------------------------
+
+
+async def test_get_org_user_reads_one_user_with_its_role_and_groups(server, mock_gorelo):
+    record = user_detail_record(9201)
+    mock_gorelo.on("GET", USER_PATH, envelope(record))
+    result = await call_tool(server, "get_org_user", {"user_id": 9201})
+    request = mock_gorelo.last
+    assert (request.method, request.path, request.query, request.content) == ("GET", USER_PATH, {}, b"")
+    assert len(mock_gorelo.requests) == 1
+    assert result == record
+
+
+async def test_get_org_user_returns_a_disabled_user_too(server, mock_gorelo):
+    record = user_detail_record(9201, Status={"Id": 3, "Name": "Disabled"})
+    mock_gorelo.on("GET", USER_PATH, envelope(record))
+    result = await call_tool(server, "get_org_user", {"user_id": 9201})
+    assert result["Status"] == {"Id": 3, "Name": "Disabled"}
+
+
+async def test_get_org_user_maps_a_404_to_the_user_id_param(server, mock_gorelo):
+    mock_gorelo.on("GET", USER_PATH, error_envelope(404, [("070404", "User not found.", "userId")]))
+    text = await call_tool_error(server, "get_org_user", {"user_id": 9201})
+    assert text == trace("Gorelo rejected get_org_user (HTTP 404, code 070404): user_id: User not found.")
+
+
+@pytest.mark.parametrize("data", [None, [], "user", True])
+async def test_get_org_user_refuses_an_answer_that_is_not_one_object(server, mock_gorelo, data):
+    mock_gorelo.on("GET", USER_PATH, envelope(data))
+    text = await call_tool_error(server, "get_org_user", {"user_id": 9201})
+    assert text.startswith("Gorelo returned an unexpected response for get_org_user")
+    assert "refusing to guess" in text
+
+
+@pytest.mark.parametrize("bad", [True, "9201", 9201.0])
+async def test_get_org_user_refuses_a_user_id_that_is_not_an_integer(server, mock_gorelo, bad):
+    text = await call_tool_error(server, "get_org_user", {"user_id": bad})
+    assert "user_id" in text and "valid integer" in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    ("bad", "kind"),
+    [(0, "zero or a negative number"), (-9, "zero or a negative number"), (MAX_ID + 1, "a number above")],
+)
+async def test_get_org_user_refuses_an_out_of_range_id_before_any_http_call(client_factory, mock_gorelo, bad, kind):
+    with pytest.raises(ToolError) as info:
+        await call_directly(client_factory, org_module.get_org_user, user_id=bad)
+    assert str(info.value).startswith("user_id: expected a positive whole number such as 123, got ")
+    assert kind in str(info.value)
+    assert mock_gorelo.requests == []
+
+
+def test_the_user_docstring_says_a_disabled_user_is_returned_and_where_the_names_come_from():
+    text = flat(org_module.get_org_user.__doc__)
+    assert "a disabled one included" in text and "list_org_roles" in text and "list_org_groups" in text
+
+
 def operation(method, path):
     return json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["paths"][path][method]
 
@@ -376,6 +667,30 @@ def test_the_user_status_scale_is_the_one_the_spec_text_documents():
     assert "Omit for Pending and Active" in text
     assert "disabled users are listed only when 3 is named" in text
     assert "Any other id is a 400" in text
+
+
+@needs_spec_text
+def test_the_new_operations_say_what_the_tools_say():
+    roles = " ".join(operation("get", "/v1/organization/roles")["summary"].split())
+    assert "Resolves the RoleId a user carries. Not paginated." in roles
+    user = " ".join(operation("get", "/v1/organization/users/{userId}")["description"].split())
+    assert "A user of any status is returned, a Disabled one included. An id that is not a user of this account is a 404." in user
+    group = " ".join(operation("get", "/v1/organization/groups/{groupId}")["description"].split())
+    assert "An id that is not an active group of this account is a 404." in group
+    assert "GET /v1/organization/users?groupIds={groupId} lists" in group
+
+
+@needs_spec_text
+def test_the_new_user_filters_are_the_ones_the_spec_documents():
+    assert param_text("get", "/v1/organization/users", "GroupIds") == (
+        "Comma-separated group ids (from GET /v1/organization/groups); keeps users who are members of any of them. Up to 100 values."
+    )
+    assert param_text("get", "/v1/organization/users", "Query") == (
+        "Keyword matched against the user's first name, last name and email. Up to 200 characters."
+    )
+    assert "ISO-8601 timestamp; keeps only users updated at or after it." == param_text(
+        "get", "/v1/organization/users", "UpdatedSince"
+    )
 
 
 def test_the_org_module_text_is_plain_ascii_without_dashes():

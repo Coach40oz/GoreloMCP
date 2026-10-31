@@ -2377,6 +2377,19 @@ EXPECTED_TOOLS = {
     "list_document_versions": ("read", ["GET /v1/documents/{documentId}/versions"], False),
     "get_document_version": ("read", ["GET /v1/documents/{documentId}/versions/{versionId}"], False),
     "list_document_related_items": ("read", ["GET /v1/documents/{documentId}/related-items"], False),
+    # the structured document reads (tests/test_tools_structured_documents.py checks their texts and parameters)
+    "list_structured_documents": ("read", ["GET /v1/documents/structured"], False),
+    "get_structured_document": ("read", ["GET /v1/documents/structured/{structuredDocumentId}"], False),
+    "list_structured_document_submissions": (
+        "read",
+        ["GET /v1/documents/structured/{structuredDocumentId}/submissions"],
+        False,
+    ),
+    "get_structured_document_submission": (
+        "read",
+        ["GET /v1/documents/structured/{structuredDocumentId}/submissions/{submissionId}"],
+        False,
+    ),
     "create_document": ("write", ["POST /v1/documents"], False),
     "update_document": ("write", ["GET /v1/documents/{documentId}", "PATCH /v1/documents/{documentId}"], True),
     "move_document": ("write", ["PATCH /v1/documents/{documentId}"], True),
@@ -2415,6 +2428,10 @@ DOCUMENT_OPS = {
     "GET /v1/documents/{documentId}/versions",
     "GET /v1/documents/{documentId}/versions/{versionId}",
     "POST /v1/documents/{documentId}/versions/{versionId}/restore",
+    "GET /v1/documents/structured",
+    "GET /v1/documents/structured/{structuredDocumentId}",
+    "GET /v1/documents/structured/{structuredDocumentId}/submissions",
+    "GET /v1/documents/structured/{structuredDocumentId}/submissions/{submissionId}",
 }
 
 
@@ -2424,7 +2441,7 @@ def test_the_module_declares_exactly_these_tools():
     assert {spec.toolset for spec in module_specs()} == {"documents"}
 
 
-def test_the_twelve_document_operations_are_all_used_and_all_exist(spec_index):
+def test_the_document_operations_are_all_used_and_all_exist(spec_index):
     used = {op for spec in module_specs() for op in spec.ops}
     assert used == DOCUMENT_OPS
     assert all(op in spec_index.ops for op in used)
@@ -2516,10 +2533,10 @@ async def test_no_document_tool_is_registered_with_the_default_toolsets(server_f
     assert "documents" in TOOLSETS and "documents" not in DEFAULT_TOOLSETS
 
 
-async def test_the_documents_toolset_registers_fifteen_tools_and_the_flag_adds_the_two_gated_ones(server_factory):
+async def test_the_documents_toolset_registers_nineteen_tools_and_the_flag_adds_the_two_gated_ones(server_factory):
     off = {t.name for t in await list_tools(server_factory(toolsets={"documents"}, destructive=False))}
     on = {t.name for t in await list_tools(server_factory(toolsets={"documents"}, destructive=True))}
-    assert off == set(EXPECTED_TOOLS) - GATED and len(off) == 15
+    assert off == set(EXPECTED_TOOLS) - GATED and len(off) == 19
     assert on == set(EXPECTED_TOOLS) and on - off == GATED
 
 

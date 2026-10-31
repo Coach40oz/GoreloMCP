@@ -12,19 +12,24 @@ Ops used by this module (each tool declares every op it calls, re-read GETs incl
     GET /v1/tickets/statuses
     GET /v1/tickets/types
     GET /v1/tickets/tags
+    GET /v1/tickets/priorities
+    GET /v1/tickets/sources
 
-list_ticket_priorities and list_ticket_sources are local tables: they declare GET /v1/tickets for
-traceability and make no HTTP call. There is no delete tool: DELETE /v1/tickets/{ticketId} is in
-FORBIDDEN_OPS.
+list_ticket_priorities and list_ticket_sources read the live scales (GET /v1/tickets/priorities and
+GET /v1/tickets/sources, unpaged {Id, Name}, the same for every account; they were local tables before 1.5.0).
+The PRIORITIES and SOURCES tables below stay as the local checks of the priority and source ids a write or a
+filter takes, and as the names search_tickets resolves a priority name against. There is no delete tool:
+DELETE /v1/tickets/{ticketId} is in FORBIDDEN_OPS.
 
 Rules this module follows:
 
-* Priority is ONE scale everywhere (0 None, 1 Urgent, 2 High, 3 Normal, 4 Low); source ids are 1 to 6.
+* Priority is ONE scale everywhere (0 None, 1 Urgent, 2 High, 3 Normal, 4 Low); source ids are 1 to 6 on a
+  write (create_ticket, update_ticket) and 1 to 7 on the source_ids filter (7 Messenger only appears on tickets read back).
   Status, type, group, user and tag ids are tenant data: they are never hardcoded, names are resolved
   through the list endpoints.
 * Every integer id is typed StrictId (JSON true or "5" is refused) and checked with the shared
   positive_id/positive_ids; GUIDs go through guid/guids. This module keeps no copies of those helpers.
-* GET /v1/tickets filters on the server (ids, text, dates). search_tickets sends everything the API can
+* GET /v1/tickets filters on the server (ids, text, dates, close dates, sources). search_tickets sends everything the API can
   filter and applies only IsWaitingOnThem, LeadAssigneeId, IsUnread and ClosedOn on the rows it read; its
   errors name the filter parameter involved.
 * POST and PATCH answer with only {"Id": ...}. created_id / expect_object refuse any other answer (a shape
@@ -87,6 +92,8 @@ OP_UPDATE = "PATCH /v1/tickets/{ticketId}"
 OP_STATUSES = "GET /v1/tickets/statuses"
 OP_TYPES = "GET /v1/tickets/types"
 OP_TAGS = "GET /v1/tickets/tags"
+OP_PRIORITIES = "GET /v1/tickets/priorities"
+OP_SOURCES = "GET /v1/tickets/sources"
 
 # One priority scale for filters, reads and writes (since 2026-08-05). Match on Id, never on Name.
 PRIORITIES: tuple[tuple[int, str], ...] = (
@@ -99,7 +106,8 @@ PRIORITIES: tuple[tuple[int, str], ...] = (
 PRIORITY_IDS = tuple(pid for pid, _ in PRIORITIES)
 PRIORITY_HELP = ", ".join(f"{pid} {name}" for pid, name in PRIORITIES)
 
-# Ticket sources Gorelo accepts. Id 7 appears on real tickets with an empty name; it is not in the spec enum.
+# Ticket sources a write accepts (TicketSource enum). Id 7 (Messenger) only appears on tickets read back: the
+# source_ids filter and GET /v1/tickets/sources know it, a write does not accept it.
 SOURCES: tuple[tuple[int, str], ...] = (
     (1, "Web"),
     (2, "Email"),
@@ -110,9 +118,12 @@ SOURCES: tuple[tuple[int, str], ...] = (
 )
 SOURCE_IDS = tuple(sid for sid, _ in SOURCES)
 SOURCE_HELP = ", ".join(f"{sid} {name}" for sid, name in SOURCES)
+SOURCE_MESSENGER_ID = 7
+SOURCE_FILTER_IDS = SOURCE_IDS + (SOURCE_MESSENGER_ID,)
+SOURCE_FILTER_HELP = f"{SOURCE_HELP}, {SOURCE_MESSENGER_ID} Messenger"
 SOURCES_NOTE = (
-    "Id 7 also appears on older tickets with an empty name (unnamed, seen on existing tickets). "
-    "It is not in Gorelo's enum and cannot be set: create_ticket accepts source_id 1 to 6 only."
+    "Id 7 (Messenger) only appears on tickets read back, and the source_ids filter takes it. It cannot be set: "
+    "create_ticket and update_ticket accept source_id 1 to 6 only."
 )
 
 BILLABLE_STATUSES: tuple[tuple[int, str], ...] = ((1, "Billable"), (2, "No charge"), (3, "Non-billable"))
@@ -147,11 +158,14 @@ LIST_QUERY_FIELDS: dict[str, str] = {
     "tag_ids": "TagIds",
     "group_ids": "GroupIds",
     "device_ids": "DeviceIds",
+    "source_ids": "SourceIds",
     "query": "Query",
     "updated_since": "UpdatedSince",
     "updated_before": "UpdatedBefore",
     "created_since": "CreatedSince",
     "created_before": "CreatedBefore",
+    "closed_since": "ClosedSince",
+    "closed_before": "ClosedBefore",
     "sort_by": "SortBy",
     "sort_order": "SortOrder",
 }
@@ -162,9 +176,12 @@ SEARCH_ERROR_FIELDS: dict[str, str] = {
     "status": "StatusIds",
     "priority": "PriorityIds",
     "type": "TypeIds",
+    "source_ids": "SourceIds",
     "query": "Query",
     "updated_since": "UpdatedSince",
     "created_since": "CreatedSince",
+    "closed_since": "ClosedSince",
+    "closed_before": "ClosedBefore",
 }
 
 # The four search_tickets filters the API cannot do: parameter -> the ticket field it reads.
@@ -209,6 +226,7 @@ UPDATE_FIELDS: dict[str, str] = {
     "title": "Title",
     "status_id": "StatusId",
     "priority_id": "PriorityId",
+    "source_id": "SourceId",
     "type_id": "TypeId",
     "client_id": "ClientId",
     "location_id": "LocationId",
@@ -284,7 +302,11 @@ def _priority_id(param: str, value: Any) -> int:
 
 
 def _source_id(param: str, value: Any) -> int:
-    return _one_of(param, value, SOURCE_IDS, SOURCE_HELP, "; Id 7 exists on older tickets but cannot be set")
+    return _one_of(param, value, SOURCE_IDS, SOURCE_HELP, "; id 7 (Messenger) only appears on tickets read back and cannot be set")
+
+
+def _source_filter_id(param: str, value: Any) -> int:
+    return _one_of(param, value, SOURCE_FILTER_IDS, SOURCE_FILTER_HELP)
 
 
 def _billable_status_id(param: str, value: Any) -> int:
@@ -635,11 +657,17 @@ async def list_tickets(
     device_ids: Annotated[
         list[str] | None, Field(description="Agent asset GUIDs (list_agents), up to 100; a ticket matches if any is linked to it")
     ] = None,
+    source_ids: Annotated[
+        list[StrictId] | None,
+        Field(description="Source ids, up to 100: 1 Web, 2 Email, 3 Phone, 4 Chat, 5 Alert, 6 Api, 7 Messenger (list_ticket_sources)"),
+    ] = None,
     query: Annotated[str | None, Field(description="Text in title, number or display number (max 200)")] = None,
     updated_since: Annotated[str | None, Field(description="Updated at or after (ISO 8601)")] = None,
     updated_before: Annotated[str | None, Field(description="Updated before (ISO 8601)")] = None,
     created_since: Annotated[str | None, Field(description="Created at or after (ISO 8601)")] = None,
     created_before: Annotated[str | None, Field(description="Created before (ISO 8601)")] = None,
+    closed_since: Annotated[str | None, Field(description="Closed at or after (ISO 8601); never-closed tickets are left out")] = None,
+    closed_before: Annotated[str | None, Field(description="Closed before (ISO 8601); never-closed tickets are left out")] = None,
     sort_by: Annotated[Literal["updatedOn", "createdOn"] | None, Field(description="Default updatedOn")] = None,
     sort_order: Annotated[Literal["asc", "desc"] | None, Field(description="Default desc")] = None,
     page_size: Annotated[int, Field(description="1-200")] = 50,
@@ -651,6 +679,7 @@ async def list_tickets(
     Notable fields: IsWaitingOnThem (renamed from IsAwaitingClient), Sla.FirstResponse.ElapsedBusinessMinutes,
     ChecklistSummary, ContactId (null without a primary contact). Description, time and billing are only in get_ticket.
     For status or priority NAMES, or waiting, unassigned, unread or open filters, use search_tickets.
+    closed_since and closed_before keep only closed tickets (a never-closed ticket is left out).
     Side effects: None (read-only).
     Paging: pass next_cursor back as cursor with the SAME filters until has_more is false.
     """
@@ -668,6 +697,7 @@ async def list_tickets(
     if devices is not None and len(devices) > DEVICE_IDS_MAX:
         raise ValueError(f"device_ids: at most {DEVICE_IDS_MAX} values, got {len(devices)}")
     checked["device_ids"] = devices
+    checked["source_ids"] = _each("source_ids", source_ids, _source_filter_id)
     api_query: dict[str, Any] = {}
     filters: dict[str, Any] = {}
     for param, ids in checked.items():
@@ -683,9 +713,12 @@ async def list_tickets(
         "updated_before": _instant("updated_before", updated_before),
         "created_since": _instant("created_since", created_since),
         "created_before": _instant("created_before", created_before),
+        "closed_since": _instant("closed_since", closed_since),
+        "closed_before": _instant("closed_before", closed_before),
     }
     _check_window("updated_since", moments["updated_since"], "updated_before", moments["updated_before"])
     _check_window("created_since", moments["created_since"], "created_before", moments["created_before"])
+    _check_window("closed_since", moments["closed_since"], "closed_before", moments["closed_before"])
     for param, (moment_text, _) in moments.items():
         if moment_text is not None:
             api_query[LIST_QUERY_FIELDS[param]] = moment_text
@@ -714,9 +747,15 @@ async def search_tickets(
     type: Annotated[
         str | StrictId | None, Field(description="Type name (exact, any case) or id (list_ticket_types)")
     ] = None,
+    source_ids: Annotated[
+        list[StrictId] | None,
+        Field(description="Source ids, up to 100: 1 Web, 2 Email, 3 Phone, 4 Chat, 5 Alert, 6 Api, 7 Messenger (list_ticket_sources)"),
+    ] = None,
     query: Annotated[str | None, Field(description="Text in title, number or display number (max 200)")] = None,
     updated_since: Annotated[str | None, Field(description="Updated at or after (ISO 8601)")] = None,
     created_since: Annotated[str | None, Field(description="Created at or after (ISO 8601)")] = None,
+    closed_since: Annotated[str | None, Field(description="Closed at or after (ISO 8601); never-closed tickets are left out")] = None,
+    closed_before: Annotated[str | None, Field(description="Closed before (ISO 8601); never-closed tickets are left out")] = None,
     unassigned_only: Annotated[bool, Field(description="True: only tickets with no lead assignee")] = False,
     awaiting_client: Annotated[
         bool | None, Field(description="True: waiting on the client; false: not; omit: both")
@@ -725,8 +764,8 @@ async def search_tickets(
     exclude_closed: Annotated[bool, Field(description="True: drop tickets with a close date")] = False,
     limit: Annotated[int, Field(description="Most tickets returned, 1-500")] = SEARCH_LIMIT_DEFAULT,
 ) -> dict:
-    """Find tickets by client, status, priority, type, text, dates and waiting, unassigned, unread or open state,
-    scanning every matching page. Returns items plus count, total_count, matched, scanned, truncated, complete_scan,
+    """Find tickets by client, status, priority, type, source, text, dates, waiting, unassigned, unread or open state,
+    scanning all matching pages. Returns items, count, total_count, matched, scanned, truncated, complete_scan,
     count_mismatch, filters.
 
     awaiting_client, unassigned_only, unread_only and exclude_closed are applied to the rows read, the rest on the
@@ -742,6 +781,16 @@ async def search_tickets(
     query_text = _query_text("query", query)
     updated = _instant("updated_since", updated_since)
     created = _instant("created_since", created_since)
+    closed = (_instant("closed_since", closed_since), _instant("closed_before", closed_before))
+    _check_window("closed_since", closed[0], "closed_before", closed[1])
+    if exclude_closed and (closed[0][0] is not None or closed[1][0] is not None):
+        raise ValueError(
+            "exclude_closed: cannot be combined with closed_since or closed_before (they keep only closed tickets, "
+            "exclude_closed drops them, so nothing could match); drop one of them"
+        )
+    sources = _each("source_ids", source_ids, _source_filter_id)
+    if sources is not None:
+        csv_ids("source_ids", sources)  # the 100 id limit of the filter, before any request
     # Local checks first (nothing is sent if one fails), then the lookups that need Gorelo.
     priority_match = _resolve_priority("priority", priority) if priority is not None else None
     status_target = _id_or_name("status", status) if status is not None else None
@@ -776,12 +825,17 @@ async def search_tickets(
             if match[1] is not None:  # an id given as such has no name to report
                 filters[param] = match[1]
             filters[f"{param}_id"] = match[0]
+    if sources is not None:
+        api_query["SourceIds"] = csv_ids("source_ids", sources)
+        filters["source_ids"] = sources
     if query_text is not None:
         api_query["Query"] = query_text
         filters["query"] = query_text
     for param, key, (moment_text, _) in (
         ("updated_since", "UpdatedSince", updated),
         ("created_since", "CreatedSince", created),
+        ("closed_since", "ClosedSince", closed[0]),
+        ("closed_before", "ClosedBefore", closed[1]),
     ):
         if moment_text is not None:
             api_query[key] = moment_text
@@ -1048,6 +1102,10 @@ async def update_ticket(
     title: Annotated[str | None, Field(description="New title, max 250 characters")] = None,
     status_id: Annotated[StrictId | None, Field(description="New status id (list_ticket_statuses)")] = None,
     priority_id: Annotated[StrictId | None, Field(description="0 None, 1 Urgent, 2 High, 3 Normal, 4 Low")] = None,
+    source_id: Annotated[
+        StrictId | None,
+        Field(description="1 Web, 2 Email, 3 Phone, 4 Chat, 5 Alert, 6 Api (list_ticket_sources); 7 Messenger cannot be set"),
+    ] = None,
     type_id: Annotated[StrictId | None, Field(description="New type id (list_ticket_types)")] = None,
     client_id: Annotated[
         StrictId | None,
@@ -1071,7 +1129,7 @@ async def update_ticket(
     lead_assignee_id: Annotated[
         StrictId | None,
         Field(
-            description="New lead user id (list_org_users); cannot unassign. Not also a watcher: Gorelo answers "
+            description="New lead user id (list_org_users); unassigning (LeadAssigneeId 0) is not offered yet. Not also a watcher: Gorelo answers "
             '400 "Technician already exists"'
         ),
     ] = None,
@@ -1134,8 +1192,8 @@ async def update_ticket(
     """Change fields of a ticket and return its full record. Only given fields change; billing_* fields you leave out
     keep their current values.
 
-    Single-value fields cannot be cleared, so a ticket cannot be unassigned. List fields REPLACE the whole list; to
-    empty one name it in clear_fields ([] is refused).
+    Single-value fields cannot be cleared; unassigning (LeadAssigneeId 0) is not offered yet. List fields
+    REPLACE the whole list; to empty one name it in clear_fields.
     Warnings: changing client_id resets the contact, CCs and billing override and unlinks assets and uptime checks (send
     new ones in the same call). closed_on without updated_on also sets UpdatedOn, and needs a closed status.
     A technician cannot be lead (or assisting) and watcher at once.
@@ -1176,6 +1234,7 @@ async def update_ticket(
         "title": _title("title", title),
         "status_id": _optional(positive_id, "status_id", status_id),
         "priority_id": _optional(_priority_id, "priority_id", priority_id),
+        "source_id": _optional(_source_id, "source_id", source_id),
         "type_id": _optional(positive_id, "type_id", type_id),
         "client_id": _optional(positive_id, "client_id", client_id),
         "location_id": _optional(positive_id, "location_id", location_id),
@@ -1246,17 +1305,18 @@ async def list_ticket_tags(ctx: Context) -> dict:
     return list_result(await client_of(ctx).get_list(OP_TAGS, tool="list_ticket_tags"))
 
 
-@gorelo_tool(toolset="tickets", kind="read", ops=[OP_LIST])
-async def list_ticket_priorities() -> dict:
-    """List the ticket priorities: 0 None, 1 Urgent, 2 High, 3 Normal, 4 Low. Returns {items, count}. The same ids work
-    for create, update, filters and reads.
+@gorelo_tool(toolset="tickets", kind="read", ops=[OP_PRIORITIES])
+async def list_ticket_priorities(ctx: Context) -> dict:
+    """List the ticket priorities (Id, Name): the fixed scale, the same for every account (0 None, 1 Urgent, 2 High,
+    3 Normal, 4 Low). Returns {items, count}. The same ids work for create, update, filters and reads.
     Side effects: None (read-only)."""
-    return list_result([{"Id": pid, "Name": name} for pid, name in PRIORITIES])
+    return list_result(await client_of(ctx).get_list(OP_PRIORITIES, tool="list_ticket_priorities"))
 
 
-@gorelo_tool(toolset="tickets", kind="read", ops=[OP_LIST])
-async def list_ticket_sources() -> dict:
-    """List the ticket sources for create_ticket: 1 Web, 2 Email, 3 Phone, 4 Chat, 5 Alert, 6 Api. Id 7 appears on
-    older tickets with no name and cannot be set. Returns {items, count, note}.
+@gorelo_tool(toolset="tickets", kind="read", ops=[OP_SOURCES])
+async def list_ticket_sources(ctx: Context) -> dict:
+    """List the ticket sources (Id, Name): the fixed scale, the same for every account. Returns {items, count, note}.
+    create_ticket and update_ticket accept every id but 7 (Messenger); the source_ids filter of list_tickets and
+    search_tickets accepts all of them.
     Side effects: None (read-only)."""
-    return {**list_result([{"Id": sid, "Name": name} for sid, name in SOURCES]), "note": SOURCES_NOTE}
+    return {**list_result(await client_of(ctx).get_list(OP_SOURCES, tool="list_ticket_sources")), "note": SOURCES_NOTE}

@@ -50,8 +50,9 @@ def _quiet_fastmcp_tracebacks():
 # descriptions. Measured 21473 bytes for the first 16 tools (descriptions are 7243 of them) and 28240 for
 # the 19 tools since contract e15cb5a18ec2 added get_invoice, create_invoice and create_approved_invoice (the two create
 # tools carry the line schema, about 1350 bytes each, and the gated one is not even in the default list); the limit is
-# that plus 10 percent, rounded up to the next 100. the budget covers the texts that say a void happens in Gorelo only.
-INVOICES_MODULE_BUDGET_BYTES = 31100
+# that plus 10 percent, rounded up to the next 100 (1.5.0: 23 tools after update_invoice, approve_invoice, list_payments and
+# get_payment, measured 38327 bytes, so 42200). the budget covers the texts that say a void happens in Gorelo only.
+INVOICES_MODULE_BUDGET_BYTES = 42200
 
 INVOICES = "/v1/invoices"
 INVOICE_ID = uid(5)
@@ -175,10 +176,14 @@ async def call_directly(client_factory, tool, **kwargs):
 EXPECTED_TOOLS = {
     "list_invoices": ("read", ["GET /v1/invoices"]),
     "get_invoice": ("read", ["GET /v1/invoices/{invoiceId}"]),
-    "create_invoice": ("write", ["POST /v1/invoices", "GET /v1/invoices/{invoiceId}"]),
-    "create_approved_invoice": ("destructive", ["POST /v1/invoices", "GET /v1/invoices/{invoiceId}"]),
+    "create_invoice": ("write", ["POST /v1/invoices", "GET /v1/invoices/{invoiceId}", "GET /v1/taxes"]),
+    "create_approved_invoice": ("destructive", ["POST /v1/invoices", "GET /v1/invoices/{invoiceId}", "GET /v1/taxes"]),
     "export_invoice_pdf": ("write", ["GET /v1/invoices/{invoiceId}/pdf"]),
     "delete_invoice": ("destructive", ["GET /v1/invoices", "DELETE /v1/invoices/{invoiceId}"]),
+    "update_invoice": ("write", ["GET /v1/invoices/{invoiceId}", "PATCH /v1/invoices/{invoiceId}", "GET /v1/taxes"]),
+    "approve_invoice": ("destructive", ["GET /v1/invoices/{invoiceId}", "PATCH /v1/invoices/{invoiceId}"]),
+    "list_payments": ("read", ["GET /v1/payments"]),
+    "get_payment": ("read", ["GET /v1/payments/{paymentId}"]),
 }
 
 
@@ -256,7 +261,7 @@ async def test_the_invoice_catalog_and_uptime_tools_stay_within_the_package_size
     names = {s.name for s in REGISTRY.specs if s.fn.__module__.split(".")[-1] in ("invoices", "catalog", "uptime")}
     tools = [t for t in await list_tools(server) if t.name in names]
     size = sum(len(json.dumps(t.model_dump(mode="json", exclude_none=True))) for t in tools)
-    assert len(names) == 19 and len(tools) == 19  # 16 until contract e15cb5a18ec2 added three invoice tools
+    assert len(names) == 23 and len(tools) == 23  # 16 until contract e15cb5a18ec2 added three invoice tools, 19 until 1.5.0 (4 more)
     assert size <= INVOICES_MODULE_BUDGET_BYTES, size
 
 
@@ -1277,7 +1282,9 @@ async def test_the_invoice_tools_belong_to_the_billing_toolset(server_factory):
     billing = server_factory(toolsets={"billing"}, destructive=True)
     assert everything <= {t.name for t in await list_tools(billing)}
     billing_off = server_factory(toolsets={"billing"}, destructive=False)
-    assert everything - {"delete_invoice", "create_approved_invoice"} <= {t.name for t in await list_tools(billing_off)}
+    gated = {"delete_invoice", "create_approved_invoice", "approve_invoice"}
+    assert everything - gated <= {t.name for t in await list_tools(billing_off)}
+    assert not gated & {t.name for t in await list_tools(billing_off)}
 
 
 # --------------------------------------------------------------------------
@@ -1516,7 +1523,8 @@ def test_the_create_invoice_docstring_states_the_facts_the_model_must_know():
 def test_the_create_approved_invoice_docstring_states_the_facts_the_model_must_know():
     doc = flat(inspect.getdoc(invoices.create_approved_invoice))
     assert doc.startswith("Create an APPROVED invoice for a client and return it.")
-    assert "Ids, lines, dates and reference work exactly as in create_invoice" in doc
+    assert "Arguments work as in create_invoice (no_tax too; a no_tax line that still shows tax gets a loud warning)." in doc
+    assert "no_tax is refused" not in doc and "not accepted" not in doc
     assert "Side effects: approving on create pushes the invoice to the connected accounting system at once" in doc
     # voiding with delete_invoice does not reach the copy in Xero, so the old
     # "cannot be undone except by voiding it" is gone: nothing takes the push back, and the user voids the copy by hand
@@ -1528,8 +1536,8 @@ def test_the_create_approved_invoice_docstring_states_the_facts_the_model_must_k
     assert "A total of exactly 0 is created as Paid instead: check Status in the result" in doc
     assert "recipient_emails, when given, are the addresses Gorelo sends the invoice to" in doc
     assert "it does not say whether creating the invoice already sends it): tell the user who" in doc
-    assert "If the result is {Id, warning} the invoice exists: do not create it again (read it with get_invoice)" in doc
-    assert 'After a "did not confirm" error check list_invoices for the client (newest first) first' in doc
+    assert "If the result is {Id, warning} the invoice exists: do not create it again (get_invoice)" in doc
+    assert 'After a "did not confirm" error check list_invoices first' in doc
     assert doc.endswith("Ask the user first; needs confirm=true.")  # the consistency rule of every destructive tool
     assert 40 < len(inspect.getdoc(invoices.create_approved_invoice)) <= 900
 
@@ -1551,13 +1559,17 @@ def test_the_create_promises_are_the_ones_in_the_spec_text():
     assert "At least one is required" in flat(command["LineItems"]["description"])
     assert "Required, must be greater than 0" in flat(line["Quantity"]["description"])
     assert "0-100" in flat(line["DiscountPercent"]["description"]) and "Defaults to 0" in flat(line["DiscountPercent"]["description"])
-    assert "send explicit null to force no tax" in flat(line["TaxId"]["description"])
+    # contract 6c30770dffc0 (2026-10-29): null no longer forces no tax on a create line; the tax-exempt rate's id does
+    assert "When omitted or null the line takes the tax the app would give it" in flat(line["TaxId"]["description"])
+    assert "To bill no tax, send the tax-exempt rate's id" in flat(line["TaxId"]["description"])
+    assert "send explicit null to force no tax" not in flat(line["TaxId"]["description"])
     assert "1 = Billable, 2 = No charge, 3 = Non-billable" in flat(line["BillableStatusId"]["description"])
     assert "Falls back to the item's own name" in flat(line["Description"]["description"])
     # what a left-out line field does, as the field texts say it (the operation text lumps all seven together)
     assert "Defaults to Billable when omitted" in flat(line["BillableStatusId"]["description"])
     assert "Defaults to 0 when omitted" in flat(line["DiscountPercent"]["description"])
-    for field, what in (("UnitPrice", "price"), ("UnitCost", "cost"), ("TaxId", "tax"), ("CoaCode", "COA code")):
+    # (TaxId is not here any more: its text says "When omitted or null the line takes the tax the app would give it")
+    for field, what in (("UnitPrice", "price"), ("UnitCost", "cost"), ("CoaCode", "COA code")):
         assert f"Falls back to the item's own {what}" in flat(line[field]["description"]), field
     assert "A line whose ItemId is a bundle is billed as one line" in flat(command["LineItems"]["description"])
     operation = flat(document["paths"]["/v1/invoices"]["post"]["description"])
@@ -1636,6 +1648,33 @@ def line(**extra):
     return {"item_id": ITEM_A, "quantity": 1, **extra}
 
 
+# The taxes as measured live on 2026-10-30 on a test account: six active rates at 0 percent, one of them Id 202 "Tax Exempt TAX"
+# with Code "Tax Exempt" (the default), plus a taxed rate. Names of the other 0 percent rates are invented.
+EXEMPT_ID = 202
+
+
+def tax_row(tax_id, name, code, percentage=0.0, is_default=False, sub_taxes=None):
+    """One TaxModel as GET /v1/taxes returns it."""
+    return {"Id": tax_id, "Name": name, "Code": code, "Percentage": percentage, "IsDefault": is_default,
+            "SubTaxes": sub_taxes if sub_taxes is not None else []}
+
+
+LIVE_TAXES = [
+    tax_row(197, "Sales Tax 9.25", "ST925", 9.25),
+    tax_row(198, "Zero Rated", "Zero Rated"),
+    tax_row(199, "Export", "Export"),
+    tax_row(200, "No VAT", "NOVAT"),
+    tax_row(201, "Out of Scope", "OOS"),
+    tax_row(EXEMPT_ID, "Tax Exempt TAX", "Tax Exempt", 0.0, True),
+    tax_row(203, "Non Taxable", None),
+]
+
+
+def route_taxes(mock, rows=None):
+    """GET /v1/taxes answers `rows` (default: the live tenant's rates)."""
+    mock.on("GET", "/v1/taxes", envelope(LIVE_TAXES if rows is None else rows))
+
+
 async def call_create_directly(client_factory, tool, **kwargs):
     """Call the decorated function itself (no pydantic in front of it): for what the schema normally pre-empts."""
     async with client_factory() as client:
@@ -1657,6 +1696,7 @@ async def test_create_invoice_posts_a_draft_then_reads_it_back_and_returns_the_i
 
 async def test_create_invoice_sends_every_line_field_under_its_spec_name(server, mock_gorelo):
     route_create(mock_gorelo)
+    route_taxes(mock_gorelo)
     args = {
         "client_id": CLIENT,
         "line_items": [
@@ -1678,7 +1718,7 @@ async def test_create_invoice_sends_every_line_field_under_its_spec_name(server,
         "reference": "PO-4471",
     }
     await call_tool(server, "create_invoice", args)
-    assert mock_gorelo.requests[0].json == {
+    assert mock_gorelo.calls("POST")[0].json == {
         "ClientId": CLIENT,
         "StatusId": 1,
         "LineItems": [
@@ -1693,7 +1733,7 @@ async def test_create_invoice_sends_every_line_field_under_its_spec_name(server,
                 "CoaCode": "200",
                 "BillableStatusId": 2,
             },
-            {"ItemId": ITEM_B, "Quantity": 0.5, "TaxId": None},
+            {"ItemId": ITEM_B, "Quantity": 0.5, "TaxId": EXEMPT_ID},
         ],
         "InvoiceDate": "2026-09-15T00:00:00Z",
         "DueDate": "2026-10-15T00:00:00Z",
@@ -1740,15 +1780,19 @@ async def test_each_optional_line_field_alone_goes_out_as_its_own_key(server, mo
     assert set(sent) == ({"ItemId", "Quantity"} | {wire_name})  # and nothing else came along
 
 
-async def test_no_tax_sends_an_explicit_null_and_the_other_ways_send_nothing_or_the_id(server, mock_gorelo):
+async def test_no_tax_sends_the_exempt_rate_id_and_the_other_ways_send_nothing_or_the_id(server, mock_gorelo):
     route_create(mock_gorelo)
-    lines = [line(no_tax=True), line(no_tax=False), line(), line(tax_id=7), line(no_tax=False, tax_id=7)]
-    await call_tool(server, "create_invoice", {"client_id": CLIENT, "line_items": lines})
-    sent = mock_gorelo.requests[0].json["LineItems"]
-    assert "TaxId" in sent[0] and sent[0]["TaxId"] is None  # "send explicit null to force no tax"
+    route_taxes(mock_gorelo)
+    lines = [line(no_tax=True), line(no_tax=False), line(), line(tax_id=7), line(no_tax=False, tax_id=7), line(no_tax=True)]
+    result = await call_tool(server, "create_invoice", {"client_id": CLIENT, "line_items": lines})
+    (post,) = mock_gorelo.calls("POST")
+    sent = post.json["LineItems"]
+    assert sent[0]["TaxId"] == EXEMPT_ID and sent[5]["TaxId"] == EXEMPT_ID  # the Tax Exempt rate, never null
     assert "TaxId" not in sent[1] and "TaxId" not in sent[2]  # false and absent are the same: the item's own tax
     assert sent[3]["TaxId"] == 7 and sent[4]["TaxId"] == 7
-    assert b'"TaxId": null' in mock_gorelo.requests[0].content or b'"TaxId":null' in mock_gorelo.requests[0].content
+    assert b"null" not in post.content
+    assert len(mock_gorelo.calls("GET", "/v1/taxes")) == 1  # resolved ONCE for two no_tax lines
+    assert f"tax id {EXEMPT_ID}" in result["note"]
 
 
 async def test_lines_keep_their_order_and_the_same_item_twice_is_two_lines(server, mock_gorelo):
@@ -1820,6 +1864,7 @@ async def test_the_reread_goes_to_the_id_gorelo_answered_with_in_canonical_form(
 
 async def test_a_model_line_and_a_dict_line_make_the_same_request_when_called_directly(client_factory, mock_gorelo):
     route_create(mock_gorelo)
+    route_taxes(mock_gorelo)
     as_model = invoices.InvoiceLine(item_id=ITEM_A, quantity=2, unit_price=10, no_tax=True)
     as_dict = {"item_id": ITEM_A, "quantity": 2, "unit_price": 10, "no_tax": True}
     await call_create_directly(client_factory, "create_invoice", client_id=CLIENT, line_items=[as_model])
@@ -1828,7 +1873,7 @@ async def test_a_model_line_and_a_dict_line_make_the_same_request_when_called_di
     assert posts[0] == posts[1] == {
         "ClientId": CLIENT,
         "StatusId": 1,
-        "LineItems": [{"ItemId": ITEM_A, "Quantity": 2, "UnitPrice": 10, "TaxId": None}],
+        "LineItems": [{"ItemId": ITEM_A, "Quantity": 2, "UnitPrice": 10, "TaxId": EXEMPT_ID}],
     }
 
 
@@ -1872,7 +1917,7 @@ def test_the_line_model_refuses_what_pydantic_can_refuse_before_the_tool_runs():
 STATUS_SHAPES = [
     pytest.param({}, id="minimal"),
     pytest.param({"invoice_date": "2026-09-01", "due_date": "2026-09-30", "reference": "PO-1"}, id="dated-and-referenced"),
-    pytest.param({"line_items": [line(), line(no_tax=True), line(tax_id=3, discount_percent=100)]}, id="many-lines"),
+    pytest.param({"line_items": [line(), line(tax_id=4), line(tax_id=3, discount_percent=100)]}, id="many-lines"),
     pytest.param({"line_items": [line(unit_price=0, quantity=1)]}, id="a-total-of-zero"),
 ]
 
@@ -1928,7 +1973,10 @@ def test_the_shared_request_never_contains_a_status_and_only_the_gated_tool_name
     approved = inspect.getsource(invoices.create_approved_invoice)
     assert "APPROVED_STATUS_ID" not in draft and "DRAFT_STATUS_ID" in draft
     assert "APPROVED_STATUS_ID" in approved and "DRAFT_STATUS_ID" not in approved
-    assert inspect.getsource(invoices).count("APPROVED_STATUS_ID") == 2  # its definition and its single use
+    # the constant is defined once and used by the two tools that approve (create_approved_invoice and approve_invoice),
+    # never by the Draft create nor by update_invoice
+    assert "APPROVED_STATUS_ID" not in inspect.getsource(invoices.update_invoice)
+    assert "APPROVED_STATUS_ID" in inspect.getsource(invoices.approve_invoice)
     assert (invoices.DRAFT_STATUS_ID, invoices.APPROVED_STATUS_ID) == (1, 5)
     # a bad parameter is reported before the user is asked, and the user is asked before anything is posted
     assert approved.index("_invoice_request(") < approved.index("require_confirm(") < approved.index("_post_and_read_back(")
@@ -1938,7 +1986,7 @@ def test_the_shared_request_never_contains_a_status_and_only_the_gated_tool_name
 async def test_both_tools_build_the_same_request_apart_from_the_status_and_the_recipients(server, mock_gorelo):
     route_create(mock_gorelo)
     extra = {
-        "line_items": [line(unit_price=9, no_tax=True), line(tax_id=2, billable_status_id=3, coa_code="400")],
+        "line_items": [line(unit_price=9, tax_id=4), line(tax_id=2, billable_status_id=3, coa_code="400")],
         "invoice_date": "2026-09-01",
         "due_date": "2026-09-30",
         "reference": "PO-9",
@@ -2004,7 +2052,7 @@ LOCAL_ERRORS = [
     pytest.param({"line_items": [line(tax_id="2")]}, f"line_items[0].tax_id: {POSITIVE}, got a string", id="tax-id-text"),
     pytest.param({"line_items": [line(tax_id=2.5)]}, f"line_items[0].tax_id: {POSITIVE}, got a decimal number", id="tax-id-decimal"),
     pytest.param({"line_items": [line(tax_id=2**63)]}, f"line_items[0].tax_id: {POSITIVE}, got a number above 9223372036854775807", id="tax-id-beyond-int64"),
-    pytest.param({"line_items": [line(tax_id=2, no_tax=True)]}, "line_items[0]: give tax_id or no_tax, not both (tax_id picks one tax, no_tax sends the line with no tax at all)", id="tax-id-and-no-tax"),
+    pytest.param({"line_items": [line(tax_id=2, no_tax=True)]}, "line_items[0]: give tax_id or no_tax, not both (tax_id picks one tax, no_tax picks the Tax Exempt rate)", id="tax-id-and-no-tax"),
     pytest.param({"line_items": [line(), line(tax_id=2, no_tax=True)]}, "line_items[1]: give tax_id or no_tax, not both", id="second-line-tax-id-and-no-tax"),
     pytest.param({"line_items": [line(no_tax="yes")]}, "line_items[0].no_tax: must be true or false, got a string", id="no-tax-text"),
     pytest.param({"line_items": [line(no_tax=1)]}, "line_items[0].no_tax: must be true or false, got a number", id="no-tax-number"),
@@ -2532,7 +2580,7 @@ async def test_a_confirmed_approval_that_times_out_is_not_repeated_and_the_text_
     assert "Verify with a read before retrying." in text
     assert len(mock_gorelo.requests) == 1
     doc = flat(inspect.getdoc(invoices.create_approved_invoice))
-    assert 'After a "did not confirm" error check list_invoices for the client (newest first) first' in doc
+    assert 'After a "did not confirm" error check list_invoices first' in doc
 
 
 def test_the_gated_tool_is_declared_destructive_and_the_draft_tool_is_not():
@@ -2562,3 +2610,1046 @@ async def test_recipient_addresses_references_and_line_text_never_reach_the_logs
     for secret in ("SECRET-LINE-WORDING", "SECRET-COA", "SECRET-REFERENCE", "secret-person", "example.test", ITEM_A):
         assert secret not in logged, secret  # ... without a single value of the request
     assert "LineItems" in logged and "RecipientEmails" in logged  # field names are fine
+
+
+# --------------------------------------------------------------------------
+# 1.5.0 (contract 6c30770dffc0): no_tax on create, update_invoice, approve_invoice, list_payments, get_payment
+# --------------------------------------------------------------------------
+
+L1, L2, L3 = uid(31), uid(32), uid(33)
+PATCH_PATH = f"/v1/invoices/{INVOICE_ID}"
+TAXES = "/v1/taxes"
+
+
+def lines3():
+    return [line_row(Id=L1, Name="One"), line_row(Id=L2, Name="Two"), line_row(Id=L3, Name="Three")]
+
+
+def open_invoice(status=(1, "Draft"), lines=None, **extra):
+    return invoice_detail(status=status, invoice_id=INVOICE_ID, LineItems=lines if lines is not None else lines3(), **extra)
+
+
+def route_update(mock, before=None, after=None, patch=None):
+    """GET answers `before` the first time and `after` the second; PATCH answers `patch` (default `after`)."""
+    before = before if before is not None else open_invoice()
+    after = after if after is not None else before
+    mock.on("GET", PATCH_PATH, in_order(envelope(before), envelope(after)))
+    answer = patch if patch is not None else after
+    mock.on("PATCH", PATCH_PATH, answer if "IsSuccess" in answer else envelope(answer))  # a ready-made error envelope passes
+
+
+def sent_patch(mock):
+    (patch,) = mock.calls("PATCH")
+    return patch.json
+
+
+def test_a_no_tax_line_takes_the_resolved_id_and_never_builds_without_one():
+    wire = invoices._invoice_line("line_items[0]", {"item_id": ITEM_A, "quantity": 1, "no_tax": True}, EXEMPT_ID)
+    assert wire == {"ItemId": ITEM_A, "Quantity": 1, "TaxId": EXEMPT_ID}
+    with pytest.raises(RuntimeError, match="no_tax_id missing"):
+        invoices._invoice_line("line_items[0]", {"item_id": ITEM_A, "quantity": 1, "no_tax": True})
+    assert not hasattr(invoices, "_no_tax_wire")  # the null is gone: it meant "the app's tax" (measured live 2026-10-30)
+    for spec in REGISTRY.specs:
+        if spec.name in (*BOTH, "update_invoice"):
+            assert "GET /v1/taxes" in spec.ops  # the lookup of the Tax Exempt rate
+
+
+async def test_the_no_tax_text_says_the_tax_exempt_rule_and_drops_the_hedge(server, mock_gorelo):
+    tools = await list_tools(server)
+    for name in ("create_invoice", "create_approved_invoice"):
+        shown = tool_def(name, tools).inputSchema["properties"]["line_items"]["items"]["properties"]
+        assert shown["no_tax"]["description"] == invoices.NO_TAX_TEXT
+    assert invoices.NO_TAX_TEXT == (
+        "true: bill the line with the account's Tax Exempt rate (code or name 'Tax Exempt', 0%), looked up in list_taxes; "
+        "refused when there is not exactly one. Not with tax_id."
+    )
+    assert len(invoices.NO_TAX_TEXT) <= 220
+    for hedged in ("Gorelo then applies", "item's or default tax", "send no tax rate"):
+        assert hedged not in invoices.NO_TAX_TEXT
+    for fn in (invoices.create_invoice, invoices.create_approved_invoice, invoices.update_invoice):
+        assert "no tax rate sent" not in flat(inspect.getdoc(fn)) and "only sends no rate" not in flat(inspect.getdoc(fn))
+
+
+# ---- update_invoice: the request ------------------------------------------------------------------------------
+
+
+async def test_update_invoice_reads_the_invoice_patches_only_the_header_fields_given_and_reads_it_back(server, mock_gorelo):
+    after = open_invoice(Reference="PO-1", InvoiceDate="2026-09-02", DueDate="2026-09-20")
+    route_update(mock_gorelo, after=after)
+    result = await call_tool(
+        server, "update_invoice",
+        {"invoice_id": INVOICE_ID.upper(), "invoice_date": "2026-09-02", "due_date": "2026-09-20", "reference": "PO-1"},
+    )
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", PATCH_PATH), ("PATCH", PATCH_PATH), ("GET", PATCH_PATH)]
+    assert sent_patch(mock_gorelo) == {
+        "InvoiceDate": "2026-09-02T00:00:00Z", "DueDate": "2026-09-20T00:00:00Z", "Reference": "PO-1",
+    }  # no LineItems, no StatusId
+    assert result == after and mock_gorelo.requests[1].query == {}
+
+
+async def test_the_template_ids_and_the_branding_theme_go_out_under_their_spec_names(server, mock_gorelo):
+    theme = uid(77)
+    route_update(mock_gorelo, after=open_invoice(InvoiceTemplateId=12, InvoiceEmailTemplateId=4, BrandingThemeId=theme))
+    await call_tool(
+        server, "update_invoice",
+        {"invoice_id": INVOICE_ID, "invoice_template_id": 12, "invoice_email_template_id": 4, "branding_theme_id": theme.upper()},
+    )
+    assert sent_patch(mock_gorelo) == {"InvoiceTemplateId": 12, "InvoiceEmailTemplateId": 4, "BrandingThemeId": theme}
+
+
+async def test_clear_fields_sends_an_explicit_null_for_the_four_clearable_fields_only(server, mock_gorelo):
+    route_update(mock_gorelo, after=open_invoice(Reference=None, BrandingThemeId=None))
+    names = ["reference", "invoice_template_id", "invoice_email_template_id", "branding_theme_id"]
+    await call_tool(server, "update_invoice", {"invoice_id": INVOICE_ID, "clear_fields": names})
+    assert sent_patch(mock_gorelo) == {
+        "Reference": None, "InvoiceTemplateId": None, "InvoiceEmailTemplateId": None, "BrandingThemeId": None,
+    }
+    assert b'"Reference":null' in mock_gorelo.calls("PATCH")[0].content.replace(b" ", b"")
+
+
+async def test_a_cleared_template_may_read_back_as_the_providers_default_and_is_not_an_error(server, mock_gorelo):
+    route_update(mock_gorelo, after=open_invoice(InvoiceTemplateId=1, Reference=None))  # "the default applies"
+    result = await call_tool(server, "update_invoice", {"invoice_id": INVOICE_ID, "clear_fields": ["invoice_template_id", "reference"]})
+    assert result["InvoiceTemplateId"] == 1
+
+
+@pytest.mark.parametrize(
+    "args, fragment",
+    [
+        ({}, "nothing to change"),
+        ({"reference": "x", "clear_fields": ["reference"]}, "reference: cannot be given a value and cleared in the same call"),
+        ({"reference": "  "}, 'reference: must not be blank; to remove it pass clear_fields=["reference"]'),
+        ({"invoice_date": "2026-09-01T00:00:00Z"}, "invoice_date: expected a calendar date as YYYY-MM-DD"),
+        ({"due_date": "soon"}, "due_date: expected a calendar date as YYYY-MM-DD"),
+        ({"invoice_date": "2026-09-10", "due_date": "2026-09-09"}, "due_date: 2026-09-09 is before invoice_date 2026-09-10"),
+        ({"invoice_template_id": 0}, "invoice_template_id"),
+        ({"branding_theme_id": "not-a-guid"}, "branding_theme_id: expected a GUID"),
+        ({"clear_fields": []}, "clear_fields: must not be an empty list"),
+        ({"clear_fields": ["invoice_date"]}, "clear_fields"),
+        ({"update_lines": []}, "update_lines: must not be an empty list"),
+        ({"add_lines": []}, "add_lines: at least one line is required"),
+        ({"remove_line_ids": []}, "remove_line_ids: must not be an empty list"),
+    ],
+)
+async def test_update_invoice_local_errors_name_the_param_and_send_nothing(client_factory, mock_gorelo, args, fragment):
+    with pytest.raises((ToolError, ValueError)) as info:
+        await call_directly(client_factory, invoices.update_invoice, invoice_id=INVOICE_ID, **args)
+    assert fragment in str(info.value)
+    assert mock_gorelo.requests == []
+
+
+async def test_a_bad_invoice_id_names_invoice_id_and_sends_nothing(server, mock_gorelo):
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": "INV-1042", "reference": "x"})
+    assert "invoice_id" in text and mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    "held, args, fragment",
+    [
+        ({"InvoiceDate": "2026-09-10", "DueDate": "2026-09-30"}, {"due_date": "2026-09-01"}, "due_date: 2026-09-01 is before the invoice date 2026-09-10"),
+        (
+            {"InvoiceDate": "2026-09-01", "DueDate": "2026-09-05"},
+            {"invoice_date": "2026-09-10"},
+            "invoice_date: 2026-09-10 is after the invoice's due date 2026-09-05",
+        ),
+    ],
+)
+async def test_the_due_date_is_checked_against_the_date_the_invoice_already_has(server, mock_gorelo, held, args, fragment):
+    route_update(mock_gorelo, before=open_invoice(**held))
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, **args})
+    assert fragment in text
+    assert mock_gorelo.calls("PATCH") == []
+
+
+# ---- update_invoice: only Draft and Submitted ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", [(1, "Draft"), (2, "Submitted")])
+async def test_draft_and_submitted_invoices_can_be_changed(server, mock_gorelo, status):
+    route_update(mock_gorelo, before=open_invoice(status), after=open_invoice(status, Reference="r"))
+    result = await call_tool(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "r"})
+    assert result["Status"]["Id"] == status[0] and len(mock_gorelo.calls("PATCH")) == 1
+
+
+@pytest.mark.parametrize("status", [(3, "Paid"), (4, "Void"), (5, "Approved"), (6, "Deleted"), (99, "Other")])
+async def test_any_other_status_is_refused_before_a_patch_and_the_message_names_the_status_and_the_two_ids(server, mock_gorelo, status):
+    route_update(mock_gorelo, before=open_invoice(status))
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "r"})
+    assert text.startswith("invoice_id: INV-1042 has status ") and f"(id {status[0]})" in text
+    assert "update_invoice changes only Draft (1) and Submitted (2) invoices." in text and "Nothing was changed." in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]  # one read, never a PATCH
+
+
+async def test_an_invoice_read_without_a_status_is_a_shape_error_and_nothing_is_written(server, mock_gorelo):
+    row = open_invoice()
+    row["Status"] = None
+    route_update(mock_gorelo, before=row)
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "r"})
+    assert "no readable Status.Id" in text and mock_gorelo.calls("PATCH") == []
+
+
+async def test_update_invoice_cannot_send_a_status_by_construction(server):
+    spec = next(s for s in REGISTRY.specs if s.name == "update_invoice")
+    assert "StatusId" not in set(spec.field_map.values()) and "StatusId" not in invoices.UPDATE_FIELDS.values()
+    assert not {"status_id", "status", "approve", "approved"} & set(inspect.signature(spec.fn).parameters)
+    tool = tool_def("update_invoice", await list_tools(server))
+    assert not {"status_id", "status", "approve", "approved", "confirm"} & set(tool.inputSchema["properties"])
+    source = inspect.getsource(spec.fn)
+    assert "APPROVED_STATUS_ID" not in source and '"StatusId":' not in source and "StatusId=" not in source
+    # the line models refuse a status too
+    assert "status_id" not in invoices.InvoiceLineChange.model_fields and "status_id" not in invoices.InvoiceLine.model_fields
+
+
+# ---- update_invoice: lines -----------------------------------------------------------------------------------------
+
+
+async def test_the_lines_the_caller_does_not_mention_are_kept_by_id_and_new_lines_are_appended(server, mock_gorelo):
+    new_line = line_row(Id=uid(34), item_id=ITEM_B, Quantity=2.0, UnitPrice=5.0)
+    route_update(mock_gorelo, after=open_invoice(lines=[*lines3(), new_line]))
+    await call_tool(
+        server, "update_invoice",
+        {"invoice_id": INVOICE_ID, "add_lines": [{"item_id": ITEM_B.replace("-", ""), "quantity": 2, "unit_price": 5}]},
+    )
+    assert sent_patch(mock_gorelo) == {
+        "LineItems": [{"Id": L1}, {"Id": L2}, {"Id": L3}, {"ItemId": ITEM_B, "Quantity": 2, "UnitPrice": 5}]
+    }
+
+
+async def test_update_lines_change_a_line_in_place_and_every_other_line_stays_as_just_its_id(server, mock_gorelo):
+    changed = line_row(
+        Id=L2, Name="Two", Quantity=3.0, Description="New text", UnitPrice=10.5, UnitCost=4.0, DiscountPercent=5.0,
+        Tax={"Id": 7, "Name": "VAT"}, CoaCode="200", BillableStatus={"Id": 2, "Name": "No charge"},
+    )
+    route_update(mock_gorelo, after=open_invoice(lines=[line_row(Id=L1, Name="One"), changed, line_row(Id=L3, Name="Three")]))
+    await call_tool(
+        server, "update_invoice",
+        {
+            "invoice_id": INVOICE_ID,
+            "update_lines": [
+                {
+                    "line_id": L2.upper(), "quantity": 3, "description": "New text", "unit_price": 10.5, "unit_cost": 4,
+                    "discount_percent": 5, "tax_id": 7, "coa_code": "200", "billable_status_id": 2,
+                }
+            ],
+        },
+    )
+    assert sent_patch(mock_gorelo) == {
+        "LineItems": [
+            {"Id": L1},
+            {
+                "Id": L2, "Quantity": 3, "Description": "New text", "UnitPrice": 10.5, "UnitCost": 4, "DiscountPercent": 5,
+                "TaxId": 7, "CoaCode": "200", "BillableStatusId": 2,
+            },
+            {"Id": L3},
+        ]
+    }
+
+
+async def test_remove_line_ids_drops_only_the_lines_named_and_the_text_says_what_happens_to_their_work(server, mock_gorelo):
+    route_update(mock_gorelo, after=open_invoice(lines=[line_row(Id=L1), line_row(Id=L3)]))
+    await call_tool(server, "update_invoice", {"invoice_id": INVOICE_ID, "remove_line_ids": [L2]})
+    assert sent_patch(mock_gorelo) == {"LineItems": [{"Id": L1}, {"Id": L3}]}
+    tool = tool_def("update_invoice", await list_tools(server))
+    assert "waiting to be invoiced" in tool.inputSchema["properties"]["remove_line_ids"]["description"]
+
+
+async def test_update_remove_and_add_work_together_in_one_request(server, mock_gorelo):
+    route_update(
+        mock_gorelo,
+        after=open_invoice(lines=[line_row(Id=L1), line_row(Id=L3, Quantity=9.0), line_row(Id=uid(35), item_id=ITEM_A, Quantity=1.0)]),
+    )
+    await call_tool(
+        server, "update_invoice",
+        {
+            "invoice_id": INVOICE_ID,
+            "remove_line_ids": [L2],
+            "update_lines": [{"line_id": L3, "quantity": 9}],
+            "add_lines": [{"item_id": ITEM_A, "quantity": 1}],
+        },
+    )
+    assert sent_patch(mock_gorelo)["LineItems"] == [{"Id": L1}, {"Id": L3, "Quantity": 9}, {"ItemId": ITEM_A, "Quantity": 1}]
+
+
+async def test_no_tax_on_an_update_line_sends_the_exempt_id_and_a_clear_sends_null_for_description_and_coa_code(server, mock_gorelo):
+    # the read-back shows the exempt rate and no tax on the two no_tax lines, so there is no warning
+    untaxed = {"TaxAmount": 0.0, "Tax": {"Id": EXEMPT_ID, "Name": "Tax Exempt TAX"}}
+    route_taxes(mock_gorelo)
+    route_update(
+        mock_gorelo,
+        after=open_invoice(
+            lines=[line_row(Id=L1, Name="One", **untaxed), line_row(Id=L2, Name="Two"), line_row(Id=L3, Name="Three"),
+                   line_row(Id=uid(34), Quantity=1.0, **untaxed)]
+        ),
+    )
+    result = await call_tool(
+        server, "update_invoice",
+        {
+            "invoice_id": INVOICE_ID,
+            "update_lines": [{"line_id": L1, "no_tax": True}, {"line_id": L2, "clear_fields": ["description", "coa_code"]}],
+            "add_lines": [{"item_id": ITEM_A, "quantity": 1, "no_tax": True}],
+        },
+    )
+    sent = sent_patch(mock_gorelo)["LineItems"]
+    assert sent[0] == {"Id": L1, "TaxId": EXEMPT_ID}
+    assert sent[1] == {"Id": L2, "Description": None, "CoaCode": None}
+    assert sent[2] == {"Id": L3}
+    assert sent[3] == {"ItemId": ITEM_A, "Quantity": 1, "TaxId": EXEMPT_ID}
+    assert "warning" not in result and f"tax id {EXEMPT_ID}" in result["note"]
+    assert len(mock_gorelo.calls("GET", TAXES)) == 1  # ONE lookup for the update line and the new line
+    tools = {t.name: t for t in await list_tools(server)}
+    change = tools["update_invoice"].inputSchema["properties"]["update_lines"]["items"]["properties"]
+    assert change["no_tax"]["description"] == invoices.NO_TAX_TEXT
+
+
+@pytest.mark.parametrize(
+    "args, fragment",
+    [
+        ({"update_lines": [{"line_id": uid(99), "quantity": 1}]}, "update_lines[0].line_id: " + uid(99) + " is not a line of this invoice"),
+        ({"remove_line_ids": [uid(99)]}, "remove_line_ids[0]: " + uid(99) + " is not a line of this invoice"),
+        ({"remove_line_ids": [L1, L1]}, "remove_line_ids: the same line id is listed twice"),
+        ({"remove_line_ids": ["x"]}, "remove_line_ids[0]: expected a GUID"),
+        ({"remove_line_ids": [L1], "update_lines": [{"line_id": L1, "quantity": 2}]}, "remove_line_ids[0]: this line is also in update_lines"),
+        ({"remove_line_ids": [L1, L2, L3]}, "remove_line_ids: this would remove every line of the invoice"),
+        ({"update_lines": [{"line_id": L1}]}, "update_lines[0]: give at least one field to change besides line_id"),
+        ({"update_lines": [{"line_id": L1, "quantity": 0}]}, "update_lines[0].quantity: must be a number greater than 0"),
+        ({"update_lines": [{"line_id": L1, "description": "x", "clear_fields": ["description"]}]}, "update_lines[0].description: cannot be given a value and cleared"),
+        ({"update_lines": [{"line_id": L1, "tax_id": 3, "no_tax": True}]}, "update_lines[0]: give tax_id or no_tax, not both"),
+        ({"update_lines": [{"line_id": L1, "billable_status_id": 4}]}, "update_lines[0].billable_status_id: must be 1, 2 or 3"),
+        ({"update_lines": [{"line_id": L1, "discount_percent": 101}]}, "update_lines[0].discount_percent"),
+        ({"update_lines": [{"line_id": L1, "quantity": 1}, {"line_id": L1.upper(), "quantity": 2}]}, "update_lines[1].line_id: this line is already changed"),
+        ({"update_lines": [{"line_id": L1, "item_id": ITEM_A, "quantity": 2}]}, "update_lines[0]: unknown field(s) item_id"),
+        ({"update_lines": [{"quantity": 2}]}, "update_lines[0]: missing line_id"),
+        ({"update_lines": [{"line_id": L1, "clear_fields": ["tax_id"]}]}, "update_lines[0].clear_fields"),
+        ({"add_lines": [{"item_id": ITEM_A}]}, "add_lines[0]: missing quantity"),
+        ({"add_lines": [{"item_id": "x", "quantity": 1}]}, "add_lines[0].item_id: expected a GUID"),
+    ],
+)
+async def test_line_errors_name_the_param_and_the_item_and_never_reach_a_patch(client_factory, mock_gorelo, args, fragment):
+    route_update(mock_gorelo)
+    with pytest.raises((ToolError, ValueError)) as info:
+        await call_directly(client_factory, invoices.update_invoice, invoice_id=INVOICE_ID, **args)
+    assert fragment in str(info.value)
+    assert mock_gorelo.calls("PATCH") == []
+
+
+async def test_a_hundred_lines_is_the_limit_and_the_message_names_add_lines_when_lines_are_added(client_factory, mock_gorelo):
+    rows = [line_row(Id=uid(1000 + n)) for n in range(100)]
+    route_update(mock_gorelo, before=open_invoice(lines=rows))
+    with pytest.raises((ToolError, ValueError)) as info:
+        await call_directly(
+            client_factory, invoices.update_invoice, invoice_id=INVOICE_ID, add_lines=[{"item_id": ITEM_A, "quantity": 1}]
+        )
+    assert "add_lines: the invoice would have 101 lines (100 kept plus 1 added) and Gorelo accepts at most 100" in str(info.value)
+    assert mock_gorelo.calls("PATCH") == []
+
+
+@pytest.mark.parametrize("lines, fragment", [([{"Name": "x"}], "line 1 of the invoice has no usable Id"), (None, "no LineItems list")])
+async def test_an_invoice_whose_read_has_no_usable_line_ids_is_never_patched_on_its_lines(server, mock_gorelo, lines, fragment):
+    before = open_invoice(lines=lines if lines is not None else [])
+    if lines is None:
+        before["LineItems"] = None
+    route_update(mock_gorelo, before=before)
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "remove_line_ids": [L1]})
+    assert fragment in text and mock_gorelo.calls("PATCH") == []
+
+
+async def test_a_line_billing_a_time_entry_is_left_to_gorelo_and_the_text_says_quantity_cannot_change(server, mock_gorelo):
+    # the read of a line carries nothing that says it bills a time entry, so the tool cannot refuse it locally
+    assert "Name" in line_row() and not any("Time" in key for key in line_row())
+    route_update(
+        mock_gorelo,
+        patch=error_envelope(400, [("070101", "Quantity cannot change on a line billing a time entry.", "LineItems[0].Quantity")]),
+    )
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "update_lines": [{"line_id": L1, "quantity": 5}]})
+    assert text == trace(
+        "Gorelo rejected update_invoice (HTTP 400, code 070101): LineItems[0].Quantity: Quantity cannot change on a line billing a time entry."
+    )
+    tools = {t.name: t for t in await list_tools(server)}
+    assert "billing a time entry" in tools["update_invoice"].description
+    assert "billing a time entry" in tools["update_invoice"].inputSchema["properties"]["update_lines"]["items"]["properties"]["quantity"]["description"]
+
+
+# ---- update_invoice: what Gorelo answers ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "property_name, param",
+    [("Reference", "reference"), ("InvoiceDate", "invoice_date"), ("DueDate", "due_date"), ("InvoiceTemplateId", "invoice_template_id"),
+     ("InvoiceEmailTemplateId", "invoice_email_template_id"), ("BrandingThemeId", "branding_theme_id"), ("invoiceId", "invoice_id")],
+)
+async def test_update_invoice_a_gorelo_400_names_the_snake_case_param(server, mock_gorelo, property_name, param):
+    route_update(mock_gorelo, patch=error_envelope(400, [("070101", "Rejected.", property_name)]))
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "r"})
+    assert text == trace(f"Gorelo rejected update_invoice (HTTP 400, code 070101): {param}: Rejected.")
+
+
+async def test_update_invoice_a_409_is_a_plain_refusal(server, mock_gorelo):
+    route_update(mock_gorelo, patch=error_envelope(409, [("070901", "The invoice was paid meanwhile.")]))
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "r"})
+    assert text == trace("Gorelo rejected update_invoice (HTTP 409, code 070901): The invoice was paid meanwhile.")
+    assert "may or may not" not in text
+
+
+async def test_update_invoice_a_404_on_the_read_is_reported_and_nothing_is_patched(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, error_envelope(404, [("070401", "Invoice not found.", "invoiceId")]))
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "r"})
+    assert text == trace("Gorelo rejected update_invoice (HTTP 404, code 070401): invoice_id: Invoice not found.")
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+@pytest.mark.parametrize("failure", [httpx.ReadTimeout("slow"), httpx.ConnectError("refused")], ids=["timeout", "connection"])
+async def test_a_patch_that_is_not_answered_is_never_retried_and_says_to_verify(server, mock_gorelo, failure):
+    mock_gorelo.on("GET", PATCH_PATH, envelope(open_invoice()))
+    mock_gorelo.on("PATCH", PATCH_PATH, failure)
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "r"})
+    assert text.startswith("Gorelo did not confirm update_invoice (")
+    assert "Verify with a read before retrying." in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
+
+
+async def test_a_failed_read_back_returns_the_answer_of_the_patch_with_a_warning(server, mock_gorelo):
+    after = open_invoice(Reference="PO-1")
+    mock_gorelo.on("GET", PATCH_PATH, in_order(envelope(open_invoice()), error_envelope(500, [("070500", "Down.")])))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope(after))
+    result = await call_tool(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "PO-1"})
+    assert result["Reference"] == "PO-1" and "re-reading it failed" in result["warning"] and "Do not repeat the write" in result["warning"]
+
+
+async def test_a_read_back_that_does_not_show_the_change_is_a_write_unconfirmed_error(server, mock_gorelo):
+    route_update(mock_gorelo, after=open_invoice(Reference="OLD"), patch=open_invoice(Reference="OLD"))
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "NEW"})
+    assert "the invoice does not show the change (Reference is not the text that was sent)" in text
+    assert "verify it with a read before repeating it (get_invoice)" in text
+
+
+async def test_a_read_back_with_a_different_number_of_lines_is_not_taken_for_a_success(server, mock_gorelo):
+    route_update(mock_gorelo, after=open_invoice(lines=lines3()))
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "remove_line_ids": [L1]})
+    assert "LineItems shows 3 lines, 2 were sent" in text
+
+
+async def test_a_patch_answer_that_is_not_an_invoice_is_write_unconfirmed(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, envelope(open_invoice()))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope(None))
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "r"})
+    assert "Verify with a read before retrying." in text or "verify it with a read" in text
+
+
+async def test_update_invoice_is_a_write_with_the_destructive_hint_and_a_text_that_says_what_it_does(server):
+    spec = next(s for s in REGISTRY.specs if s.name == "update_invoice")
+    assert (spec.toolset, spec.kind, spec.destructive_hint) == ("billing", "write", True)
+    tool = tool_def("update_invoice", await list_tools(server))
+    assert tool.annotations.destructiveHint is True and tool.annotations.readOnlyHint is False
+    text = flat(inspect.getdoc(invoices.update_invoice))
+    assert 40 < len(text) <= 900
+    assert "Draft or Submitted" in text and "never changes the status (approve_invoice, when enabled)" in text
+    assert "Gorelo replaces the whole set, so the tool resends them" in text
+    assert "update_lines changes lines by line_id, add_lines appends new ones, remove_line_ids removes some" in text
+    assert "no_tax (the account's Tax Exempt rate" in text and "or tax_id" in text
+    for name, definition in tool.inputSchema["properties"].items():
+        assert definition.get("description") and len(definition["description"]) <= 220, name
+
+
+# ---- approve_invoice ---------------------------------------------------------------------------------------------------
+
+
+async def test_approve_refuses_without_confirm_with_no_http_and_says_what_would_happen(server, mock_gorelo):
+    text = await call_tool_error(server, "approve_invoice", {"invoice_id": INVOICE_ID})
+    assert text.startswith(f"confirm: refusing to approve invoice {INVOICE_ID} without confirm=true.")
+    assert "pushes the invoice to the connected accounting system at once" in text
+    assert "voids it in Gorelo ONLY" in text and "the user must void it there too" in text and "observed with Xero" in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("confirm", ["true", 1, "yes", None, 0])
+async def test_approve_confirm_is_strict(server, mock_gorelo, confirm):
+    text = await call_tool_error(server, "approve_invoice", {"invoice_id": INVOICE_ID, "confirm": confirm})
+    assert "confirm" in text and mock_gorelo.requests == []
+
+
+async def test_a_bad_invoice_id_is_reported_before_the_user_is_asked_to_confirm(server, mock_gorelo):
+    text = await call_tool_error(server, "approve_invoice", {"invoice_id": "nope"})
+    assert text.startswith("invoice_id: expected a GUID") and mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("status", [(1, "Draft"), (2, "Submitted")])
+async def test_approve_reads_patches_status_5_and_nothing_else_and_reads_it_back(server, mock_gorelo, status):
+    approved = open_invoice((5, "Approved"), ExternalId="xero-1")
+    route_update(mock_gorelo, before=open_invoice(status), after=approved)
+    result = await call_tool(server, "approve_invoice", {"invoice_id": INVOICE_ID.upper(), "confirm": True})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", PATCH_PATH), ("PATCH", PATCH_PATH), ("GET", PATCH_PATH)]
+    assert sent_patch(mock_gorelo) == {"StatusId": 5}
+    assert result == approved and "note" not in result
+
+
+@pytest.mark.parametrize("status", [(3, "Paid"), (4, "Void"), (5, "Approved")])
+async def test_approve_refuses_any_status_but_draft_and_submitted_and_sends_no_patch(server, mock_gorelo, status):
+    route_update(mock_gorelo, before=open_invoice(status))
+    text = await call_tool_error(server, "approve_invoice", {"invoice_id": INVOICE_ID, "confirm": True})
+    assert f"(id {status[0]}); approve_invoice approves only Draft (1) and Submitted (2) invoices." in text
+    assert ("It is already Approved." in text) == (status[0] == 5)
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_a_total_of_zero_comes_back_paid_with_a_note_and_is_not_an_error(server, mock_gorelo):
+    paid = open_invoice((3, "Paid"), Total=0.0, AmountDue=0.0)
+    route_update(mock_gorelo, after=paid)
+    result = await call_tool(server, "approve_invoice", {"invoice_id": INVOICE_ID, "confirm": True})
+    assert result["Status"] == {"Id": 3, "Name": "Paid"} and "Status is Paid, not Approved" in result["note"]
+
+
+async def test_an_answer_that_still_shows_draft_is_write_unconfirmed(server, mock_gorelo):
+    route_update(mock_gorelo, after=open_invoice((1, "Draft")))
+    text = await call_tool_error(server, "approve_invoice", {"invoice_id": INVOICE_ID, "confirm": True})
+    assert "the invoice shows Draft, expected Approved or Paid after approving" in text
+    assert "verify it with a read before repeating it (get_invoice)" in text
+
+
+async def test_a_failed_read_back_after_approving_returns_the_patch_answer_with_a_warning(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, in_order(envelope(open_invoice()), error_envelope(500, [("070500", "Down.")])))
+    mock_gorelo.on("PATCH", PATCH_PATH, envelope(open_invoice((5, "Approved"))))
+    result = await call_tool(server, "approve_invoice", {"invoice_id": INVOICE_ID, "confirm": True})
+    assert result["Status"]["Id"] == 5 and "re-reading it failed" in result["warning"]
+
+
+async def test_a_confirmed_approval_that_times_out_is_not_repeated_and_the_text_says_to_look_first_with_get_invoice(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, envelope(open_invoice()))
+    mock_gorelo.on("PATCH", PATCH_PATH, httpx.ReadTimeout("slow"))
+    text = await call_tool_error(server, "approve_invoice", {"invoice_id": INVOICE_ID, "confirm": True})
+    assert text.startswith("Gorelo did not confirm approve_invoice (the request timed out).")
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
+    assert 'After a "did not confirm" error read get_invoice before repeating.' in flat(inspect.getdoc(invoices.approve_invoice))
+
+
+async def test_approve_a_gorelo_409_is_a_plain_refusal(server, mock_gorelo):
+    route_update(mock_gorelo, patch=error_envelope(409, [("070901", "Not approvable.")]))
+    text = await call_tool_error(server, "approve_invoice", {"invoice_id": INVOICE_ID, "confirm": True})
+    assert text == trace("Gorelo rejected approve_invoice (HTTP 409, code 070901): Not approvable.")
+
+
+async def test_approve_invoice_is_gated_and_says_the_same_things_as_create_approved_invoice(server_factory):
+    spec = next(s for s in REGISTRY.specs if s.name == "approve_invoice")
+    assert (spec.toolset, spec.kind, spec.ops) == ("billing", "destructive", ["GET /v1/invoices/{invoiceId}", "PATCH /v1/invoices/{invoiceId}"])
+    off = {t.name for t in await list_tools(server_factory(destructive=False))}
+    assert "approve_invoice" not in off and "update_invoice" in off
+    listed = server_factory(destructive=True, destructive_tools=frozenset({"approve_invoice"}))
+    assert "approve_invoice" in {t.name for t in await list_tools(listed)}
+    doc = flat(inspect.getdoc(invoices.approve_invoice))
+    assert 40 < len(doc) <= 900
+    assert "pushes the invoice to the connected accounting system at once" in doc
+    assert "voids it in Gorelo ONLY, so the copy in the accounting system stays open (observed with Xero)" in doc
+    assert "who must void it there too" in doc and "A total of exactly 0 is recorded as Paid instead: check Status" in doc
+    assert doc.index("Gorelo ONLY") < doc.index("Ask the user first")
+    assert doc.endswith("Ask the user first; needs confirm=true.")
+    parameter = inspect.signature(spec.fn).parameters["confirm"]
+    assert parameter.default is False and "Strict" in repr(parameter.annotation)
+
+
+# ---- payments (read only) ------------------------------------------------------------------------------------------------
+
+PAYMENT_ID = uid(41)
+
+
+def payment(**extra):
+    row = {
+        "Id": PAYMENT_ID, "Amount": 250.0, "PaymentDate": "2026-10-01", "Reference": "BANK-1", "ClientId": 4983,
+        "Invoices": [{"InvoiceId": INVOICE_ID, "Amount": 250.0}],
+    }
+    row.update(extra)
+    return row
+
+
+def test_the_payment_fixture_is_shaped_like_the_spec(spec_index):
+    assert set(payment()) == set(spec_index.schema("PaymentModel")["fields"])
+    assert set(payment()["Invoices"][0]) == set(spec_index.schema("PaymentInvoiceModel")["fields"])
+
+
+async def test_list_payments_sends_only_the_page_size_and_returns_the_house_shape(server, mock_gorelo):
+    mock_gorelo.on("GET", "/v1/payments", paged_envelope([payment()], total_count=1))
+    result = await call_tool(server, "list_payments")
+    request = mock_gorelo.last
+    assert (request.method, request.path, request.query, request.json) == ("GET", "/v1/payments", {"PageSize": "50"}, None)
+    assert result == {"items": [payment()], "count": 1, "total_count": 1, "has_more": False, "next_cursor": None, "page_size": 50, "filters": {}}
+
+
+async def test_every_payment_filter_goes_out_under_its_spec_name_and_the_dates_as_midnight_utc(server, mock_gorelo):
+    mock_gorelo.on("GET", "/v1/payments", paged_envelope([]))
+    result = await call_tool(
+        server, "list_payments",
+        {
+            "client_ids": [4983, 7], "invoice_ids": [INVOICE_ID.upper(), uid(6)], "payment_date_since": "2026-10-01",
+            "payment_date_before": "2026-11-01", "sort_order": "asc", "page_size": 500, "cursor": "abc",
+        },
+    )
+    assert mock_gorelo.last.query == {
+        "ClientIds": "4983,7", "InvoiceIds": f"{INVOICE_ID},{uid(6)}", "PaymentDateSince": "2026-10-01T00:00:00Z",
+        "PaymentDateBefore": "2026-11-01T00:00:00Z", "SortOrder": "asc", "PageSize": "200", "Cursor": "abc",
+    }
+    assert result["filters"]["payment_date_since"] == "2026-10-01" and result["page_size"] == 200  # echoed as given, clamped size
+
+
+@pytest.mark.parametrize(
+    "args, fragment",
+    [
+        ({"client_ids": []}, "client_ids"),
+        ({"invoice_ids": ["INV-1"]}, "invoice_ids[0]: expected a GUID"),
+        ({"invoice_ids": []}, "invoice_ids: expected at least one GUID"),
+        ({"payment_date_since": "2026-10-01T00:00:00Z"}, "payment_date_since: expected a calendar date"),
+        ({"payment_date_before": "tomorrow"}, "payment_date_before: expected a calendar date"),
+        ({"cursor": " "}, "cursor: must not be empty"),
+    ],
+)
+async def test_list_payments_local_errors_name_the_param_and_send_nothing(client_factory, mock_gorelo, args, fragment):
+    with pytest.raises((ToolError, ValueError)) as info:
+        await call_directly(client_factory, invoices.list_payments, **args)
+    assert fragment in str(info.value) and mock_gorelo.requests == []
+
+
+async def test_list_payments_refuses_a_sort_order_outside_the_schema_and_a_bool_client_id(server, mock_gorelo):
+    assert "sort_order" in await call_tool_error(server, "list_payments", {"sort_order": "newest"})
+    assert "client_ids" in await call_tool_error(server, "list_payments", {"client_ids": [True]})
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("property_name, param", [("SortOrder", "sort_order"), ("ClientIds", "client_ids"), ("InvoiceIds", "invoice_ids"),
+                                                    ("PaymentDateSince", "payment_date_since"), ("PaymentDateBefore", "payment_date_before"),
+                                                    ("PageSize", "page_size"), ("Cursor", "cursor")])
+async def test_list_payments_a_gorelo_400_names_the_snake_case_param(server, mock_gorelo, property_name, param):
+    mock_gorelo.on("GET", "/v1/payments", error_envelope(400, [("070101", "rejected", property_name)]))
+    text = await call_tool_error(server, "list_payments")
+    assert f"HTTP 400, code 070101): {param}: rejected" in text
+
+
+async def test_list_payments_follows_next_cursor_with_the_same_filters(server, mock_gorelo):
+    mock_gorelo.on("GET", "/v1/payments", paged_envelope([payment()], next_cursor="c1", total_count=2))
+    first = await call_tool(server, "list_payments", {"client_ids": [4983]})
+    assert first["has_more"] is True and first["next_cursor"] == "c1"
+    await call_tool(server, "list_payments", {**first["filters"], "cursor": first["next_cursor"]})
+    assert mock_gorelo.last.query == {"ClientIds": "4983", "PageSize": "50", "Cursor": "c1"}
+
+
+async def test_get_payment_reads_one_payment_by_its_guid_in_canonical_form(server, mock_gorelo):
+    mock_gorelo.on("GET", f"/v1/payments/{PAYMENT_ID}", envelope(payment()))
+    result = await call_tool(server, "get_payment", {"payment_id": PAYMENT_ID.upper()})
+    assert result == payment()
+    assert (mock_gorelo.last.method, mock_gorelo.last.path, mock_gorelo.last.query) == ("GET", f"/v1/payments/{PAYMENT_ID}", {})
+
+
+@pytest.mark.parametrize("bad", ["12", "", "pay-1"])
+async def test_get_payment_needs_a_guid_and_names_payment_id(server, mock_gorelo, bad):
+    text = await call_tool_error(server, "get_payment", {"payment_id": bad})
+    assert "payment_id" in text and mock_gorelo.requests == []
+
+
+async def test_get_payment_a_404_names_payment_id_and_a_non_object_answer_is_refused(server, mock_gorelo):
+    mock_gorelo.on("GET", f"/v1/payments/{PAYMENT_ID}", error_envelope(404, [("070401", "Payment not found.", "paymentId")]))
+    assert await call_tool_error(server, "get_payment", {"payment_id": PAYMENT_ID}) == trace(
+        "Gorelo rejected get_payment (HTTP 404, code 070401): payment_id: Payment not found."
+    )
+    mock_gorelo.on("GET", f"/v1/payments/{uid(42)}", envelope([payment()]))
+    assert "unexpected response" in await call_tool_error(server, "get_payment", {"payment_id": uid(42)})
+
+
+async def test_the_payment_tools_are_reads_and_say_that_no_tool_records_or_deletes_a_payment(server):
+    for name in ("list_payments", "get_payment"):
+        spec = next(s for s in REGISTRY.specs if s.name == name)
+        assert (spec.toolset, spec.kind) == ("billing", "read")
+        assert all(op.startswith("GET ") for op in spec.ops)
+        doc = flat(inspect.getdoc(spec.fn))
+        assert "Read only: payments are recorded money, and no tool records or deletes one." in doc
+    # nothing in this module reaches POST or DELETE /v1/payments
+    assert "POST /v1/payments" not in inspect.getsource(invoices) and "DELETE /v1/payments" not in inspect.getsource(invoices).replace(
+        "(POST and DELETE stay excluded)", ""
+    )
+    assert all("/v1/payments" not in op or op.startswith("GET ") for spec in module_specs() for op in spec.ops)
+
+
+# --------------------------------------------------------------------------
+# 1.5.0 regressions: no_tax, the update read-back and the other billing text fixes
+# --------------------------------------------------------------------------
+
+UNTAXED = {"TaxAmount": 0.0, "Tax": {"Id": EXEMPT_ID, "Name": "Tax Exempt TAX"}}
+STILL_TAXED = {"Tax": {"Id": EXEMPT_ID, "Name": "Tax Exempt TAX"}}  # keeps the default TaxAmount 13.5 of line_row
+
+
+@pytest.mark.parametrize("position", [0, 1])
+async def test_no_tax_on_create_approved_invoice_sends_the_exempt_id_in_the_one_post(server, mock_gorelo, position):
+    lines = [line(tax_id=4), line(tax_id=4)]
+    lines[position] = line(no_tax=True)
+    route_create(mock_gorelo, invoice_detail(LineItems=[line_row(Id=L1, **UNTAXED), line_row(Id=L2, **UNTAXED)]))
+    route_taxes(mock_gorelo)
+    result = await call_tool(server, "create_approved_invoice", {**GOOD, "line_items": lines, "confirm": True})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", TAXES), ("POST", INVOICES), ("GET", NEW_PATH)]
+    sent = mock_gorelo.calls("POST")[0].json
+    assert sent["StatusId"] == 5
+    assert [entry["TaxId"] for entry in sent["LineItems"]] == [EXEMPT_ID if n == position else 4 for n in range(2)]
+    assert f"tax id {EXEMPT_ID}" in result["note"] and "warning" not in result
+
+
+async def test_the_approved_tool_confirms_before_it_looks_up_the_rate_and_a_tax_id_line_needs_no_lookup(server, mock_gorelo):
+    text = await call_tool_error(server, "create_approved_invoice", {**GOOD, "line_items": [line(no_tax=True)]})  # no confirm
+    assert text.startswith("confirm: refusing to create an APPROVED invoice") and mock_gorelo.requests == []
+    route_create(mock_gorelo)
+    await call_tool(server, "create_approved_invoice", {**GOOD, "line_items": [line(tax_id=9)], "confirm": True})
+    assert mock_gorelo.requests[0].json["LineItems"] == [{"ItemId": ITEM_A, "Quantity": 1, "TaxId": 9}]
+    assert mock_gorelo.calls("GET", TAXES) == []  # no no_tax line, no lookup
+
+
+async def test_an_approved_no_tax_line_that_still_shows_tax_gets_a_loud_warning(server, mock_gorelo):
+    route_taxes(mock_gorelo)
+    route_create(mock_gorelo, invoice_detail(status=(5, "Approved"), LineItems=[line_row(Id=L1, Quantity=1.0, **STILL_TAXED)]))
+    result = await call_tool(server, "create_approved_invoice", {**GOOD, "line_items": [line(no_tax=True)], "confirm": True})
+    assert result["Status"] == {"Id": 5, "Name": "Approved"}
+    assert result["warning"].startswith("WARNING: no_tax was asked for line_items[0]")
+    assert f"TaxId {EXEMPT_ID} (the Tax Exempt rate) was sent" in result["warning"]
+    assert "APPROVED and already pushed to the accounting system" in result["warning"]
+    assert "voids it in Gorelo ONLY" in result["warning"]
+    assert f"tax id {EXEMPT_ID}" in result["note"]
+
+
+async def test_a_draft_with_a_no_tax_line_that_still_shows_tax_gets_a_warning_naming_the_line(server, mock_gorelo):
+    taxed = line_row(Id=L1, Quantity=1.0, **STILL_TAXED)  # TaxAmount 13.5
+    route_taxes(mock_gorelo)
+    route_create(mock_gorelo, invoice_detail(LineItems=[line_row(Id=L2, Quantity=1.0, **UNTAXED), taxed]))
+    result = await call_tool(server, "create_invoice", {**GOOD, "line_items": [line(tax_id=9), line(no_tax=True)]})
+    assert result["Id"] == NEW_ID and result["LineItems"][1]["Id"] == L1  # the invoice itself, unchanged
+    assert "line_items[1] (Id " + L1 + ")" in result["warning"] and "line_items[0]" not in result["warning"]
+    assert "tax_id of your tax-exempt rate" in result["warning"] and "update_invoice" in result["warning"]
+    assert "WARNING" not in result["warning"] and "not approved" in result["warning"]
+    assert f"tax id {EXEMPT_ID}" in result["note"]
+
+
+async def test_a_no_tax_draft_line_that_shows_no_tax_has_no_warning(server, mock_gorelo):
+    route_taxes(mock_gorelo)
+    route_create(mock_gorelo, invoice_detail(LineItems=[line_row(Id=L1, Quantity=1.0, **UNTAXED)]))
+    result = await call_tool(server, "create_invoice", {**GOOD, "line_items": [line(no_tax=True)]})
+    assert "warning" not in result and f"tax id {EXEMPT_ID}" in result["note"]
+
+
+async def test_a_failed_read_back_keeps_its_own_warning_and_adds_none(server, mock_gorelo):
+    route_taxes(mock_gorelo)
+    mock_gorelo.on("POST", INVOICES, envelope({"Id": NEW_ID}))
+    mock_gorelo.on("GET", f"/v1/invoices/{NEW_ID}", error_envelope(500, [("070001", "Internal error.")]))
+    result = await call_tool(server, "create_invoice", {**GOOD, "line_items": [line(no_tax=True)]})
+    assert set(result) == {"Id", "warning", "note"} and "no_tax was asked for" not in result["warning"]
+
+
+async def test_update_invoice_warns_about_a_no_tax_line_and_a_new_no_tax_line_that_show_tax(server, mock_gorelo):
+    new_id = uid(34)
+    route_taxes(mock_gorelo)
+    route_update(
+        mock_gorelo,
+        after=open_invoice(
+            lines=[line_row(Id=L1, Name="One"), line_row(Id=L2, Name="Two", **STILL_TAXED), line_row(Id=L3, Name="Three"),
+                   line_row(Id=new_id, Quantity=1.0, **STILL_TAXED)]
+        ),
+    )
+    result = await call_tool(
+        server, "update_invoice",
+        {"invoice_id": INVOICE_ID, "update_lines": [{"line_id": L2, "no_tax": True}], "add_lines": [line(no_tax=True)]},
+    )
+    assert f"update_lines[0] (line {L2})" in result["warning"] and f"add_lines[0] (line {new_id})" in result["warning"]
+    assert f"TaxId {EXEMPT_ID} (the Tax Exempt rate) was sent" in result["warning"]
+    assert result["LineItems"][3]["Id"] == new_id and f"tax id {EXEMPT_ID}" in result["note"]
+
+
+async def test_update_invoice_note_keeps_the_status_note_and_adds_the_tax_note(server, mock_gorelo):
+    route_taxes(mock_gorelo)
+    route_update(
+        mock_gorelo,
+        after=open_invoice(status=(5, "Approved"), lines=[line_row(Id=L1, **UNTAXED), line_row(Id=L2), line_row(Id=L3)]),
+    )
+    result = await call_tool(server, "update_invoice", {"invoice_id": INVOICE_ID, "update_lines": [{"line_id": L1, "no_tax": True}]})
+    assert "after the change, not Draft or Submitted" in result["note"] and f"tax id {EXEMPT_ID}" in result["note"]
+
+
+async def test_the_read_back_of_update_invoice_must_show_the_exempt_rate_on_a_no_tax_line(server, mock_gorelo):
+    route_taxes(mock_gorelo)
+    route_update(mock_gorelo, after=open_invoice())  # L1 still shows Tax Id 2 (GST)
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "update_lines": [{"line_id": L1, "no_tax": True}]})
+    assert f"line {L1}: Tax id expected {EXEMPT_ID}, read 2" in text and "the write may have been applied" in text
+
+
+async def test_the_texts_name_the_new_rule():
+    assert "Tax Exempt rate" in invoices.NO_TAX_TEXT
+    approved = flat(inspect.getdoc(invoices.create_approved_invoice))
+    assert "no_tax too" in approved and "loud warning" in approved
+    assert "no_tax (the account's Tax Exempt rate) or tax_id" in flat(inspect.getdoc(invoices.create_invoice))
+    assert "a no_tax line that still shows tax gets a warning" in flat(inspect.getdoc(invoices.create_invoice))
+
+
+# ---- the lookup of the Tax Exempt rate: ONE rate, refused locally otherwise, before any write --------------------------
+
+
+def candidates(rows):
+    return {row["Id"] for row in rows}
+
+
+@pytest.mark.parametrize("tool", ["create_invoice", "create_approved_invoice"])
+@pytest.mark.parametrize(
+    "rows, why",
+    [
+        pytest.param([tax_row(1, "GST", "GST", 10.0), tax_row(2, "Zero", "Zero")], "the account has no Tax Exempt rate", id="none"),
+        pytest.param([], "the account has no Tax Exempt rate", id="no-taxes-at-all"),
+        pytest.param(
+            [tax_row(1, "Tax Exempt TAX", "Tax Exempt"), tax_row(2, "x", " tax EXEMPT ")],
+            "the account has 2 Tax Exempt rates", id="two-by-code",
+        ),
+        pytest.param(
+            [tax_row(1, "Tax Exempt", "A"), tax_row(2, "Other", "tax exempt")],
+            "the account has 2 Tax Exempt rates", id="one-by-name-one-by-code",
+        ),
+        pytest.param([tax_row(1, "Tax Exempt", "Tax Exempt", 5.0)], "the account has no Tax Exempt rate", id="not-zero-percent"),
+        pytest.param([tax_row(1, "Tax Exempt", "Tax Exempt", None)], "the account has no Tax Exempt rate", id="percentage-not-set"),
+        pytest.param(
+            [tax_row(1, "Tax Exempt", "Tax Exempt", 0.0, sub_taxes=[{"Id": 5, "Name": "GST", "Code": "GST", "Percentage": 5.0}])],
+            "the account has no Tax Exempt rate", id="a-non-zero-subtax",
+        ),
+        pytest.param([tax_row(1, "Tax Exempt TAX", "Exempt")], "the account has no Tax Exempt rate", id="name-must-equal-exactly"),
+    ],
+)
+async def test_no_tax_is_refused_before_any_write_when_there_is_not_exactly_one_exempt_rate(server, mock_gorelo, tool, rows, why):
+    route_taxes(mock_gorelo, rows)
+    text = await call_tool_error(server, tool, args_for(tool, line_items=[line(tax_id=3), line(no_tax=True)]))
+    assert text.startswith("line_items[1].no_tax: " + why)
+    assert "pass tax_id of the tax-exempt rate from list_taxes instead" in text and "Nothing has been sent to Gorelo." in text
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", TAXES)]  # the lookup only: no POST
+
+
+async def test_the_refusal_lists_the_zero_percent_rates_by_id_and_code_only(server, mock_gorelo):
+    rows = [tax_row(1, "Secret Name A", "Z1"), tax_row(2, "Secret Name B", None), tax_row(3, "Taxed", "T", 7.0)]
+    route_taxes(mock_gorelo, rows)
+    text = await call_tool_error(server, "create_invoice", {**GOOD, "line_items": [line(no_tax=True)]})
+    assert '0% rates: Id 1 (Code "Z1"), Id 2 (no Code).' in text
+    assert "Secret Name" not in text and "Id 3" not in text  # names never, taxed rates are not candidates
+
+
+async def test_the_refusal_lists_at_most_ten_candidates(server, mock_gorelo):
+    route_taxes(mock_gorelo, [tax_row(n, "z", f"C{n}") for n in range(1, 14)])
+    text = await call_tool_error(server, "create_invoice", {**GOOD, "line_items": [line(no_tax=True)]})
+    assert "Id 10 (" in text and "Id 11 (" not in text and "and 3 more" in text
+
+
+def test_the_exempt_rule_matches_code_or_name_trimmed_and_case_insensitive_and_exact_zero():
+    assert invoices._is_exempt_rate(tax_row(1, "x", "Tax Exempt"))
+    assert invoices._is_exempt_rate(tax_row(1, "  TAX exempt ", None))
+    assert invoices._is_exempt_rate(tax_row(1, "x", "tax exempt", 0))  # an integer 0 is exactly 0
+    assert invoices._is_exempt_rate(tax_row(1, "x", "Tax Exempt", sub_taxes=[{"Id": 1, "Name": "a", "Code": None, "Percentage": 0.0}]))
+    assert not invoices._is_exempt_rate(tax_row(1, "Tax Exempt TAX", "Tax Exempt", 0.01))
+    assert not invoices._is_exempt_rate(tax_row(1, "Tax Exempt TAX", "TaxExempt"))
+    assert not invoices._is_exempt_rate(tax_row(1, "x", "Tax Exempt", False))  # a boolean is not a rate
+    assert not invoices._is_exempt_rate({"Id": 1, "Name": "Tax Exempt", "Percentage": 0.0, "SubTaxes": "none"})
+
+
+async def test_the_live_tenant_resolves_to_id_202_in_one_get_with_no_query(server, mock_gorelo):
+    route_taxes(mock_gorelo)
+    route_create(mock_gorelo)
+    await call_tool(server, "create_invoice", {**GOOD, "line_items": [line(no_tax=True)]})
+    (lookup,) = mock_gorelo.calls("GET", TAXES)
+    assert lookup.query == {} and mock_gorelo.requests[0] is lookup  # before the write
+    assert mock_gorelo.calls("POST")[0].json["LineItems"] == [{"ItemId": ITEM_A, "Quantity": 1, "TaxId": 202}]
+
+
+async def test_a_failed_tax_lookup_is_the_normal_error_and_stops_the_call_before_the_write(server, mock_gorelo):
+    mock_gorelo.on("GET", TAXES, error_envelope(500, [("070001", "Internal error.")]))
+    text = await call_tool_error(server, "create_invoice", {**GOOD, "line_items": [line(no_tax=True)]})
+    assert "Gorelo" in text and "070001" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+    mock_gorelo.requests.clear()
+    text = await call_tool_error(server, "create_approved_invoice", {**GOOD, "line_items": [line(no_tax=True)], "confirm": True})
+    assert "070001" in text and mock_gorelo.calls("POST") == []
+
+
+async def test_update_invoice_stops_before_the_patch_when_the_tax_lookup_fails(server, mock_gorelo):
+    mock_gorelo.on("GET", TAXES, error_envelope(500, [("070001", "Internal error.")]))
+    route_update(mock_gorelo)
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "add_lines": [line(no_tax=True)]})
+    assert "070001" in text and mock_gorelo.calls("PATCH") == []
+
+
+async def test_update_invoice_refuses_no_tax_before_the_patch_and_names_the_first_no_tax_line(server, mock_gorelo):
+    route_taxes(mock_gorelo, [tax_row(1, "GST", "GST", 10.0)])
+    route_update(mock_gorelo)
+    text = await call_tool_error(
+        server, "update_invoice",
+        {"invoice_id": INVOICE_ID, "update_lines": [{"line_id": L1, "quantity": 2}], "add_lines": [line(no_tax=True)]},
+    )
+    assert text.startswith("add_lines[0].no_tax: the account has no Tax Exempt rate")
+    assert mock_gorelo.calls("PATCH") == []
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", PATCH_PATH), ("GET", TAXES)]  # status read, lookup
+
+
+async def test_update_invoice_names_an_update_line_when_it_is_the_first_no_tax_line(server, mock_gorelo):
+    route_taxes(mock_gorelo, [])
+    route_update(mock_gorelo)
+    text = await call_tool_error(
+        server, "update_invoice", {"invoice_id": INVOICE_ID, "update_lines": [{"line_id": L2, "no_tax": True}]}
+    )
+    assert text.startswith("update_lines[0].no_tax: the account has no Tax Exempt rate") and "0% rates: none." in text
+
+
+async def test_update_invoice_looks_nothing_up_without_a_no_tax_line(server, mock_gorelo):
+    route_update(mock_gorelo, after=open_invoice(Reference="PO-1"))
+    await call_tool(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "PO-1"})
+    assert mock_gorelo.calls("GET", TAXES) == []
+
+
+async def test_update_invoice_checks_the_status_before_it_looks_the_rate_up(server, mock_gorelo):
+    mock_gorelo.on("GET", PATCH_PATH, envelope(open_invoice(status=(3, "Paid"))))
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "update_lines": [{"line_id": L1, "no_tax": True}]})
+    assert "has status Paid" in text and mock_gorelo.calls("GET", TAXES) == []  # the status refusal comes first
+
+
+def changed_by(update_lines=None, add_lines=None, remove_line_ids=None):
+    return {"invoice_id": INVOICE_ID, "update_lines": update_lines, "add_lines": add_lines, "remove_line_ids": remove_line_ids}
+
+
+def only_given(args):
+    return {key: value for key, value in args.items() if value is not None}
+
+
+def a_kept_line_changed(row):
+    row["UnitPrice"] = 0.0
+    return row
+
+
+async def test_a_kept_line_whose_price_changed_is_reported_with_the_field_expected_and_read(server, mock_gorelo):
+    # regression: line "a" is kept as {Id}, yet the read-back shows a price of 0
+    after = open_invoice(lines=[a_kept_line_changed(line_row(Id=L1, Name="One")), line_row(Id=L2, Name="Two", Quantity=9.0), line_row(Id=L3)])
+    route_update(mock_gorelo, after=after)
+    text = await call_tool_error(server, "update_invoice", only_given(changed_by(update_lines=[{"line_id": L2, "quantity": 9}])))
+    assert text.startswith("Gorelo returned an unexpected response for update_invoice")
+    assert f"line {L1}: UnitPrice expected 150.0, read 0.0" in text
+    assert "the write may have been applied" in text and "(get_invoice)" in text
+    assert len(mock_gorelo.calls("PATCH")) == 1
+
+
+@pytest.mark.parametrize(
+    "key, sent, read, fragment",
+    [
+        ("quantity", 3, {"Quantity": 2.0}, "Quantity expected 3.0, read 2.0"),
+        ("unit_price", 10.5, {"UnitPrice": 150.0}, "UnitPrice expected 10.5, read 150.0"),
+        ("unit_cost", 4, {"UnitCost": 90.0}, "UnitCost expected 4.0, read 90.0"),
+        ("discount_percent", 5, {"DiscountPercent": 10.0}, "DiscountPercent expected 5.0, read 10.0"),
+        ("tax_id", 7, {"Tax": {"Id": 2, "Name": "GST"}}, "Tax id expected 7, read 2"),
+        ("billable_status_id", 2, {"BillableStatus": {"Id": 1, "Name": "Billable"}}, "BillableStatus id expected 2, read 1"),
+        ("description", "New text", {"Description": "Old text"}, "Description is not the text it should be (text not shown)"),
+        ("coa_code", "200", {"CoaCode": "100"}, "CoaCode is not the text it should be (text not shown)"),
+    ],
+)
+async def test_every_update_lines_field_that_was_sent_must_show_its_value(server, mock_gorelo, key, sent, read, fragment):
+    after = open_invoice(lines=[line_row(Id=L1, Name="One"), line_row(Id=L2, Name="Two", **read), line_row(Id=L3)])
+    route_update(mock_gorelo, after=after)
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "update_lines": [{"line_id": L2, key: sent}]})
+    assert f"line {L2}: {fragment}" in text and "Old text" not in text and "New text" not in text  # text is never quoted
+    assert text.startswith("Gorelo returned an unexpected response for update_invoice")
+
+
+async def test_a_price_within_the_rounding_is_accepted(server, mock_gorelo):
+    ok = open_invoice(lines=[line_row(Id=L1, Name="One"), line_row(Id=L2, Name="Two", UnitPrice=10.504), line_row(Id=L3)])
+    route_update(mock_gorelo, after=ok)
+    await call_tool(server, "update_invoice", {"invoice_id": INVOICE_ID, "update_lines": [{"line_id": L2, "unit_price": 10.5}]})
+
+
+async def test_a_price_more_than_a_cent_off_is_not(server, mock_gorelo):
+    off = open_invoice(lines=[line_row(Id=L1, Name="One"), line_row(Id=L2, Name="Two", UnitPrice=10.52), line_row(Id=L3)])
+    route_update(mock_gorelo, after=off)
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "update_lines": [{"line_id": L2, "unit_price": 10.5}]})
+    assert "UnitPrice expected 10.5, read 10.52" in text
+
+
+async def test_a_cleared_description_and_coa_code_must_read_back_empty(server, mock_gorelo):
+    before = open_invoice(lines=[line_row(Id=L1, Name="One"), line_row(Id=L2, Name="Two", Description="x", CoaCode="1"), line_row(Id=L3)])
+    still = open_invoice(lines=[line_row(Id=L1, Name="One"), line_row(Id=L2, Name="Two", Description="x", CoaCode=None), line_row(Id=L3)])
+    route_update(mock_gorelo, before=before, after=still)
+    text = await call_tool_error(
+        server, "update_invoice", {"invoice_id": INVOICE_ID, "update_lines": [{"line_id": L2, "clear_fields": ["description", "coa_code"]}]}
+    )
+    assert f"line {L2}: Description is not the text it should be" in text and "CoaCode" not in text
+
+
+async def test_a_tax_that_the_call_did_not_send_must_stay_the_same_on_a_changed_line(server, mock_gorelo):
+    after = open_invoice(lines=[line_row(Id=L1, Name="One"), line_row(Id=L2, Name="Two", Quantity=5.0, Tax={"Id": 3, "Name": "Other"}), line_row(Id=L3)])
+    route_update(mock_gorelo, after=after)
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "update_lines": [{"line_id": L2, "quantity": 5}]})
+    assert f"line {L2}: Tax id expected 2, read 3" in text
+
+
+async def test_a_new_line_must_show_what_was_sent(server, mock_gorelo):
+    new = line_row(Id=uid(34), item_id=ITEM_B, Quantity=2.0, UnitPrice=99.0)
+    route_update(mock_gorelo, after=open_invoice(lines=[*lines3(), new]))
+    text = await call_tool_error(
+        server, "update_invoice",
+        {"invoice_id": INVOICE_ID, "add_lines": [{"item_id": ITEM_B, "quantity": 2, "unit_price": 5, "billable_status_id": 3}]},
+    )
+    assert "new line 1: UnitPrice expected 5.0, read 99.0" in text and "new line 1: BillableStatus id expected 3, read 1" in text
+
+
+async def test_the_line_ids_of_the_read_back_are_compared_with_the_first_read_plus_the_new_lines(server, mock_gorelo):
+    # L2 was asked to go but is still there, L3 was kept but is gone
+    route_update(mock_gorelo, after=open_invoice(lines=[line_row(Id=L1, Name="One"), line_row(Id=L2, Name="Two")]))
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "remove_line_ids": [L2]})
+    assert f"line {L2} was removed but the invoice still shows it" in text
+    assert f"line {L3} should stay but the invoice does not show it" in text
+
+
+async def test_a_line_that_was_not_added_is_reported(server, mock_gorelo):
+    route_update(mock_gorelo, after=open_invoice(lines=[*lines3(), line_row(Id=uid(34)), line_row(Id=uid(35))]))
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "add_lines": [line()]})
+    assert "the invoice shows 2 new line(s), 1 were added" in text and "LineItems shows 5 lines, 4 were sent" in text
+
+
+@pytest.mark.parametrize("status", [(5, "Approved"), (3, "Paid"), (4, "Void")])
+async def test_a_read_back_that_is_no_longer_draft_or_submitted_adds_a_note(server, mock_gorelo, status):
+    route_update(mock_gorelo, after=open_invoice(status=status, Reference="r"))
+    result = await call_tool(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "r"})
+    assert result["Status"]["Id"] == status[0]
+    assert f"shows {status[1]} after the change, not Draft or Submitted" in result["note"]
+    assert "copy already pushed to the accounting system may not show this change" in result["note"]
+
+
+@pytest.mark.parametrize("status", [(1, "Draft"), (2, "Submitted")])
+async def test_a_draft_or_submitted_read_back_has_no_note(server, mock_gorelo, status):
+    route_update(mock_gorelo, before=open_invoice(status), after=open_invoice(status, Reference="r"))
+    assert "note" not in await call_tool(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "r"})
+
+
+async def test_the_probe_scenario_through_update_problems_directly():
+    body = {"LineItems": [{"Id": "a"}, {"Id": "b", "Quantity": 9, "UnitPrice": 10.0}]}
+    after = {"LineItems": [{"Id": "a", "UnitPrice": 0.0, "Quantity": 1}, {"Id": "b", "Quantity": 1, "UnitPrice": 99.0}]}
+    before = {"LineItems": [{"Id": "a", "UnitPrice": 5.0, "Quantity": 1}, {"Id": "b", "Quantity": 1, "UnitPrice": 5.0}]}
+    problems = invoices._update_problems(after, body, before)
+    assert "line a: UnitPrice expected 5.0, read 0.0" in problems
+    assert "line b: Quantity expected 9, read 1" in problems and "line b: UnitPrice expected 10.0, read 99.0" in problems
+
+
+async def test_a_header_only_update_does_not_need_a_usable_line_id(server, mock_gorelo):
+    # regression: a line the read shows with no Id must not refuse a change of the reference
+    before = open_invoice(lines=[{"Name": "x"}])
+    route_update(mock_gorelo, before=before, after={**before, "Reference": "PO-7"})
+    result = await call_tool(server, "update_invoice", {"invoice_id": INVOICE_ID, "reference": "PO-7"})
+    assert sent_patch(mock_gorelo) == {"Reference": "PO-7"} and result["Reference"] == "PO-7"
+
+
+async def test_a_line_parameter_still_needs_the_line_ids(server, mock_gorelo):
+    route_update(mock_gorelo, before=open_invoice(lines=[{"Name": "x"}]))
+    text = await call_tool_error(server, "update_invoice", {"invoice_id": INVOICE_ID, "add_lines": [line()]})
+    assert "line 1 of the invoice has no usable Id" in text and mock_gorelo.calls("PATCH") == []
+
+
+async def test_over_100_lines_without_add_lines_does_not_name_add_lines(client_factory, mock_gorelo):
+    rows = [line_row(Id=uid(1000 + n)) for n in range(101)]
+    route_update(mock_gorelo, before=open_invoice(lines=rows))
+    with pytest.raises((ToolError, ValueError)) as info:
+        await call_directly(
+            client_factory, invoices.update_invoice, invoice_id=INVOICE_ID, update_lines=[{"line_id": uid(1000), "quantity": 2}]
+        )
+    text = str(info.value)
+    assert "add_lines" not in text
+    assert text.startswith("remove_line_ids: the invoice would still have 101 lines and Gorelo accepts at most 100")
+    assert "remove at least 1 more" in text and mock_gorelo.calls("PATCH") == []
+
+
+def test_approve_invoice_and_list_payments_say_what_to_resolve_first():
+    assert "Resolve ids first: invoice_id -> list_invoices." in flat(inspect.getdoc(invoices.approve_invoice))
+    assert "Resolve ids first: client_ids -> list_clients, invoice_ids -> list_invoices." in flat(inspect.getdoc(invoices.list_payments))

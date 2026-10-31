@@ -2,12 +2,14 @@
 
 These pin the tool surface: the exact tool names per toolset,
 the default exposure, destructive gating, MCP hints, LLM-facing metadata, and that every one of the
-125 spec operations (2026-10-22 contract) is either declared by a tool, forbidden, or deliberately
+169 spec operations (2026-10-29 contract, 6c30770dffc0) is either declared by a tool, forbidden, or deliberately
 excluded. The 2026-10-12 contract added the custom asset create, update and hardware types (declared by tools) and
 GET /v1/api-keys and DELETE /v1/api-keys/{apiKeyId} (deliberately not exposed: no tool reaches /v1/api-keys at all).
 The 2026-10-17 contract (a7954b24844b) added fourteen operations and every one has a tool: the twelve document operations
 (the documents toolset, off by default), GET /v1/deletions (list_deletions) and GET /v1/assets/custom/{customAssetId}
 (get_custom_asset, and the read-back of the two custom asset writes).
+The 2026-10-29 contract (6c30770dffc0) added 44 operations: 42 have a tool (release 1.5.0) and two are deliberately
+excluded (see EXCLUDED_OPS); NEW_OPS_OF_THE_2026_10_29_CONTRACT pins which tools declare each of the 44.
 The four operations that contract e15cb5a18ec2 added with a tool (GET /v1/alerts, POST /v1/invoices,
 GET /v1/invoices/{invoiceId} and, forbidden, POST /v1/api-keys) are pinned one by one at the end of the coverage checks.
 """
@@ -35,8 +37,16 @@ EXPECTED = {
             # 1.4.0 (contract 05200951c89e, 125 operations): the per-agent reads, the asset types and the scripts
             "list_agent_apps", "get_agent_hardware", "list_agent_patches", "list_agent_available_updates",
             "list_agent_tags", "list_asset_types", "list_scripts", "get_script",
+            # 1.5.0 (contract 6c30770dffc0, 169 operations): organization roles, group and user reads
+            "list_org_roles", "get_org_group", "get_org_user",
+            # 1.5.0: alerts, agents, policies, asset tags and asset types
+            "get_alert", "set_alert_status", "update_agent", "list_policies", "get_policy", "list_asset_tags",
+            "create_asset_type", "update_asset_type",
+            # 1.5.0: client types, custom fields, locations, domains and contact tags
+            "list_client_types", "list_client_custom_fields", "get_client_location", "create_client_location",
+            "update_client_location", "create_client_domain", "update_client_domain", "list_contact_tags",
         },
-        "gated": set(),
+        "gated": {"delete_asset_type", "delete_client_location", "delete_client_domain"},
     },
     "tickets": {
         "regular": {
@@ -45,6 +55,7 @@ EXPECTED = {
             "list_ticket_sources", "list_ticket_comments", "get_ticket_comment", "create_ticket_comment",
             "list_ticket_conversations", "create_ticket_side_conversation", "create_ticket_approval",
             "get_ticket_approval", "upload_attachment",
+            "update_ticket_approval",  # 1.5.0
         },
         "gated": {"delete_ticket_comment"},
     },
@@ -60,8 +71,14 @@ EXPECTED = {
             "list_contracts", "get_contract", "list_invoices", "get_invoice", "create_invoice",
             "export_invoice_pdf", "list_items", "get_item", "create_item", "update_item",
             "list_item_categories", "list_taxes",
+            # 1.5.0: invoice update, payments (read only) and product charges
+            "update_invoice", "list_payments", "get_payment", "list_product_charges", "get_product_charge",
+            "create_product_charge", "update_product_charge",
         },
-        "gated": {"delete_invoice", "delete_item", "create_approved_invoice"},
+        "gated": {
+            "delete_invoice", "delete_item", "create_approved_invoice",
+            "approve_invoice", "delete_product_charge", "create_contract", "update_contract",  # 1.5.0
+        },
     },
     "uptime": {
         "regular": {
@@ -78,6 +95,7 @@ EXPECTED = {
             "create_project_comment", "list_project_tasks", "get_project_task", "create_project_task",
             "update_project_task", "list_task_conversations", "create_task_side_conversation",
             "create_task_approval", "get_task_approval",
+            "list_project_templates", "update_project_comment", "update_task_comment",  # 1.5.0
         },
         "gated": {"delete_project_task", "delete_project_comment"},
     },
@@ -91,6 +109,9 @@ EXPECTED = {
             "list_document_related_items", "create_document", "update_document", "move_document", "archive_document",
             "restore_document", "unshare_document", "duplicate_document", "restore_document_version",
             "add_document_related_items",
+            # 1.5.0: structured documents and their submissions (read only)
+            "list_structured_documents", "get_structured_document", "list_structured_document_submissions",
+            "get_structured_document_submission",
         },
         "gated": {"share_document", "remove_document_related_item"},
     },
@@ -115,6 +136,11 @@ EXCLUDED_OPS = {
     # shows who holds keys, the DELETE revokes one, and POST /v1/api-keys, which mints one, is forbidden).
     "GET /v1/api-keys",
     "DELETE /v1/api-keys/{apiKeyId}",
+    # Added by the 2026-10-29 spec (169 operations), left out on purpose:
+    # the asset tag list is complete and unpaged, so the single-tag GET adds nothing the list does not show
+    "GET /v1/assets/tags/{tagId}",
+    # set_alert_status uses the bulk PATCH /v1/alerts, which covers one alert (it reports UpdatedIds), so the per-alert PATCH is a duplicate
+    "PATCH /v1/alerts/{alertId}",
 }
 
 # The operations the 2026-10-12 contract added with a tool, and which tools declare each. Since the 2026-10-17
@@ -135,7 +161,10 @@ CUSTOM_ASSET_OPS_AND_THEIR_TOOLS = {
 NEW_OPS_AND_THEIR_TOOLS = {
     "GET /v1/alerts": {"list_alerts"},
     "POST /v1/invoices": {"create_invoice", "create_approved_invoice"},
-    "GET /v1/invoices/{invoiceId}": {"get_invoice", "create_invoice", "create_approved_invoice"},
+    # 1.5.0: update_invoice and the gated approve_invoice read the invoice first (and update_invoice reads it back)
+    "GET /v1/invoices/{invoiceId}": {
+        "get_invoice", "create_invoice", "create_approved_invoice", "update_invoice", "approve_invoice",
+    },
     "POST /v1/api-keys": set(),
 }
 
@@ -161,6 +190,59 @@ DOCUMENT_OPS_AND_THEIR_TOOLS = {
 # The thirteenth operation of that contract with a tool of its own (the fourteenth, the single custom asset GET, is pinned above).
 DELETION_OPS_AND_THEIR_TOOLS = {"GET /v1/deletions": {"list_deletions"}}
 
+# The 44 operations the 2026-10-29 contract (6c30770dffc0, release 1.5.0) added, and which tools declare each. An empty set
+# is a deliberate exclusion (both are in EXCLUDED_OPS). A GET that is also the read-back of a write is declared by that write too.
+# Payments are read only: GET /v1/payments and its single GET have tools, POST and DELETE /v1/payments stay excluded (2026-10-08).
+NEW_OPS_OF_THE_2026_10_29_CONTRACT = {
+    "PATCH /v1/alerts": {"set_alert_status"},
+    "GET /v1/alerts/{alertId}": {"get_alert"},
+    "PATCH /v1/alerts/{alertId}": set(),  # deliberately excluded (EXCLUDED_OPS)
+    "PATCH /v1/assets/agents/{agentAssetId}": {"update_agent"},
+    "GET /v1/assets/policies": {"list_policies"},
+    "GET /v1/assets/policies/{policyId}": {"get_policy"},
+    "GET /v1/assets/tags": {"list_asset_tags"},
+    "GET /v1/assets/tags/{tagId}": set(),  # deliberately excluded (EXCLUDED_OPS)
+    "POST /v1/assets/types": {"create_asset_type"},
+    "PATCH /v1/assets/types/{assetTypeId}": {"update_asset_type"},
+    "DELETE /v1/assets/types/{assetTypeId}": {"delete_asset_type"},
+    "GET /v1/clients/custom-fields": {"list_client_custom_fields"},
+    "GET /v1/clients/types": {"list_client_types"},
+    "POST /v1/clients/{clientId}/domains": {"create_client_domain"},
+    "PATCH /v1/clients/{clientId}/domains/{domainId}": {"update_client_domain"},
+    "DELETE /v1/clients/{clientId}/domains/{domainId}": {"delete_client_domain"},
+    "POST /v1/clients/{clientId}/locations": {"create_client_location"},
+    "GET /v1/clients/{clientId}/locations/{locationId}": {
+        "create_client_location", "get_client_location", "update_client_location",
+    },
+    "PATCH /v1/clients/{clientId}/locations/{locationId}": {"update_client_location"},
+    "DELETE /v1/clients/{clientId}/locations/{locationId}": {"delete_client_location"},
+    "GET /v1/contacts/tags": {"list_contact_tags"},
+    "POST /v1/contracts": {"create_contract"},
+    "PATCH /v1/contracts/{contractId}": {"update_contract"},
+    "GET /v1/documents/structured": {"list_structured_documents"},
+    "GET /v1/documents/structured/{structuredDocumentId}": {"get_structured_document"},
+    "GET /v1/documents/structured/{structuredDocumentId}/submissions": {"list_structured_document_submissions"},
+    "GET /v1/documents/structured/{structuredDocumentId}/submissions/{submissionId}": {"get_structured_document_submission"},
+    "PATCH /v1/invoices/{invoiceId}": {"approve_invoice", "update_invoice"},
+    "GET /v1/organization/groups/{groupId}": {"get_org_group"},
+    "GET /v1/organization/roles": {"list_org_roles"},
+    "GET /v1/organization/users/{userId}": {"get_org_user"},
+    "GET /v1/payments": {"list_payments"},
+    "GET /v1/payments/{paymentId}": {"get_payment"},
+    "GET /v1/product-charges": {"list_product_charges"},
+    "POST /v1/product-charges": {"create_product_charge"},
+    "GET /v1/product-charges/{productChargeId}": {"create_product_charge", "get_product_charge"},
+    "PATCH /v1/product-charges/{productChargeId}": {"update_product_charge"},
+    "DELETE /v1/product-charges/{productChargeId}": {"delete_product_charge"},
+    "GET /v1/projects/templates": {"list_project_templates"},
+    "PATCH /v1/projects/{projectId}/comments/{commentId}": {"update_project_comment"},
+    "PATCH /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}": {"update_task_comment"},
+    "GET /v1/tickets/priorities": {"list_ticket_priorities"},
+    "GET /v1/tickets/sources": {"list_ticket_sources"},
+    "PATCH /v1/tickets/{ticketId}/approvals/{approvalId}": {"update_ticket_approval"},
+}
+
+
 DASHES = (chr(0x2014), chr(0x2013))
 
 
@@ -175,9 +257,9 @@ def test_registry_matches_the_configured_surface_exactly():
         got_gated = {n for n, s in specs.items() if s.toolset == toolset and s.kind == "destructive"}
         assert got_regular == groups["regular"], (toolset, got_regular ^ groups["regular"])
         assert got_gated == groups["gated"], (toolset, got_gated ^ groups["gated"])
-    assert len(specs) == 119  # 92 tools in 1.2.0; 1.3.0 added get_custom_asset, list_deletions and the 17 document tools; 1.4.0 eight reads
+    assert len(specs) == 160  # 92 tools in 1.2.0; 1.3.0 added get_custom_asset, list_deletions and the 17 document tools; 1.4.0 eight reads; 1.5.0 41 tools
     regular = {n for n, s in specs.items() if s.kind != "destructive"}
-    assert (len(regular), len(specs) - len(regular)) == (109, 10)  # (101 until 1.4.0) the two 1.3.0 gated tools are share_document and remove_document_related_item
+    assert (len(regular), len(specs) - len(regular)) == (143, 17)  # (109, 10) until 1.5.0, which added 34 regular and 7 gated tools
 
 
 def test_all_24_legacy_tool_names_still_exist():
@@ -194,8 +276,10 @@ def test_every_spec_operation_is_covered_or_deliberately_excluded(spec_index):
     assert not declared & EXCLUDED_OPS
     uncovered = set(spec_index.ops) - declared - forbidden - EXCLUDED_OPS
     assert uncovered == set(), sorted(uncovered)
-    assert len(spec_index.ops) == 125
-    assert not any("/v1/payments" in op for op in declared)  # payments are recorded money: no tool reaches them
+    assert len(spec_index.ops) == 169
+    # payments are recorded money: since 1.5.0 two tools READ them (list_payments, get_payment), but no tool declares a write
+    # (POST /v1/payments, DELETE /v1/payments/{paymentId} stay excluded)
+    assert not any("/v1/payments" in op and not op.startswith("GET ") for op in declared)
 
 
 def test_each_operation_the_2026_10_02_spec_added_is_declared_by_exactly_the_tools_meant_to_use_it(spec_index):
@@ -230,13 +314,45 @@ def test_each_operation_the_2026_10_12_spec_added_is_declared_by_exactly_the_too
     assert kinds["list_custom_asset_hardware_types"][0] == "read"
 
 
+def test_each_operation_the_2026_10_29_spec_added_is_declared_by_exactly_the_tools_meant_to_use_it(spec_index):
+    assert len(NEW_OPS_OF_THE_2026_10_29_CONTRACT) == 44
+    for op, expected in NEW_OPS_OF_THE_2026_10_29_CONTRACT.items():
+        assert op in spec_index.ops, op
+        users = {s.name for s in REGISTRY.specs if op in s.ops}
+        assert users == expected, (op, users)
+    # an operation without a tool is exactly one of the deliberate exclusions, and every exclusion of this contract is listed here
+    uncovered = {op for op, tools_ in NEW_OPS_OF_THE_2026_10_29_CONTRACT.items() if not tools_}
+    assert uncovered == {"GET /v1/assets/tags/{tagId}", "PATCH /v1/alerts/{alertId}"} and uncovered <= EXCLUDED_OPS
+    assert not any(is_forbidden_op(op) for op in NEW_OPS_OF_THE_2026_10_29_CONTRACT)
+    specs = _specs_by_name()
+    for op, names in NEW_OPS_OF_THE_2026_10_29_CONTRACT.items():
+        method = op.split(" ", 1)[0]
+        for name in names:
+            # a GET is declared by reads and by the writes that read their record back, never by a tool of the wrong kind
+            if method == "GET" and specs[name].kind == "read":
+                continue
+            assert specs[name].kind != "read", (op, name)
+    # the gated tools of the contract: the three deletes of asset types, locations and domains and of product charges, the invoice
+    # approval and the two contract writes (a contract bills the client from its start date on)
+    gated = {name for names in NEW_OPS_OF_THE_2026_10_29_CONTRACT.values() for name in names if specs[name].kind == "destructive"}
+    assert gated == {
+        "delete_asset_type", "delete_client_location", "delete_client_domain", "delete_product_charge",
+        "approve_invoice", "create_contract", "update_contract",
+    }
+    # no DELETE of a client, contact, ticket, agent, custom asset or contract exists among them, and no tool reaches a payment write
+    assert not [op for op in NEW_OPS_OF_THE_2026_10_29_CONTRACT if op.startswith("DELETE /v1/contracts")]
+    assert {op for op, names in NEW_OPS_OF_THE_2026_10_29_CONTRACT.items() if "/v1/payments" in op and names} == {
+        "GET /v1/payments", "GET /v1/payments/{paymentId}",
+    }
+
+
 @pytest.mark.anyio
-async def test_default_toolsets_expose_71_tools_and_no_gated_ones(server_factory):
+async def test_default_toolsets_expose_98_tools_and_no_gated_ones(server_factory):
     server = server_factory(toolsets=frozenset(DEFAULT_TOOLSETS), destructive=False)
     names = {t.name for t in await list_tools(server)}
     expected = set().union(*(EXPECTED[ts]["regular"] for ts in DEFAULT_TOOLSETS))
     assert names == expected
-    assert len(names) == 71  # 63 until 1.4.0 added eight core reads; 58 until the 2026-10-12 contract added the three custom asset tools, 61 until the 2026-10-17 one added get_custom_asset and list_deletions
+    assert len(names) == 98  # 71 until 1.5.0 added 27 default-toolset tools; 63 until 1.4.0 added eight core reads; 58 until the 2026-10-12 contract added the three custom asset tools, 61 until the 2026-10-17 one added get_custom_asset and list_deletions
     assert {"list_alerts", "get_invoice", "create_invoice", "get_custom_asset", "list_deletions"} <= names
     assert "create_approved_invoice" not in names  # it needs GORELO_ENABLE_DESTRUCTIVE as well
     assert not any("document" in name for name in names)  # the documents toolset is off by default
@@ -254,7 +370,10 @@ def test_each_operation_the_2026_10_17_spec_added_is_declared_by_exactly_the_too
         assert op in spec_index.ops, op
         assert {s.name for s in REGISTRY.specs if op in s.ops} == expected, op
     # the table holds every operation under /v1/documents, so the toolset covers the whole surface and no document can be deleted
-    assert {op for op in spec_index.ops if "/v1/documents" in op} == set(DOCUMENT_OPS_AND_THEIR_TOOLS)
+    # (the structured documents of the 2026-10-29 contract, /v1/documents/structured, are read only and pinned in NEW_OPS_OF_THE_2026_10_29_CONTRACT)
+    assert {op for op in spec_index.ops if "/v1/documents" in op and "/v1/documents/structured" not in op} == set(
+        DOCUMENT_OPS_AND_THEIR_TOOLS
+    )
     specs = _specs_by_name()
     assert {specs[name].toolset for names in DOCUMENT_OPS_AND_THEIR_TOOLS.values() for name in names} == {"documents"}
     delete_op = "DELETE /v1/documents/{documentId}/related-items/{relatedItemId}"
@@ -319,13 +438,16 @@ async def test_destructive_tools_require_confirm_defaulting_to_false(server_fact
 async def test_default_tools_list_stays_within_budget(server_factory):
     tools_list = await list_tools(server_factory(toolsets=frozenset(DEFAULT_TOOLSETS), destructive=False))
     size = len(json.dumps([t.model_dump(mode="json", exclude_none=True) for t in tools_list]))
-    # The budget sits about 1 percent above the size measured for 1.4.0 (see the constant below). It
+    # The budget sits about 1 percent above the size measured for 1.5.0 (see the constant below). It
     # was raised once for the three default tools contract e15cb5a18ec2 added, once more for the custom properties of
     # contract 1b1c0cec0e9a and twice for release 1.3.0; growth beyond it needs a deliberate bump, because every byte here is
     # context claude.ai loads in every conversation that uses the connector.
     assert size < TOOLS_LIST_BUDGET_BYTES, size
 
 
+# For 1.5.0 the default tools/list measured 145_706 bytes (it held 71 tools; release 1.5.0 added 27 to the default toolsets: the
+# organization, alert, agent, policy, asset type, client, location, domain, contact tag, billing, payment, product charge and
+# ticket tools, and the new parameters and texts of the changed ones). The budget is that plus about 1 percent, rounded up to the next 100.
 # For 1.4.2 the default tools/list measured 104_764 bytes (the budget below is unchanged): the update_contact texts about the
 # secondary emails and the region code note grew by 64 bytes.
 # For 1.4.0 the default tools/list measured 104_409 bytes: the eight new core tools (6_301 bytes) and the new 1.4.0 parameters of
@@ -342,7 +464,7 @@ async def test_default_tools_list_stays_within_budget(server_factory):
 # same contract's sentence on the two device tools, 108 bytes for the update_client sentence that has the model compare
 # the returned Values with what it sent, and 103 bytes for the one that says update_client reads the client first. At 1.2.0
 # the budget left 891 bytes (about 1 percent) above that.
-TOOLS_LIST_BUDGET_BYTES = 105500
+TOOLS_LIST_BUDGET_BYTES = 147200
 MAX_TOOL_DESCRIPTION_CHARS = 900
 MAX_PARAM_DESCRIPTION_CHARS = 220
 

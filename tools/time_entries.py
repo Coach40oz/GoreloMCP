@@ -121,7 +121,9 @@ LIST_QUERY = {
 }
 LIST_FIELDS = {**LIST_QUERY, "page_size": "PageSize", "cursor": "Cursor"}
 
-# snake_case tool parameter -> CreateTimeEntryCommand field. Every spec field is here and nothing else.
+# snake_case tool parameter -> CreateTimeEntryCommand field. Every spec field is here and nothing else, except
+# CreatedOn (new in contract 6c30770dffc0), which 1.5.0 leaves out: an entry sent with it is a
+# backdated historical import, never invoiced, and cannot be changed or deleted through the API afterwards.
 CREATE_FIELDS = {
     "ticket_id": "TicketId",
     "task_id": "TaskId",

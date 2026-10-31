@@ -1,6 +1,6 @@
 {
- "contract_sha256": "05200951c89e15f3b04b987f83d39a577717813df39a64098d0c99de466b9157",
- "op_count": 125,
+ "contract_sha256": "6c30770dffc0fae758dc5e1de1752eec31e5b3b1c4cf32c4721d62e1e8a051ae",
+ "op_count": 169,
  "openapi": "3.0.4",
  "ops": {
   "DELETE /v1/api-keys/{apiKeyId}": {
@@ -81,6 +81,33 @@
     "500"
    ]
   },
+  "DELETE /v1/assets/types/{assetTypeId}": {
+   "body": null,
+   "method": "DELETE",
+   "operation_id": "delete_v1_assets_types_assetTypeId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/types/{assetTypeId}",
+   "path_params": {
+    "assetTypeId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "AssetTypeResult",
+    "kind": "envelope",
+    "schema": "AssetTypeResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "409",
+    "500"
+   ]
+  },
   "DELETE /v1/clients/{clientId}": {
    "body": null,
    "method": "DELETE",
@@ -99,6 +126,67 @@
     "data": "DeleteClientResult",
     "kind": "envelope",
     "schema": "DeleteClientResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "409",
+    "500"
+   ]
+  },
+  "DELETE /v1/clients/{clientId}/domains/{domainId}": {
+   "body": null,
+   "method": "DELETE",
+   "operation_id": "delete_v1_clients_clientId_domains_domainId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/clients/{clientId}/domains/{domainId}",
+   "path_params": {
+    "clientId": {
+     "format": "int64",
+     "type": "integer"
+    },
+    "domainId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "DeleteClientWebDomainResult",
+    "kind": "envelope",
+    "schema": "DeleteClientWebDomainResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "DELETE /v1/clients/{clientId}/locations/{locationId}": {
+   "body": null,
+   "method": "DELETE",
+   "operation_id": "delete_v1_clients_clientId_locations_locationId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/clients/{clientId}/locations/{locationId}",
+   "path_params": {
+    "clientId": {
+     "format": "int64",
+     "type": "integer"
+    },
+    "locationId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "DeleteClientLocationResult",
+    "kind": "envelope",
+    "schema": "DeleteClientLocationResultBaseResponse"
    },
    "status_codes": [
     "200",
@@ -264,6 +352,33 @@
     "data": "DeletePaymentResult",
     "kind": "envelope",
     "schema": "DeletePaymentResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "409",
+    "500"
+   ]
+  },
+  "DELETE /v1/product-charges/{productChargeId}": {
+   "body": null,
+   "method": "DELETE",
+   "operation_id": "delete_v1_product-charges_productChargeId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/product-charges/{productChargeId}",
+   "path_params": {
+    "productChargeId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "DeleteProductChargeResult",
+    "kind": "envelope",
+    "schema": "DeleteProductChargeResultBaseResponse"
    },
    "status_codes": [
     "200",
@@ -613,6 +728,32 @@
     "200",
     "400",
     "401",
+    "500"
+   ]
+  },
+  "GET /v1/alerts/{alertId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_alerts_alertId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/alerts/{alertId}",
+   "path_params": {
+    "alertId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "AlertListItemModel",
+    "kind": "envelope",
+    "schema": "AlertListItemModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
     "500"
    ]
   },
@@ -977,6 +1118,114 @@
     "500"
    ]
   },
+  "GET /v1/assets/policies": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_assets_policies",
+   "page_size_rule": "reject",
+   "paged": true,
+   "path": "/v1/assets/policies",
+   "path_params": {},
+   "query_params": {
+    "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "Os": {
+     "required": false,
+     "type": "string"
+    },
+    "PageSize": {
+     "default": 50,
+     "format": "int32",
+     "required": false,
+     "type": "integer"
+    }
+   },
+   "response": {
+    "data": "[PolicyModel]",
+    "kind": "envelope",
+    "schema": "PolicyModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/assets/policies/{policyId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_assets_policies_policyId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/policies/{policyId}",
+   "path_params": {
+    "policyId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "PolicyModel",
+    "kind": "envelope",
+    "schema": "PolicyModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/assets/tags": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_assets_tags",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/tags",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "[AssetTagModel]",
+    "kind": "envelope",
+    "schema": "AssetTagModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/assets/tags/{tagId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_assets_tags_tagId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/tags/{tagId}",
+   "path_params": {
+    "tagId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "AssetTagModel",
+    "kind": "envelope",
+    "schema": "AssetTagModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
   "GET /v1/assets/types": {
    "body": null,
    "method": "GET",
@@ -1081,6 +1330,46 @@
     "500"
    ]
   },
+  "GET /v1/clients/custom-fields": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_clients_custom-fields",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/clients/custom-fields",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "[ClientCustomFieldModel]",
+    "kind": "envelope",
+    "schema": "ClientCustomFieldModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/clients/types": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_clients_types",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/clients/types",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "[ClientTypeListItemModel]",
+    "kind": "envelope",
+    "schema": "ClientTypeListItemModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "500"
+   ]
+  },
   "GET /v1/clients/{clientId}": {
    "body": null,
    "method": "GET",
@@ -1135,6 +1424,37 @@
     "500"
    ]
   },
+  "GET /v1/clients/{clientId}/locations/{locationId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_clients_clientId_locations_locationId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/clients/{clientId}/locations/{locationId}",
+   "path_params": {
+    "clientId": {
+     "format": "int64",
+     "type": "integer"
+    },
+    "locationId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "ClientLocationResponse",
+    "kind": "envelope",
+    "schema": "ClientLocationResponseBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "500"
+   ]
+  },
   "GET /v1/contacts": {
    "body": null,
    "method": "GET",
@@ -1164,6 +1484,10 @@
      "type": "string"
     },
     "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "LocationIds": {
      "required": false,
      "type": "string"
     },
@@ -1200,6 +1524,26 @@
    "status_codes": [
     "200",
     "400",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/contacts/tags": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_contacts_tags",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/contacts/tags",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "[ContactTagListItemModel]",
+    "kind": "envelope",
+    "schema": "ContactTagListItemModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
     "401",
     "500"
    ]
@@ -1244,7 +1588,27 @@
      "required": false,
      "type": "string"
     },
+    "CreatedBefore": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
+    "CreatedSince": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
     "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "EndDateBefore": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
+    "EndDateSince": {
+     "format": "date-time",
      "required": false,
      "type": "string"
     },
@@ -1254,7 +1618,31 @@
      "required": false,
      "type": "integer"
     },
+    "Query": {
+     "required": false,
+     "type": "string"
+    },
+    "SortBy": {
+     "default": "createdOn",
+     "required": false,
+     "type": "string"
+    },
+    "SortOrder": {
+     "default": "desc",
+     "required": false,
+     "type": "string"
+    },
     "StatusIds": {
+     "required": false,
+     "type": "string"
+    },
+    "UpdatedBefore": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
+    "UpdatedSince": {
+     "format": "date-time",
      "required": false,
      "type": "string"
     }
@@ -1431,6 +1819,160 @@
     "200",
     "400",
     "401",
+    "500"
+   ]
+  },
+  "GET /v1/documents/structured": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_documents_structured",
+   "page_size_rule": "reject",
+   "paged": true,
+   "path": "/v1/documents/structured",
+   "path_params": {},
+   "query_params": {
+    "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "PageSize": {
+     "default": 50,
+     "format": "int32",
+     "required": false,
+     "type": "integer"
+    },
+    "Query": {
+     "required": false,
+     "type": "string"
+    },
+    "SortBy": {
+     "default": "createdOn",
+     "required": false,
+     "type": "string"
+    },
+    "SortOrder": {
+     "default": "desc",
+     "required": false,
+     "type": "string"
+    }
+   },
+   "response": {
+    "data": "[StructuredDocumentListItemModel]",
+    "kind": "envelope",
+    "schema": "StructuredDocumentListItemModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/documents/structured/{structuredDocumentId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_documents_structured_structuredDocumentId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/documents/structured/{structuredDocumentId}",
+   "path_params": {
+    "structuredDocumentId": {
+     "pattern": "^[A-Za-z0-9_-]{1,64}$",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "StructuredDocumentDetailModel",
+    "kind": "envelope",
+    "schema": "StructuredDocumentDetailModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/documents/structured/{structuredDocumentId}/submissions": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_documents_structured_structuredDocumentId_submissions",
+   "page_size_rule": "reject",
+   "paged": true,
+   "path": "/v1/documents/structured/{structuredDocumentId}/submissions",
+   "path_params": {
+    "structuredDocumentId": {
+     "pattern": "^[A-Za-z0-9_-]{1,64}$",
+     "type": "string"
+    }
+   },
+   "query_params": {
+    "ClientIds": {
+     "required": false,
+     "type": "string"
+    },
+    "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "PageSize": {
+     "default": 50,
+     "format": "int32",
+     "required": false,
+     "type": "integer"
+    },
+    "SortBy": {
+     "default": "createdOn",
+     "required": false,
+     "type": "string"
+    },
+    "SortOrder": {
+     "default": "desc",
+     "required": false,
+     "type": "string"
+    }
+   },
+   "response": {
+    "data": "[StructuredDocumentSubmissionListItemModel]",
+    "kind": "envelope",
+    "schema": "StructuredDocumentSubmissionListItemModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/documents/structured/{structuredDocumentId}/submissions/{submissionId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_documents_structured_structuredDocumentId_submissions_submissionId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/documents/structured/{structuredDocumentId}/submissions/{submissionId}",
+   "path_params": {
+    "structuredDocumentId": {
+     "pattern": "^[A-Za-z0-9_-]{1,64}$",
+     "type": "string"
+    },
+    "submissionId": {
+     "pattern": "^[A-Za-z0-9_-]{1,64}$",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "StructuredDocumentSubmissionDetailModel",
+    "kind": "envelope",
+    "schema": "StructuredDocumentSubmissionDetailModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
     "500"
    ]
   },
@@ -1887,6 +2429,16 @@
      "required": false,
      "type": "string"
     },
+    "SortBy": {
+     "default": "createdOn",
+     "required": false,
+     "type": "string"
+    },
+    "SortOrder": {
+     "default": "desc",
+     "required": false,
+     "type": "string"
+    },
     "StatusIds": {
      "required": false,
      "type": "string"
@@ -1992,6 +2544,52 @@
     "500"
    ]
   },
+  "GET /v1/organization/groups/{groupId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_organization_groups_groupId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/organization/groups/{groupId}",
+   "path_params": {
+    "groupId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "GetGroupsResponseModel",
+    "kind": "envelope",
+    "schema": "GetGroupsResponseModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/organization/roles": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_organization_roles",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/organization/roles",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "[RoleModel]",
+    "kind": "envelope",
+    "schema": "RoleModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "500"
+   ]
+  },
   "GET /v1/organization/users": {
    "body": null,
    "method": "GET",
@@ -2005,13 +2603,26 @@
      "required": false,
      "type": "string"
     },
+    "GroupIds": {
+     "required": false,
+     "type": "string"
+    },
     "PageSize": {
      "default": 50,
      "format": "int32",
      "required": false,
      "type": "integer"
     },
+    "Query": {
+     "required": false,
+     "type": "string"
+    },
     "StatusIds": {
+     "required": false,
+     "type": "string"
+    },
+    "UpdatedSince": {
+     "format": "date-time",
      "required": false,
      "type": "string"
     }
@@ -2025,6 +2636,201 @@
     "200",
     "400",
     "401",
+    "500"
+   ]
+  },
+  "GET /v1/organization/users/{userId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_organization_users_userId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/organization/users/{userId}",
+   "path_params": {
+    "userId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "UserDetailModel",
+    "kind": "envelope",
+    "schema": "UserDetailModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/payments": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_payments",
+   "page_size_rule": "reject",
+   "paged": true,
+   "path": "/v1/payments",
+   "path_params": {},
+   "query_params": {
+    "ClientIds": {
+     "required": false,
+     "type": "string"
+    },
+    "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "InvoiceIds": {
+     "required": false,
+     "type": "string"
+    },
+    "PageSize": {
+     "default": 50,
+     "format": "int32",
+     "required": false,
+     "type": "integer"
+    },
+    "PaymentDateBefore": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
+    "PaymentDateSince": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
+    "SortOrder": {
+     "default": "desc",
+     "required": false,
+     "type": "string"
+    }
+   },
+   "response": {
+    "data": "[PaymentModel]",
+    "kind": "envelope",
+    "schema": "PaymentModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/payments/{paymentId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_payments_paymentId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/payments/{paymentId}",
+   "path_params": {
+    "paymentId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "PaymentModel",
+    "kind": "envelope",
+    "schema": "PaymentModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "GET /v1/product-charges": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_product-charges",
+   "page_size_rule": "reject",
+   "paged": true,
+   "path": "/v1/product-charges",
+   "path_params": {},
+   "query_params": {
+    "ClientIds": {
+     "required": false,
+     "type": "string"
+    },
+    "CreatedBefore": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
+    "CreatedSince": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
+    "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "InvoiceIds": {
+     "required": false,
+     "type": "string"
+    },
+    "PageSize": {
+     "default": 50,
+     "format": "int32",
+     "required": false,
+     "type": "integer"
+    },
+    "ProjectIds": {
+     "required": false,
+     "type": "string"
+    },
+    "TaskIds": {
+     "required": false,
+     "type": "string"
+    },
+    "TicketIds": {
+     "required": false,
+     "type": "string"
+    }
+   },
+   "response": {
+    "data": "[ProductChargeModel]",
+    "kind": "envelope",
+    "schema": "ProductChargeModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/product-charges/{productChargeId}": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_product-charges_productChargeId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/product-charges/{productChargeId}",
+   "path_params": {
+    "productChargeId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "ProductChargeModel",
+    "kind": "envelope",
+    "schema": "ProductChargeModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "404",
     "500"
    ]
   },
@@ -2144,6 +2950,38 @@
    },
    "status_codes": [
     "200",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/projects/templates": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_projects_templates",
+   "page_size_rule": "reject",
+   "paged": true,
+   "path": "/v1/projects/templates",
+   "path_params": {},
+   "query_params": {
+    "Cursor": {
+     "required": false,
+     "type": "string"
+    },
+    "PageSize": {
+     "default": 50,
+     "format": "int32",
+     "required": false,
+     "type": "integer"
+    }
+   },
+   "response": {
+    "data": "[ProjectTemplateListItemModel]",
+    "kind": "envelope",
+    "schema": "ProjectTemplateListItemModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
     "401",
     "500"
    ]
@@ -2685,6 +3523,16 @@
      "required": false,
      "type": "string"
     },
+    "ClosedBefore": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
+    "ClosedSince": {
+     "format": "date-time",
+     "required": false,
+     "type": "string"
+    },
     "ContactIds": {
      "required": false,
      "type": "string"
@@ -2739,6 +3587,10 @@
      "required": false,
      "type": "string"
     },
+    "SourceIds": {
+     "required": false,
+     "type": "string"
+    },
     "StatusIds": {
      "required": false,
      "type": "string"
@@ -2770,6 +3622,46 @@
    "status_codes": [
     "200",
     "400",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/tickets/priorities": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_tickets_priorities",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/tickets/priorities",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "[CodeModel]",
+    "kind": "envelope",
+    "schema": "CodeModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/tickets/sources": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_tickets_sources",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/tickets/sources",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "[CodeModel]",
+    "kind": "envelope",
+    "schema": "CodeModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
     "401",
     "500"
    ]
@@ -3211,6 +4103,153 @@
     "500"
    ]
   },
+  "PATCH /v1/alerts": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "AlertIds": {
+      "items": {
+       "format": "uuid",
+       "type": "string"
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "StatusId": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     },
+     "TicketId": {
+      "format": "uuid",
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "UpdateAlertStatusesCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_alerts",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/alerts",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "UpdateAlertStatusesResult",
+    "kind": "envelope",
+    "schema": "UpdateAlertStatusesResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "409",
+    "500"
+   ]
+  },
+  "PATCH /v1/alerts/{alertId}": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "StatusId": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     },
+     "TicketId": {
+      "format": "uuid",
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "UpdateAlertCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_alerts_alertId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/alerts/{alertId}",
+   "path_params": {
+    "alertId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "UpdateAlertResult",
+    "kind": "envelope",
+    "schema": "UpdateAlertResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "409",
+    "500"
+   ]
+  },
+  "PATCH /v1/assets/agents/{agentAssetId}": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "ContactId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "Description": {
+      "nullable": true,
+      "type": "string"
+     },
+     "HardwareTypeId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "WarrantyEndDate": {
+      "format": "date",
+      "nullable": true,
+      "type": "string"
+     },
+     "WarrantyStartDate": {
+      "format": "date",
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "UpdateAgentCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_assets_agents_agentAssetId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/agents/{agentAssetId}",
+   "path_params": {
+    "agentAssetId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "UpdateAgentResult",
+    "kind": "envelope",
+    "schema": "UpdateAgentResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "500"
+   ]
+  },
   "PATCH /v1/assets/custom/{customAssetId}": {
    "body": {
     "content_type": "application/json-patch+json",
@@ -3303,6 +4342,44 @@
     "500"
    ]
   },
+  "PATCH /v1/assets/types/{assetTypeId}": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "Name": {
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "UpdateAssetTypeCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_assets_types_assetTypeId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/types/{assetTypeId}",
+   "path_params": {
+    "assetTypeId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "AssetTypeResult",
+    "kind": "envelope",
+    "schema": "AssetTypeResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "409",
+    "500"
+   ]
+  },
   "PATCH /v1/clients/{clientId}": {
    "body": {
     "content_type": "application/json-patch+json",
@@ -3314,6 +4391,11 @@
      "BillingName": {
       "nullable": true,
       "type": "string"
+     },
+     "ClientTypeId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
      },
      "CustomProperties": {
       "items": {
@@ -3366,6 +4448,155 @@
     "400",
     "401",
     "404",
+    "500"
+   ]
+  },
+  "PATCH /v1/clients/{clientId}/domains/{domainId}": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "ExpirationDate": {
+      "format": "date",
+      "nullable": true,
+      "type": "string"
+     },
+     "Name": {
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "UpdateClientWebDomainCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_clients_clientId_domains_domainId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/clients/{clientId}/domains/{domainId}",
+   "path_params": {
+    "clientId": {
+     "format": "int64",
+     "type": "integer"
+    },
+    "domainId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "ClientWebDomainResponse",
+    "kind": "envelope",
+    "schema": "ClientWebDomainResponseBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "PATCH /v1/clients/{clientId}/locations/{locationId}": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "Address1": {
+      "nullable": true,
+      "type": "string"
+     },
+     "Address2": {
+      "nullable": true,
+      "type": "string"
+     },
+     "BillingContactIds": {
+      "items": {
+       "format": "int64",
+       "type": "integer"
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "City": {
+      "nullable": true,
+      "type": "string"
+     },
+     "Country": {
+      "nullable": true,
+      "type": "string"
+     },
+     "IsDefault": {
+      "nullable": true,
+      "type": "boolean"
+     },
+     "IsDefaultBilling": {
+      "nullable": true,
+      "type": "boolean"
+     },
+     "Name": {
+      "nullable": true,
+      "type": "string"
+     },
+     "Phone": {
+      "nullable": true,
+      "type": "string"
+     },
+     "PhoneCountryCode": {
+      "nullable": true,
+      "type": "string"
+     },
+     "PhoneExt": {
+      "nullable": true,
+      "type": "string"
+     },
+     "PostalCode": {
+      "nullable": true,
+      "type": "string"
+     },
+     "PrimaryContactId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "State": {
+      "nullable": true,
+      "type": "string"
+     },
+     "TimeZone": {
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "UpdateClientLocationCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_clients_clientId_locations_locationId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/clients/{clientId}/locations/{locationId}",
+   "path_params": {
+    "clientId": {
+     "format": "int64",
+     "type": "integer"
+    },
+    "locationId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "ClientLocationResponse",
+    "kind": "envelope",
+    "schema": "ClientLocationResponseBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "409",
     "500"
    ]
   },
@@ -3433,6 +4664,14 @@
       "nullable": true,
       "type": "array"
      },
+     "TagIds": {
+      "items": {
+       "format": "int64",
+       "type": "integer"
+      },
+      "nullable": true,
+      "type": "array"
+     },
      "TimeZone": {
       "nullable": false,
       "type": "string"
@@ -3468,6 +4707,139 @@
     "400",
     "401",
     "404",
+    "500"
+   ]
+  },
+  "PATCH /v1/contracts/{contractId}": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "AutoApproveAndSend": {
+      "nullable": true,
+      "type": "boolean"
+     },
+     "AutoInvoiceTicketProducts": {
+      "nullable": true,
+      "type": "boolean"
+     },
+     "BrandingThemeId": {
+      "format": "uuid",
+      "nullable": true,
+      "type": "string"
+     },
+     "ClientId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "ContactIds": {
+      "items": {
+       "format": "int64",
+       "type": "integer"
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "DaysBeforeInvoiceCreation": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     },
+     "DaysUntilDue": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     },
+     "EndDate": {
+      "format": "date-time",
+      "nullable": true,
+      "type": "string"
+     },
+     "InvoiceEmailTemplateId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "InvoiceTemplateId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "IsForAllLocations": {
+      "nullable": true,
+      "type": "boolean"
+     },
+     "LocationIds": {
+      "items": {
+       "format": "int64",
+       "type": "integer"
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "Name": {
+      "nullable": true,
+      "type": "string"
+     },
+     "ProrateTypeId": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     },
+     "Reference": {
+      "nullable": true,
+      "type": "string"
+     },
+     "RepeatPeriodId": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     },
+     "ServiceLines": {
+      "items": {
+       "ref": "ContractServiceLineInput",
+       "type": null
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "StartDate": {
+      "format": "date-time",
+      "nullable": true,
+      "type": "string"
+     },
+     "StatusId": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     }
+    },
+    "required": [],
+    "schema": "UpdateContractCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_contracts_contractId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/contracts/{contractId}",
+   "path_params": {
+    "contractId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "ContractDetailModel",
+    "kind": "envelope",
+    "schema": "ContractDetailModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "409",
     "500"
    ]
   },
@@ -3543,6 +4915,82 @@
     "400",
     "401",
     "404",
+    "500"
+   ]
+  },
+  "PATCH /v1/invoices/{invoiceId}": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "BrandingThemeId": {
+      "format": "uuid",
+      "nullable": true,
+      "type": "string"
+     },
+     "DueDate": {
+      "format": "date-time",
+      "nullable": true,
+      "type": "string"
+     },
+     "InvoiceDate": {
+      "format": "date-time",
+      "nullable": true,
+      "type": "string"
+     },
+     "InvoiceEmailTemplateId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "InvoiceTemplateId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "LineItems": {
+      "items": {
+       "ref": "UpdateInvoiceLineItem",
+       "type": null
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "Reference": {
+      "nullable": true,
+      "type": "string"
+     },
+     "StatusId": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     }
+    },
+    "required": [],
+    "schema": "UpdateInvoiceCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_invoices_invoiceId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/invoices/{invoiceId}",
+   "path_params": {
+    "invoiceId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "InvoiceDetailModel",
+    "kind": "envelope",
+    "schema": "InvoiceDetailModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "409",
     "500"
    ]
   },
@@ -3672,6 +5120,64 @@
     "500"
    ]
   },
+  "PATCH /v1/product-charges/{productChargeId}": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "BillableStatusId": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     },
+     "Description": {
+      "nullable": true,
+      "type": "string"
+     },
+     "Quantity": {
+      "format": "double",
+      "nullable": true,
+      "type": "number"
+     },
+     "UnitCost": {
+      "format": "double",
+      "nullable": true,
+      "type": "number"
+     },
+     "UnitPrice": {
+      "format": "double",
+      "nullable": true,
+      "type": "number"
+     }
+    },
+    "required": [],
+    "schema": "UpdateProductChargeCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_product-charges_productChargeId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/product-charges/{productChargeId}",
+   "path_params": {
+    "productChargeId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "ProductChargeModel",
+    "kind": "envelope",
+    "schema": "ProductChargeModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "409",
+    "500"
+   ]
+  },
   "PATCH /v1/projects/{projectId}": {
    "body": {
     "content_type": "application/json-patch+json",
@@ -3789,6 +5295,60 @@
     "400",
     "401",
     "404",
+    "500"
+   ]
+  },
+  "PATCH /v1/projects/{projectId}/comments/{commentId}": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "Attachments": {
+      "items": {
+       "ref": "CommentAttachmentInput",
+       "type": null
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "Body": {
+      "nullable": true,
+      "type": "string"
+     },
+     "UpdatedByName": {
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "UpdateProjectCommentCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_projects_projectId_comments_commentId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/projects/{projectId}/comments/{commentId}",
+   "path_params": {
+    "commentId": {
+     "format": "uuid",
+     "type": "string"
+    },
+    "projectId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "UpdateProjectCommentResult",
+    "kind": "envelope",
+    "schema": "UpdateProjectCommentResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "409",
     "500"
    ]
   },
@@ -3979,6 +5539,64 @@
     "500"
    ]
   },
+  "PATCH /v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "Attachments": {
+      "items": {
+       "ref": "CommentAttachmentInput",
+       "type": null
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "Body": {
+      "nullable": true,
+      "type": "string"
+     },
+     "UpdatedByName": {
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "UpdateTaskCommentCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_projects_projectId_tasks_taskId_comments_commentId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/projects/{projectId}/tasks/{taskId}/comments/{commentId}",
+   "path_params": {
+    "commentId": {
+     "format": "uuid",
+     "type": "string"
+    },
+    "projectId": {
+     "format": "uuid",
+     "type": "string"
+    },
+    "taskId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "UpdateTaskCommentResult",
+    "kind": "envelope",
+    "schema": "UpdateTaskCommentResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "409",
+    "500"
+   ]
+  },
   "PATCH /v1/tickets/{ticketId}": {
    "body": {
     "content_type": "application/json-patch+json",
@@ -4058,6 +5676,11 @@
       "ref": "TicketPriority",
       "type": null
      },
+     "SourceId": {
+      "nullable": false,
+      "ref": "TicketSource",
+      "type": null
+     },
      "StatusId": {
       "format": "int64",
       "nullable": true,
@@ -4125,6 +5748,50 @@
     "data": "UpdateTicketResult",
     "kind": "envelope",
     "schema": "UpdateTicketResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "PATCH /v1/tickets/{ticketId}/approvals/{approvalId}": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "Name": {
+      "min_length": 1,
+      "nullable": false,
+      "type": "string"
+     }
+    },
+    "required": [
+     "Name"
+    ],
+    "schema": "UpdateApprovalCommand"
+   },
+   "method": "PATCH",
+   "operation_id": "patch_v1_tickets_ticketId_approvals_approvalId",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/tickets/{ticketId}/approvals/{approvalId}",
+   "path_params": {
+    "approvalId": {
+     "format": "uuid",
+     "type": "string"
+    },
+    "ticketId": {
+     "format": "uuid",
+     "type": "string"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "ApprovalDetailModel",
+    "kind": "envelope",
+    "schema": "ApprovalDetailModelBaseResponse"
    },
    "status_codes": [
     "200",
@@ -4508,6 +6175,38 @@
     "500"
    ]
   },
+  "POST /v1/assets/types": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "Name": {
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "CreateAssetTypeCommand"
+   },
+   "method": "POST",
+   "operation_id": "post_v1_assets_types",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/assets/types",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "AssetTypeResult",
+    "kind": "envelope",
+    "schema": "AssetTypeResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "409",
+    "500"
+   ]
+  },
   "POST /v1/attachments": {
    "body": {
     "content_type": "multipart/form-data",
@@ -4562,6 +6261,11 @@
       "nullable": true,
       "type": "string"
      },
+     "ClientTypeId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
      "Domain": {
       "nullable": true,
       "type": "string"
@@ -4599,6 +6303,147 @@
     "200",
     "400",
     "401",
+    "500"
+   ]
+  },
+  "POST /v1/clients/{clientId}/domains": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "ExpirationDate": {
+      "format": "date",
+      "nullable": true,
+      "type": "string"
+     },
+     "Name": {
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "CreateClientWebDomainCommand"
+   },
+   "method": "POST",
+   "operation_id": "post_v1_clients_clientId_domains",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/clients/{clientId}/domains",
+   "path_params": {
+    "clientId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "ClientWebDomainResponse",
+    "kind": "envelope",
+    "schema": "ClientWebDomainResponseBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "500"
+   ]
+  },
+  "POST /v1/clients/{clientId}/locations": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "Address1": {
+      "nullable": true,
+      "type": "string"
+     },
+     "Address2": {
+      "nullable": true,
+      "type": "string"
+     },
+     "BillingContactIds": {
+      "items": {
+       "format": "int64",
+       "type": "integer"
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "City": {
+      "nullable": true,
+      "type": "string"
+     },
+     "Country": {
+      "nullable": true,
+      "type": "string"
+     },
+     "IsDefault": {
+      "nullable": true,
+      "type": "boolean"
+     },
+     "IsDefaultBilling": {
+      "nullable": true,
+      "type": "boolean"
+     },
+     "Name": {
+      "nullable": true,
+      "type": "string"
+     },
+     "Phone": {
+      "nullable": true,
+      "type": "string"
+     },
+     "PhoneCountryCode": {
+      "nullable": true,
+      "type": "string"
+     },
+     "PhoneExt": {
+      "nullable": true,
+      "type": "string"
+     },
+     "PostalCode": {
+      "nullable": true,
+      "type": "string"
+     },
+     "PrimaryContactId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "State": {
+      "nullable": true,
+      "type": "string"
+     },
+     "TimeZone": {
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "CreateClientLocationCommand"
+   },
+   "method": "POST",
+   "operation_id": "post_v1_clients_clientId_locations",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/clients/{clientId}/locations",
+   "path_params": {
+    "clientId": {
+     "format": "int64",
+     "type": "integer"
+    }
+   },
+   "query_params": {},
+   "response": {
+    "data": "ClientLocationResponse",
+    "kind": "envelope",
+    "schema": "ClientLocationResponseBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "409",
     "500"
    ]
   },
@@ -4666,6 +6511,14 @@
       "nullable": true,
       "type": "array"
      },
+     "TagIds": {
+      "items": {
+       "format": "int64",
+       "type": "integer"
+      },
+      "nullable": true,
+      "type": "array"
+     },
      "TimeZone": {
       "nullable": false,
       "type": "string"
@@ -4695,6 +6548,127 @@
     "400",
     "401",
     "409",
+    "500"
+   ]
+  },
+  "POST /v1/contracts": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "AutoApproveAndSend": {
+      "nullable": true,
+      "type": "boolean"
+     },
+     "AutoInvoiceTicketProducts": {
+      "nullable": true,
+      "type": "boolean"
+     },
+     "BrandingThemeId": {
+      "format": "uuid",
+      "nullable": true,
+      "type": "string"
+     },
+     "ClientId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "ContactIds": {
+      "items": {
+       "format": "int64",
+       "type": "integer"
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "DaysBeforeInvoiceCreation": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     },
+     "DaysUntilDue": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     },
+     "EndDate": {
+      "format": "date-time",
+      "nullable": true,
+      "type": "string"
+     },
+     "InvoiceEmailTemplateId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "InvoiceTemplateId": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "IsForAllLocations": {
+      "nullable": true,
+      "type": "boolean"
+     },
+     "LocationIds": {
+      "items": {
+       "format": "int64",
+       "type": "integer"
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "Name": {
+      "nullable": true,
+      "type": "string"
+     },
+     "ProrateTypeId": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     },
+     "Reference": {
+      "nullable": true,
+      "type": "string"
+     },
+     "RepeatPeriodId": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     },
+     "ServiceLines": {
+      "items": {
+       "ref": "ContractServiceLineInput",
+       "type": null
+      },
+      "nullable": true,
+      "type": "array"
+     },
+     "StartDate": {
+      "format": "date-time",
+      "nullable": true,
+      "type": "string"
+     }
+    },
+    "required": [],
+    "schema": "CreateContractCommand"
+   },
+   "method": "POST",
+   "operation_id": "post_v1_contracts",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/contracts",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "ContractDetailModel",
+    "kind": "envelope",
+    "schema": "ContractDetailModelBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
     "500"
    ]
   },
@@ -5116,6 +7090,74 @@
     "data": "CreatePaymentResult",
     "kind": "envelope",
     "schema": "CreatePaymentResultBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "400",
+    "401",
+    "404",
+    "409",
+    "500"
+   ]
+  },
+  "POST /v1/product-charges": {
+   "body": {
+    "content_type": "application/json-patch+json",
+    "fields": {
+     "BillableStatusId": {
+      "format": "int32",
+      "nullable": true,
+      "type": "integer"
+     },
+     "Description": {
+      "nullable": true,
+      "type": "string"
+     },
+     "ItemId": {
+      "format": "uuid",
+      "nullable": false,
+      "type": "string"
+     },
+     "Quantity": {
+      "format": "double",
+      "nullable": true,
+      "type": "number"
+     },
+     "TaskId": {
+      "format": "uuid",
+      "nullable": true,
+      "type": "string"
+     },
+     "TicketId": {
+      "format": "uuid",
+      "nullable": true,
+      "type": "string"
+     },
+     "UnitCost": {
+      "format": "double",
+      "nullable": true,
+      "type": "number"
+     },
+     "UnitPrice": {
+      "format": "double",
+      "nullable": true,
+      "type": "number"
+     }
+    },
+    "required": [],
+    "schema": "CreateProductChargeCommand"
+   },
+   "method": "POST",
+   "operation_id": "post_v1_product-charges",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/product-charges",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "CreateProductChargeResult",
+    "kind": "envelope",
+    "schema": "CreateProductChargeResultBaseResponse"
    },
    "status_codes": [
     "200",
@@ -5999,6 +8041,11 @@
       "type": "integer"
      },
      "Comment": {
+      "nullable": true,
+      "type": "string"
+     },
+     "CreatedOn": {
+      "format": "date-time",
       "nullable": true,
       "type": "string"
      },
@@ -7300,6 +9347,40 @@
    "required": [],
    "type": "object"
   },
+  "AlertListItemModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "AlertListItemModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "AlertListItemModelListBaseResponse": {
    "additional_properties": false,
    "fields": {
@@ -7522,6 +9603,163 @@
    "required": [],
    "type": "object"
   },
+  "AssetTagModel": {
+   "additional_properties": false,
+   "fields": {
+    "Conditions": {
+     "nullable": false,
+     "ref": "AgentTagConditionsModel",
+     "type": null
+    },
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Description": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Type": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AssetTagModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "AssetTagModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AssetTagModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "AssetTagModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AssetTypeResult": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "AssetTypeResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "AssetTypeResult",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "BillingRoleModel": {
    "additional_properties": false,
    "fields": {
@@ -7589,6 +9827,42 @@
    "required": [],
    "type": "object"
   },
+  "BlockHoursDetailsInput": {
+   "additional_properties": false,
+   "fields": {
+    "Balance": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "OverrunThreshold": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Price": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "ShowRemainingHoursInClientPortal": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "TemplateId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "WarningThreshold": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "BlockHoursDetailsModel": {
    "additional_properties": false,
    "fields": {
@@ -7601,6 +9875,15 @@
      "format": "double",
      "nullable": true,
      "type": "number"
+    },
+    "ShowRemainingHoursInClientPortal": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "TemplateId": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
     },
     "WarningThreshold": {
      "format": "double",
@@ -7661,6 +9944,101 @@
    "required": [],
    "type": "object"
   },
+  "ClientCustomFieldModel": {
+   "additional_properties": false,
+   "fields": {
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "DefaultValue": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Description": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "IsHidden": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "IsRequired": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Options": {
+     "items": {
+      "type": "string"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "Type": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "Variable": {
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ClientCustomFieldModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "ClientCustomFieldModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "ClientListItemResponse": {
    "additional_properties": false,
    "fields": {
@@ -7671,6 +10049,11 @@
     "BillingName": {
      "nullable": false,
      "type": "string"
+    },
+    "ClientTypeId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
     },
     "CreatedOn": {
      "format": "date-time",
@@ -7909,6 +10292,40 @@
    "required": [],
    "type": "object"
   },
+  "ClientLocationResponseBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "ClientLocationResponse",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "ClientLocationResponseListBaseResponse": {
    "additional_properties": false,
    "fields": {
@@ -7956,6 +10373,11 @@
     "BillingName": {
      "nullable": false,
      "type": "string"
+    },
+    "ClientTypeId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
     },
     "CreatedOn": {
      "format": "date-time",
@@ -8047,6 +10469,73 @@
    "required": [],
    "type": "object"
   },
+  "ClientTypeListItemModel": {
+   "additional_properties": false,
+   "fields": {
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "IsBuiltIn": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ClientTypeListItemModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "ClientTypeListItemModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "ClientWebDomainResponse": {
    "additional_properties": false,
    "fields": {
@@ -8082,6 +10571,40 @@
      "format": "date-time",
      "nullable": true,
      "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ClientWebDomainResponseBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "ClientWebDomainResponse",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
     }
    },
    "required": [],
@@ -8567,6 +11090,14 @@
      "ref": "CodeModel",
      "type": null
     },
+    "TagIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": false,
+     "type": "array"
+    },
     "TimeZone": {
      "nullable": false,
      "type": "string"
@@ -8651,12 +11182,218 @@
    "required": [],
    "type": "object"
   },
+  "ContactTagListItemModel": {
+   "additional_properties": false,
+   "fields": {
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "Description": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ContactTagListItemModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "ContactTagListItemModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ContractCustomRatesInput": {
+   "additional_properties": false,
+   "fields": {
+    "WorkRoles": {
+     "items": {
+      "ref": "ContractCustomWorkRoleRateInput",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "WorkTypes": {
+     "items": {
+      "ref": "ContractCustomWorkTypeRateInput",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ContractCustomRatesModel": {
+   "additional_properties": false,
+   "fields": {
+    "WorkRoles": {
+     "items": {
+      "ref": "ContractCustomWorkRoleRateModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "WorkTypes": {
+     "items": {
+      "ref": "ContractCustomWorkTypeRateModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ContractCustomWorkRoleRateInput": {
+   "additional_properties": false,
+   "fields": {
+    "CoaCode": {
+     "nullable": true,
+     "type": "string"
+    },
+    "HourlyRate": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "WorkRoleId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ContractCustomWorkRoleRateModel": {
+   "additional_properties": false,
+   "fields": {
+    "CoaCode": {
+     "nullable": true,
+     "type": "string"
+    },
+    "HourlyRate": {
+     "format": "double",
+     "nullable": false,
+     "type": "number"
+    },
+    "WorkRoleId": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ContractCustomWorkTypeRateInput": {
+   "additional_properties": false,
+   "fields": {
+    "CoaCode": {
+     "nullable": true,
+     "type": "string"
+    },
+    "HourlyMultiplier": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "WorkTypeId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ContractCustomWorkTypeRateModel": {
+   "additional_properties": false,
+   "fields": {
+    "CoaCode": {
+     "nullable": true,
+     "type": "string"
+    },
+    "HourlyMultiplier": {
+     "format": "double",
+     "nullable": false,
+     "type": "number"
+    },
+    "WorkTypeId": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "ContractDetailModel": {
    "additional_properties": false,
    "fields": {
     "AutoApproveAndSend": {
      "nullable": true,
      "type": "boolean"
+    },
+    "AutoInvoiceTicketProducts": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "BrandingThemeId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
     },
     "Client": {
      "nullable": false,
@@ -8681,6 +11418,11 @@
      "nullable": true,
      "type": "integer"
     },
+    "DaysUntilDue": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
     "EndDate": {
      "format": "date",
      "nullable": true,
@@ -8691,9 +11433,14 @@
      "nullable": false,
      "type": "integer"
     },
-    "InvoiceDue": {
+    "InvoiceEmailTemplateId": {
      "format": "int64",
-     "nullable": false,
+     "nullable": true,
+     "type": "integer"
+    },
+    "InvoiceTemplateId": {
+     "format": "int64",
+     "nullable": true,
      "type": "integer"
     },
     "IsForAllLocations": {
@@ -8711,6 +11458,11 @@
     "Name": {
      "nullable": false,
      "type": "string"
+    },
+    "ProrateType": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
     },
     "RecurringAmount": {
      "format": "double",
@@ -8792,6 +11544,67 @@
    "required": [],
    "type": "object"
   },
+  "ContractLineItemInput": {
+   "additional_properties": false,
+   "fields": {
+    "BillableStatusId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Description": {
+     "nullable": true,
+     "type": "string"
+    },
+    "DiscountPercent": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "EndDate": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "Id": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "ItemId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "Quantity": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "StartDate": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "TaxId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "UnitCost": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "UnitPrice": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "ContractLineItemModel": {
    "additional_properties": false,
    "fields": {
@@ -8804,11 +11617,6 @@
      "nullable": false,
      "ref": "CodeModel",
      "type": null
-    },
-    "Cost": {
-     "format": "double",
-     "nullable": true,
-     "type": "number"
     },
     "Description": {
      "nullable": true,
@@ -8859,6 +11667,11 @@
      "type": null
     },
     "TaxAmount": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "UnitCost": {
      "format": "double",
      "nullable": true,
      "type": "number"
@@ -8997,6 +11810,14 @@
   "ContractServiceLineDetailModel": {
    "additional_properties": false,
    "fields": {
+    "AutoApproveTime": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "AutoInvoiceTime": {
+     "nullable": false,
+     "type": "boolean"
+    },
     "BlockHoursDetails": {
      "nullable": false,
      "ref": "BlockHoursDetailsModel",
@@ -9011,6 +11832,11 @@
      "format": "int64",
      "nullable": false,
      "type": "integer"
+    },
+    "IncludedTimeGoesTo": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
     },
     "LaborTerms": {
      "nullable": false,
@@ -9073,6 +11899,84 @@
       "type": null
      },
      "nullable": false,
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ContractServiceLineInput": {
+   "additional_properties": false,
+   "fields": {
+    "AutoApproveTime": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "AutoInvoiceTime": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "BlockHoursDetails": {
+     "nullable": false,
+     "ref": "BlockHoursDetailsInput",
+     "type": null
+    },
+    "Id": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "IncludedTimeGoesToId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "LaborTermsId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "LimitedHoursDetails": {
+     "nullable": false,
+     "ref": "LimitedHoursDetailsInput",
+     "type": null
+    },
+    "LineItems": {
+     "items": {
+      "ref": "ContractLineItemInput",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "Name": {
+     "nullable": true,
+     "type": "string"
+    },
+    "PerHourDetails": {
+     "nullable": false,
+     "ref": "PerHourDetailsInput",
+     "type": null
+    },
+    "UnlimitedHoursDetails": {
+     "nullable": false,
+     "ref": "UnlimitedHoursDetailsInput",
+     "type": null
+    },
+    "WorkRoleIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "WorkTypeIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": true,
      "type": "array"
     }
    },
@@ -9362,6 +12266,17 @@
    "required": [],
    "type": "object"
   },
+  "CreateAssetTypeCommand": {
+   "additional_properties": false,
+   "fields": {
+    "Name": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "CreateClientCommand": {
    "additional_properties": false,
    "fields": {
@@ -9372,6 +12287,11 @@
     "BillingName": {
      "nullable": true,
      "type": "string"
+    },
+    "ClientTypeId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
     },
     "Domain": {
      "nullable": true,
@@ -9392,6 +12312,94 @@
     "Location",
     "Name"
    ],
+   "type": "object"
+  },
+  "CreateClientLocationCommand": {
+   "additional_properties": false,
+   "fields": {
+    "Address1": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Address2": {
+     "nullable": true,
+     "type": "string"
+    },
+    "BillingContactIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "City": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Country": {
+     "nullable": true,
+     "type": "string"
+    },
+    "IsDefault": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "IsDefaultBilling": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "Name": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Phone": {
+     "nullable": true,
+     "type": "string"
+    },
+    "PhoneCountryCode": {
+     "nullable": true,
+     "type": "string"
+    },
+    "PhoneExt": {
+     "nullable": true,
+     "type": "string"
+    },
+    "PostalCode": {
+     "nullable": true,
+     "type": "string"
+    },
+    "PrimaryContactId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "State": {
+     "nullable": true,
+     "type": "string"
+    },
+    "TimeZone": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "CreateClientWebDomainCommand": {
+   "additional_properties": false,
+   "fields": {
+    "ExpirationDate": {
+     "format": "date",
+     "nullable": true,
+     "type": "string"
+    },
+    "Name": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
    "type": "object"
   },
   "CreateCommentCommand": {
@@ -9544,6 +12552,14 @@
      "nullable": true,
      "type": "array"
     },
+    "TagIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": true,
+     "type": "array"
+    },
     "TimeZone": {
      "nullable": false,
      "type": "string"
@@ -9554,6 +12570,107 @@
     "LastName",
     "PrimaryEmail"
    ],
+   "type": "object"
+  },
+  "CreateContractCommand": {
+   "additional_properties": false,
+   "fields": {
+    "AutoApproveAndSend": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "AutoInvoiceTicketProducts": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "BrandingThemeId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "ClientId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "ContactIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DaysBeforeInvoiceCreation": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "DaysUntilDue": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "EndDate": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "InvoiceEmailTemplateId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "InvoiceTemplateId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "IsForAllLocations": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "LocationIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "Name": {
+     "nullable": true,
+     "type": "string"
+    },
+    "ProrateTypeId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Reference": {
+     "nullable": true,
+     "type": "string"
+    },
+    "RepeatPeriodId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "ServiceLines": {
+     "items": {
+      "ref": "ContractServiceLineInput",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "StartDate": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
    "type": "object"
   },
   "CreateCustomAssetCommand": {
@@ -10037,6 +13154,98 @@
     "Data": {
      "nullable": false,
      "ref": "CreatePaymentResult",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "CreateProductChargeCommand": {
+   "additional_properties": false,
+   "fields": {
+    "BillableStatusId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Description": {
+     "nullable": true,
+     "type": "string"
+    },
+    "ItemId": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "Quantity": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "TaskId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "TicketId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "UnitCost": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "UnitPrice": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "CreateProductChargeResult": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "CreateProductChargeResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "CreateProductChargeResult",
      "type": null
     },
     "DataContext": {
@@ -11068,6 +14277,11 @@
      "nullable": true,
      "type": "string"
     },
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
     "Distance": {
      "format": "double",
      "nullable": true,
@@ -11582,6 +14796,52 @@
    "required": [],
    "type": "object"
   },
+  "DeleteClientLocationResult": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DeleteClientLocationResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "DeleteClientLocationResult",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "DeleteClientResult": {
    "additional_properties": false,
    "fields": {
@@ -11600,6 +14860,52 @@
     "Data": {
      "nullable": false,
      "ref": "DeleteClientResult",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DeleteClientWebDomainResult": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DeleteClientWebDomainResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "DeleteClientWebDomainResult",
      "type": null
     },
     "DataContext": {
@@ -11927,6 +15233,52 @@
     "Data": {
      "nullable": false,
      "ref": "DeletePaymentResult",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DeleteProductChargeResult": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "DeleteProductChargeResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "DeleteProductChargeResult",
      "type": null
     },
     "DataContext": {
@@ -13184,6 +16536,40 @@
    "required": [],
    "type": "object"
   },
+  "GetGroupsResponseModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "GetGroupsResponseModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "GetGroupsResponseModelListBaseResponse": {
    "additional_properties": false,
    "fields": {
@@ -14187,13 +17573,63 @@
    "required": [],
    "type": "object"
   },
+  "LimitedHoursDetailsInput": {
+   "additional_properties": false,
+   "fields": {
+    "AllocatedHours": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "CustomRates": {
+     "nullable": false,
+     "ref": "ContractCustomRatesInput",
+     "type": null
+    },
+    "HourlyRate": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "RateTypeId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "ShowRemainingHoursInClientPortal": {
+     "nullable": true,
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "LimitedHoursDetailsModel": {
    "additional_properties": false,
    "fields": {
+    "AllocatedHours": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "CustomRates": {
+     "nullable": false,
+     "ref": "ContractCustomRatesModel",
+     "type": null
+    },
+    "HourlyRate": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
     "RateType": {
      "nullable": false,
      "ref": "CodeModel",
      "type": null
+    },
+    "ShowRemainingHoursInClientPortal": {
+     "nullable": false,
+     "type": "boolean"
     }
    },
    "required": [],
@@ -14292,13 +17728,411 @@
    "required": [],
    "type": "object"
   },
+  "PaymentInvoiceModel": {
+   "additional_properties": false,
+   "fields": {
+    "Amount": {
+     "format": "double",
+     "nullable": false,
+     "type": "number"
+    },
+    "InvoiceId": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "PaymentModel": {
+   "additional_properties": false,
+   "fields": {
+    "Amount": {
+     "format": "double",
+     "nullable": false,
+     "type": "number"
+    },
+    "ClientId": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "Invoices": {
+     "items": {
+      "ref": "PaymentInvoiceModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "PaymentDate": {
+     "format": "date",
+     "nullable": false,
+     "type": "string"
+    },
+    "Reference": {
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "PaymentModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "PaymentModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "PaymentModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "PaymentModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "nullable": false,
+     "ref": "PaginationDataContext",
+     "type": null
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "PerHourDetailsInput": {
+   "additional_properties": false,
+   "fields": {
+    "CustomRates": {
+     "nullable": false,
+     "ref": "ContractCustomRatesInput",
+     "type": null
+    },
+    "HourlyRate": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "RateTypeId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "PerHourDetailsModel": {
    "additional_properties": false,
    "fields": {
+    "CustomRates": {
+     "nullable": false,
+     "ref": "ContractCustomRatesModel",
+     "type": null
+    },
+    "HourlyRate": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
     "RateType": {
      "nullable": false,
      "ref": "CodeModel",
      "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "PolicyCheckModel": {
+   "additional_properties": false,
+   "fields": {
+    "CheckId": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "IsEnabled": {
+     "nullable": false,
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "PolicyModel": {
+   "additional_properties": false,
+   "fields": {
+    "Checks": {
+     "items": {
+      "ref": "PolicyCheckModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "DistributedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Name": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Os": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Plugins": {
+     "items": {
+      "ref": "PolicyPluginModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "Priority": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Scripts": {
+     "items": {
+      "ref": "PolicyScriptModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "Status": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "Tags": {
+     "nullable": false,
+     "ref": "PolicyTagsModel",
+     "type": null
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "PolicyModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "PolicyModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "PolicyModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "PolicyModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "nullable": false,
+     "ref": "PaginationDataContext",
+     "type": null
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "PolicyPluginModel": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "IsEnabled": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "PluginId": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "PolicyScriptModel": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "IsEnabled": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "ScriptId": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "PolicyTagsModel": {
+   "additional_properties": false,
+   "fields": {
+    "AllOfTagIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "AnyOfTagIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "ExcludedTagIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": false,
+     "type": "array"
     }
    },
    "required": [],
@@ -14402,6 +18236,162 @@
      "additional_properties": false,
      "nullable": true,
      "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ProductChargeModel": {
+   "additional_properties": false,
+   "fields": {
+    "Amount": {
+     "format": "double",
+     "nullable": false,
+     "type": "number"
+    },
+    "BillableStatus": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "ClientId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Description": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "InvoiceId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "ItemId": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "ProjectId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "Quantity": {
+     "format": "double",
+     "nullable": false,
+     "type": "number"
+    },
+    "TaskId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "TicketId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "UnitCost": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "UnitPrice": {
+     "format": "double",
+     "nullable": false,
+     "type": "number"
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ProductChargeModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "ProductChargeModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ProductChargeModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "ProductChargeModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "nullable": false,
+     "ref": "PaginationDataContext",
+     "type": null
     },
     "IsSuccess": {
      "nullable": false,
@@ -15099,6 +19089,126 @@
    "required": [],
    "type": "object"
   },
+  "ProjectTemplateListItemModel": {
+   "additional_properties": false,
+   "fields": {
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "GroupIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "LeadAssigneeId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "ProjectDescription": {
+     "nullable": false,
+     "type": "string"
+    },
+    "ProjectTitle": {
+     "nullable": false,
+     "type": "string"
+    },
+    "SectionCount": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "TagIds": {
+     "items": {
+      "format": "uuid",
+      "type": "string"
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "TargetDateInDays": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "TaskCount": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Title": {
+     "nullable": false,
+     "type": "string"
+    },
+    "TypeId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "WatcherIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": false,
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "ProjectTemplateListItemModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "ProjectTemplateListItemModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "nullable": false,
+     "ref": "PaginationDataContext",
+     "type": null
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "ProjectTypeListItemModel": {
    "additional_properties": false,
    "fields": {
@@ -15185,6 +19295,69 @@
      "nullable": false,
      "ref": "RemoveDocumentRelatedItemResult",
      "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "RoleModel": {
+   "additional_properties": false,
+   "fields": {
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "RoleModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "RoleModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
     },
     "DataContext": {
      "additional_properties": false,
@@ -15520,6 +19693,574 @@
      "additional_properties": false,
      "nullable": true,
      "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentAnswerModel": {
+   "additional_properties": false,
+   "fields": {
+    "AgentAssetIds": {
+     "items": {
+      "format": "uuid",
+      "type": "string"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "ContactIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "CustomAssetIds": {
+     "items": {
+      "format": "uuid",
+      "type": "string"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DocumentIds": {
+     "items": {
+      "format": "uuid",
+      "type": "string"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "FieldId": {
+     "nullable": false,
+     "type": "string"
+    },
+    "ImageUrls": {
+     "items": {
+      "type": "string"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "Label": {
+     "nullable": false,
+     "type": "string"
+    },
+    "NumberValue": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "OptionValues": {
+     "items": {
+      "type": "string"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "StructuredDocumentSubmissions": {
+     "items": {
+      "ref": "StructuredDocumentSubmissionLinkModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "TextValue": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Type": {
+     "nullable": false,
+     "type": "string"
+    },
+    "UptimeIds": {
+     "items": {
+      "format": "uuid",
+      "type": "string"
+     },
+     "nullable": true,
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentConditionActionModel": {
+   "additional_properties": false,
+   "fields": {
+    "Action": {
+     "nullable": false,
+     "type": "string"
+    },
+    "FieldIds": {
+     "items": {
+      "type": "string"
+     },
+     "nullable": false,
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentConditionModel": {
+   "additional_properties": false,
+   "fields": {
+    "FieldId": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Operator": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Value": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentConditionalLogicModel": {
+   "additional_properties": false,
+   "fields": {
+    "Operator": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Then": {
+     "items": {
+      "ref": "StructuredDocumentConditionActionModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "When": {
+     "items": {
+      "ref": "StructuredDocumentConditionModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentDetailModel": {
+   "additional_properties": false,
+   "fields": {
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Fields": {
+     "items": {
+      "ref": "StructuredDocumentFieldModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "Id": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Version": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "VersionId": {
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentDetailModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "StructuredDocumentDetailModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentFieldModel": {
+   "additional_properties": false,
+   "fields": {
+    "ConditionalLogic": {
+     "nullable": false,
+     "ref": "StructuredDocumentConditionalLogicModel",
+     "type": null
+    },
+    "Id": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Label": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Options": {
+     "items": {
+      "ref": "StructuredDocumentFieldOptionModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "Required": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "ShowInList": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Type": {
+     "nullable": false,
+     "type": "string"
+    },
+    "UseForTitle": {
+     "nullable": false,
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentFieldOptionModel": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentListItemModel": {
+   "additional_properties": false,
+   "fields": {
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Id": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Version": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "VersionId": {
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentListItemModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "StructuredDocumentListItemModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "nullable": false,
+     "ref": "PaginationDataContext",
+     "type": null
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentSubmissionDetailModel": {
+   "additional_properties": false,
+   "fields": {
+    "Answers": {
+     "items": {
+      "ref": "StructuredDocumentAnswerModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "Attachments": {
+     "items": {
+      "ref": "CommentAttachmentModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "ClientId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "CreatedById": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Id": {
+     "nullable": false,
+     "type": "string"
+    },
+    "StructuredDocumentId": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Title": {
+     "nullable": true,
+     "type": "string"
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Version": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "VersionId": {
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentSubmissionDetailModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "StructuredDocumentSubmissionDetailModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentSubmissionLinkModel": {
+   "additional_properties": false,
+   "fields": {
+    "StructuredDocumentId": {
+     "nullable": false,
+     "type": "string"
+    },
+    "SubmissionId": {
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentSubmissionListItemModel": {
+   "additional_properties": false,
+   "fields": {
+    "Answers": {
+     "items": {
+      "ref": "StructuredDocumentAnswerModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "ClientId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "CreatedById": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Id": {
+     "nullable": false,
+     "type": "string"
+    },
+    "StructuredDocumentId": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Title": {
+     "nullable": true,
+     "type": "string"
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Version": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "VersionId": {
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "StructuredDocumentSubmissionListItemModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "StructuredDocumentSubmissionListItemModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "nullable": false,
+     "ref": "PaginationDataContext",
+     "type": null
     },
     "IsSuccess": {
      "nullable": false,
@@ -17589,12 +22330,252 @@
    "required": [],
    "type": "object"
   },
+  "UnlimitedHoursDetailsInput": {
+   "additional_properties": false,
+   "fields": {},
+   "required": [],
+   "type": "object"
+  },
   "UnlimitedHoursDetailsModel": {
    "additional_properties": false,
+   "fields": {},
+   "required": [],
+   "type": "object"
+  },
+  "UpdateAgentCommand": {
+   "additional_properties": false,
    "fields": {
-    "AutoApprove": {
+    "ContactId": {
+     "format": "int64",
      "nullable": true,
+     "type": "integer"
+    },
+    "Description": {
+     "nullable": true,
+     "type": "string"
+    },
+    "HardwareTypeId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "WarrantyEndDate": {
+     "format": "date",
+     "nullable": true,
+     "type": "string"
+    },
+    "WarrantyStartDate": {
+     "format": "date",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateAgentResult": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateAgentResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "UpdateAgentResult",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
      "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateAlertCommand": {
+   "additional_properties": false,
+   "fields": {
+    "StatusId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "TicketId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateAlertResult": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateAlertResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "UpdateAlertResult",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateAlertStatusesCommand": {
+   "additional_properties": false,
+   "fields": {
+    "AlertIds": {
+     "items": {
+      "format": "uuid",
+      "type": "string"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "StatusId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "TicketId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateAlertStatusesResult": {
+   "additional_properties": false,
+   "fields": {
+    "UpdatedIds": {
+     "items": {
+      "format": "uuid",
+      "type": "string"
+     },
+     "nullable": false,
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateAlertStatusesResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "UpdateAlertStatusesResult",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateApprovalCommand": {
+   "additional_properties": false,
+   "fields": {
+    "Name": {
+     "min_length": 1,
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [
+    "Name"
+   ],
+   "type": "object"
+  },
+  "UpdateAssetTypeCommand": {
+   "additional_properties": false,
+   "fields": {
+    "Name": {
+     "nullable": true,
+     "type": "string"
     }
    },
    "required": [],
@@ -17610,6 +22591,11 @@
     "BillingName": {
      "nullable": true,
      "type": "string"
+    },
+    "ClientTypeId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
     },
     "CustomProperties": {
      "items": {
@@ -17635,6 +22621,94 @@
      "format": "int32",
      "nullable": true,
      "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateClientLocationCommand": {
+   "additional_properties": false,
+   "fields": {
+    "Address1": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Address2": {
+     "nullable": true,
+     "type": "string"
+    },
+    "BillingContactIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "City": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Country": {
+     "nullable": true,
+     "type": "string"
+    },
+    "IsDefault": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "IsDefaultBilling": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "Name": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Phone": {
+     "nullable": true,
+     "type": "string"
+    },
+    "PhoneCountryCode": {
+     "nullable": true,
+     "type": "string"
+    },
+    "PhoneExt": {
+     "nullable": true,
+     "type": "string"
+    },
+    "PostalCode": {
+     "nullable": true,
+     "type": "string"
+    },
+    "PrimaryContactId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "State": {
+     "nullable": true,
+     "type": "string"
+    },
+    "TimeZone": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateClientWebDomainCommand": {
+   "additional_properties": false,
+   "fields": {
+    "ExpirationDate": {
+     "format": "date",
+     "nullable": true,
+     "type": "string"
+    },
+    "Name": {
+     "nullable": true,
+     "type": "string"
     }
    },
    "required": [],
@@ -17703,6 +22777,14 @@
      "nullable": true,
      "type": "array"
     },
+    "TagIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": true,
+     "type": "array"
+    },
     "TimeZone": {
      "nullable": false,
      "type": "string"
@@ -17714,6 +22796,112 @@
     "LastName",
     "PrimaryEmail"
    ],
+   "type": "object"
+  },
+  "UpdateContractCommand": {
+   "additional_properties": false,
+   "fields": {
+    "AutoApproveAndSend": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "AutoInvoiceTicketProducts": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "BrandingThemeId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "ClientId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "ContactIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DaysBeforeInvoiceCreation": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "DaysUntilDue": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "EndDate": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "InvoiceEmailTemplateId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "InvoiceTemplateId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "IsForAllLocations": {
+     "nullable": true,
+     "type": "boolean"
+    },
+    "LocationIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "Name": {
+     "nullable": true,
+     "type": "string"
+    },
+    "ProrateTypeId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Reference": {
+     "nullable": true,
+     "type": "string"
+    },
+    "RepeatPeriodId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "ServiceLines": {
+     "items": {
+      "ref": "ContractServiceLineInput",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "StartDate": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "StatusId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    }
+   },
+   "required": [],
    "type": "object"
   },
   "UpdateCustomAssetCommand": {
@@ -17894,6 +23082,110 @@
    "required": [],
    "type": "object"
   },
+  "UpdateInvoiceCommand": {
+   "additional_properties": false,
+   "fields": {
+    "BrandingThemeId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "DueDate": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "InvoiceDate": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "InvoiceEmailTemplateId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "InvoiceTemplateId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "LineItems": {
+     "items": {
+      "ref": "UpdateInvoiceLineItem",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "Reference": {
+     "nullable": true,
+     "type": "string"
+    },
+    "StatusId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateInvoiceLineItem": {
+   "additional_properties": false,
+   "fields": {
+    "BillableStatusId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "CoaCode": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Description": {
+     "nullable": true,
+     "type": "string"
+    },
+    "DiscountPercent": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "Id": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "ItemId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "Quantity": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "TaxId": {
+     "format": "int64",
+     "nullable": true,
+     "type": "integer"
+    },
+    "UnitCost": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "UnitPrice": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "UpdateItemCommand": {
    "additional_properties": false,
    "fields": {
@@ -18057,6 +23349,37 @@
    "required": [],
    "type": "object"
   },
+  "UpdateProductChargeCommand": {
+   "additional_properties": false,
+   "fields": {
+    "BillableStatusId": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    },
+    "Description": {
+     "nullable": true,
+     "type": "string"
+    },
+    "Quantity": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "UnitCost": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    },
+    "UnitPrice": {
+     "format": "double",
+     "nullable": true,
+     "type": "number"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "UpdateProjectCommand": {
    "additional_properties": false,
    "fields": {
@@ -18146,6 +23469,75 @@
      },
      "nullable": true,
      "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateProjectCommentCommand": {
+   "additional_properties": false,
+   "fields": {
+    "Attachments": {
+     "items": {
+      "ref": "CommentAttachmentInput",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "Body": {
+     "nullable": true,
+     "type": "string"
+    },
+    "UpdatedByName": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateProjectCommentResult": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateProjectCommentResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "UpdateProjectCommentResult",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
     }
    },
    "required": [],
@@ -18370,6 +23762,75 @@
    "required": [],
    "type": "object"
   },
+  "UpdateTaskCommentCommand": {
+   "additional_properties": false,
+   "fields": {
+    "Attachments": {
+     "items": {
+      "ref": "CommentAttachmentInput",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "Body": {
+     "nullable": true,
+     "type": "string"
+    },
+    "UpdatedByName": {
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateTaskCommentResult": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UpdateTaskCommentResultBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "UpdateTaskCommentResult",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "UpdateTaskResult": {
    "additional_properties": false,
    "fields": {
@@ -18492,6 +23953,11 @@
     "PriorityId": {
      "nullable": false,
      "ref": "TicketPriority",
+     "type": null
+    },
+    "SourceId": {
+     "nullable": false,
+     "ref": "TicketSource",
      "type": null
     },
     "StatusId": {
@@ -18963,6 +24429,96 @@
    "required": [],
    "type": "object"
   },
+  "UserDetailModel": {
+   "additional_properties": false,
+   "fields": {
+    "CreatedOn": {
+     "format": "date-time",
+     "nullable": false,
+     "type": "string"
+    },
+    "Email": {
+     "nullable": false,
+     "type": "string"
+    },
+    "FirstName": {
+     "nullable": false,
+     "type": "string"
+    },
+    "GroupIds": {
+     "items": {
+      "format": "int64",
+      "type": "integer"
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "Id": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "LastName": {
+     "nullable": false,
+     "type": "string"
+    },
+    "RoleId": {
+     "format": "int64",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Status": {
+     "nullable": false,
+     "ref": "CodeModel",
+     "type": null
+    },
+    "TimeZone": {
+     "nullable": false,
+     "type": "string"
+    },
+    "UpdatedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "UserDetailModelBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "nullable": false,
+     "ref": "UserDetailModel",
+     "type": null
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
   "UserModel": {
    "additional_properties": false,
    "fields": {
@@ -19142,6 +24698,6 @@
    "type": "apiKey"
   }
  },
- "sha256": "d68dd3e1bfe2c144f1e12af6af0ac012052366992fc62ade998e24b93987ea05",
+ "sha256": "5a1085ac00a9a1c4a83aacd2c5f90bf1965a2c725af40a5a8fbb49436fcd1588",
  "source": "https://api.usw.gorelo.io/swagger/v1/swagger.json"
 }

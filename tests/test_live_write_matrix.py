@@ -65,8 +65,11 @@ RUN = "MCPTEST-20991002101500"
 TEST_CLIENT, SECOND, OPERATOR_CONTACT, OPERATOR_USER = 9501, 9502, 9600, 9700
 SPEC = load_spec_index()
 
+NEW_AREAS = tuple(area.key for area in write_matrix.OPT_INS)  # the opt-in areas of 1.5.0: off by default
 STATUS_NAMES = {1: "New", 2: "In Progress", 3: "Solved", 4: "Closed", 6: "On Hold"}
 TYPE_NAMES = {7101: "Incident", 7102: "Request"}
+PRIORITY_NAMES = {0: "None", 1: "Urgent", 2: "High", 3: "Normal", 4: "Low"}
+SOURCE_NAMES = {1: "Web", 2: "Email", 3: "Phone", 4: "Chat", 5: "Alert", 6: "API", 7: "Messenger"}  # GET /v1/tickets/sources (2026-10-30)
 CONTACT_FIELDS = (
     "FirstName", "LastName", "ClientId", "LocationId", "PrimaryEmail", "MobilePhone", "MobilePhoneCountryCode",
     "OfficePhone", "OfficePhoneCountryCode", "JobTitle", "Department", "TimeZone", "Description",
@@ -150,6 +153,11 @@ DEFAULT_CATALOG = (
     catalog_item(902, "Managed service", None),
     catalog_item(903, "the test client product", TEST_CLIENT),
 )
+TAX_EXEMPT_ID = 7  # the id of the one tax-exempt rate (Percentage 0, Name "Tax Exempt") of the default tax list
+DEFAULT_TAXES = (
+    {"Id": TAX_EXEMPT_ID, "Name": "Tax Exempt", "Code": "TE", "Percentage": 0.0, "IsDefault": False, "SubTaxes": []},
+    {"Id": 8, "Name": "Sales tax", "Code": "ST", "Percentage": 8.5, "IsDefault": True, "SubTaxes": []},
+)
 DEFAULT_PROJECT_TYPES = (
     {"Id": project_type_guid(1), "Name": "Implementation", "Description": "x"},
     {"Id": project_type_guid(2), "Name": "Migration", "Description": "y"},
@@ -176,7 +184,8 @@ class FakeGorelo:
     at once; None never sets it), payment_link (False: the synced invoice has no PaymentLink), test_client_contacts (the contact rows
     GET /v1/contacts answers for the test client besides the ones a run created: Archived contacts by default), documents_scope
     (False answers the 403 with code 080203 on every document route) and keeps_attachments (False: a changed title or body makes a
-    new version WITHOUT the attachments, the case the update_document tool must report).
+    new version WITHOUT the attachments, the case the update_document tool must report), taxes (the rows of GET /v1/taxes: one
+    "Tax Exempt" rate of Percentage 0 and one rate of 8.5 by default).
     on_ticket_created(hook) lets a test change the STORED ticket after a POST /v1/tickets (a tenant automation that
     sets a contact or CCs the request never carried), and on_invoice_created(hook) does the same for the STORED invoice.
     There is deliberately no route for GET /v1/tickets/tags: the matrix applies no tenant tag, so such a request would
@@ -201,7 +210,9 @@ class FakeGorelo:
         test_client_contacts: list | None = None,
         documents_scope: bool = True,
         keeps_attachments: bool = True,
+        taxes: list | None = None,
     ) -> None:
+        self.taxes = [dict(row) if isinstance(row, dict) else row for row in (DEFAULT_TAXES if taxes is None else taxes)]
         self.status_names = dict(STATUS_NAMES if status_names is None else status_names)
         self.catalog = [dict(row) if isinstance(row, dict) else row for row in (DEFAULT_CATALOG if catalog is None else catalog)]
         self.project_types = [
@@ -342,6 +353,7 @@ class FakeGorelo:
     def contact_record(self, ident: int, body: dict) -> dict:
         record = {key: body.get(key) for key in CONTACT_FIELDS}
         record.update({"Id": ident, "Alias": None, "IsTemporaryContact": False, "Status": {"Id": 1, "Name": "Active"}})
+        record["TagIds"] = sorted(body.get("TagIds") or [])  # ascending, [] when none (ContactResponse, contract 6c30770dffc0)
         return record
 
     def add_ticket(self, body: dict) -> dict:
@@ -400,6 +412,8 @@ class FakeGorelo:
         r("DELETE", "/v1/contacts/{contactId}", self.delete_contact)
         r("GET", "/v1/tickets/statuses", lambda q: envelope([{"Id": i, "Name": n} for i, n in self.status_names.items()]))
         r("GET", "/v1/tickets/types", lambda q: envelope([{"Id": i, "Name": n} for i, n in TYPE_NAMES.items()]))
+        r("GET", "/v1/tickets/priorities", lambda q: envelope([{"Id": i, "Name": n} for i, n in PRIORITY_NAMES.items()]))
+        r("GET", "/v1/tickets/sources", lambda q: envelope([{"Id": i, "Name": n} for i, n in SOURCE_NAMES.items()]))
         r("GET", "/v1/organization/groups", lambda q: envelope([{"Id": 7201, "Name": "Everyone"}, {"Id": 7202, "Name": "Admins"}]))
         r("GET", "/v1/billing-roles", lambda q: envelope([{"Id": 11, "Name": "Technician", "HourlyRate": 100.0}]))
         r("GET", "/v1/work-types", lambda q: envelope([{"Id": 21, "Name": "Standard", "HourlyMultiplier": 1.0}]))
@@ -432,6 +446,7 @@ class FakeGorelo:
         r("GET", "/v1/time-entries/{timeEntryId}", self.get_entry)
         r("PATCH", "/v1/time-entries/{timeEntryId}", self.patch_entry)
         r("DELETE", "/v1/time-entries/{timeEntryId}", self.delete_entry)
+        r("GET", "/v1/taxes", lambda q: envelope([dict(row) if isinstance(row, dict) else row for row in self.taxes]))
         r("GET", "/v1/items", self.list_items)
         r("POST", "/v1/items", lambda q: self.post_thing(q, self.items, "Item"))
         r("GET", "/v1/items/{itemId}", lambda q: self.get_thing(q, self.items, "item"))
@@ -798,7 +813,8 @@ class FakeGorelo:
                 {
                     "Id": self.guid(), "ItemId": item["Id"], "Name": item["Name"], "Description": line.get("Description") or item["Name"],
                     "Quantity": line["Quantity"], "UnitPrice": price, "UnitCost": line.get("UnitCost", item.get("UnitCost")),
-                    "DiscountPercent": line.get("DiscountPercent") or 0.0, "Tax": {"Id": 0, "Name": "No tax"}, "TaxAmount": 0.0,
+                    "DiscountPercent": line.get("DiscountPercent") or 0.0,
+                    "Tax": {"Id": line["TaxId"], "Name": "Tax Exempt"} if line.get("TaxId") else {"Id": 0, "Name": "No tax"}, "TaxAmount": 0.0,
                     "Amount": line["Quantity"] * price, "BillableStatus": {"Id": line.get("BillableStatusId", 1), "Name": "Billable"},
                     "CoaCode": line.get("CoaCode"), "ItemType": {"Id": 1, "Name": "Product"}, "SubItems": [],
                 }
@@ -1348,6 +1364,8 @@ GOLDEN = {
         "GET /v1/tickets/statuses",
         "GET /v1/tickets/types",
         "GET /v1/organization/groups",
+        "GET /v1/tickets/sources",
+        "GET /v1/tickets/priorities",
         "POST /v1/tickets",
         "GET /v1/tickets/{ticketId}",
         "POST /v1/tickets",
@@ -1554,12 +1572,15 @@ GOLDEN_PROJECTS_ALONE = [
     "GET /v1/tickets/statuses",
     "GET /v1/tickets/types",
     "GET /v1/organization/groups",
+    "GET /v1/tickets/sources",
+    "GET /v1/tickets/priorities",
     *GOLDEN["projects"][2:],
 ]
 GOLDEN_APPROVED = [
     "GET /v1/contacts",
     "GET /v1/clients/{clientId}/locations",
     "GET /v1/items",
+    "GET /v1/taxes",
     "POST /v1/invoices",
     "GET /v1/invoices/{invoiceId}",
     "GET /v1/invoices/{invoiceId}",
@@ -1584,11 +1605,16 @@ async def test_a_full_run_passes_and_leaves_nothing_behind(run, lines):
     # every area passes but the custom assets (--with-custom-assets), the custom properties (--with-custom-properties), the documents
     # (--with-documents) and the approved invoice, which only its own flag (and then it runs alone) opens
     assert all(
-        r.status == "pass" for r in report.results if r.area not in ("approved_invoice", "custom_assets", "custom_properties", "documents")
+        r.status == "pass"
+        for r in report.results
+        if r.area not in ("approved_invoice", "custom_assets", "custom_properties", "documents", *NEW_AREAS)
     ), [
         (r.area, r.status, r.detail) for r in report.results
     ]
     assert results(report)["approved_invoice"].status == "skipped" and results(report)["approved_invoice"].requests == 0
+    for key in NEW_AREAS:  # the 1.5.0 areas are opt-in: skipped with their reason, not a request
+        assert results(report)[key].status == "skipped" and results(report)[key].requests == 0, key
+        assert results(report)[key].detail.startswith("not live-tested by default: "), key
     assert fake.leftovers() == []
     assert report.refused == 0 and report.cleanup.ok and report.scopes_missing == []
     assert report.summary["leftovers"] == 0 and report.summary["unresolved_intents"] == 0
@@ -1602,7 +1628,7 @@ async def test_the_requests_of_every_area_are_exactly_the_documented_ones(run):
     report = await run(fake, with_items=True, with_invoices=True)
     assert report.ok
     assert area_ops(fake, report) == {
-        **GOLDEN, "approved_invoice": [], "custom_assets": [], "custom_properties": [], "documents": [],
+        **GOLDEN, "approved_invoice": [], "custom_assets": [], "custom_properties": [], "documents": [], **{key: [] for key in NEW_AREAS},
     }  # skipped: not a request
 
 
@@ -1612,7 +1638,7 @@ async def test_the_module_docstring_lists_exactly_these_requests():
     listed: dict[str, list[str]] = {}
     current = None
     for line in lines[lines.index("Live requests per area (method and spec path, in the order they are sent; the tests pin these lists):") :]:
-        heading = re.fullmatch(r"    (\w+):", line)
+        heading = re.fullmatch(r"    (\w+)(?: \(--with-[a-z-]+\))?:", line)
         step = re.fullmatch(r"        ((?:GET|POST|PATCH|DELETE) /v1/\S+)(?:  .*)?", line)
         if heading:
             current = heading.group(1)
@@ -1621,7 +1647,8 @@ async def test_the_module_docstring_lists_exactly_these_requests():
             listed[current].append(step.group(1))
     # the projects list names the test client's location and the three ticket lookups too, with the note that an earlier area
     # of a full run has read them already: it is the list of `--only projects`
-    assert listed == {
+    # (the lists of the 1.5.0 areas are pinned against a real run in tests/test_live_areas_150.py)
+    assert {key: steps for key, steps in listed.items() if key not in NEW_AREAS} == {
         **GOLDEN,
         "projects": GOLDEN_PROJECTS_ALONE,
         "approved_invoice": GOLDEN_APPROVED,
@@ -1777,15 +1804,23 @@ async def test_the_matrix_may_only_call_its_own_tools():
     assert write_matrix.tools_for(True) == write_matrix.MATRIX_TOOLS - write_matrix.INVOICE_TOOLS  # items alone
     assert write_matrix.tools_for(False, True) == write_matrix.MATRIX_TOOLS - write_matrix.ITEM_TOOLS  # invoices alone
     assert write_matrix.tools_for(False, False) == write_matrix.tools_for(False)
-    # the approved invoice run has a tool set of its own: seven tools, two of them gated, none of the matrix's creates
+    # the approved invoice run has a tool set of its own: ten tools (eight per run), three of them gated, none of the matrix's creates
     assert write_matrix.APPROVED_INVOICE_TOOLS == {
-        "create_approved_invoice", "get_invoice", "list_invoices", "delete_invoice", "list_items", "list_contacts",
-        "list_client_locations",
+        "create_approved_invoice", "get_invoice", "list_invoices", "delete_invoice", "list_items", "list_taxes", "list_contacts",
+        "list_client_locations", "approve_invoice", "create_invoice",
     }
+    assert len(write_matrix.APPROVED_INVOICE_TOOLS) == 10 and len(write_matrix.tools_for(False, False, True)) == 8
     assert write_matrix.APPROVED_INVOICE_TOOLS <= registered
-    assert write_matrix.APPROVED_INVOICE_TOOLS & gated == {"create_approved_invoice", "delete_invoice"}
-    assert not write_matrix.APPROVED_INVOICE_TOOLS & {"create_invoice", "export_invoice_pdf", "post_alert", "create_item"}
-    assert write_matrix.tools_for(False, False, True) == write_matrix.APPROVED_INVOICE_TOOLS
+    assert write_matrix.APPROVED_INVOICE_TOOLS & gated == {"create_approved_invoice", "delete_invoice", "approve_invoice"}
+    assert not write_matrix.APPROVED_INVOICE_TOOLS & {"export_invoice_pdf", "post_alert", "create_item"}
+    # the run makes its invoice Approved in ONE of two ways: the default never calls approve_invoice or create_invoice, and
+    # --approve-via-update never calls create_approved_invoice
+    default = write_matrix.tools_for(False, False, True)
+    via_update = write_matrix.tools_for(False, False, True, approve_via_update=True)
+    assert default == write_matrix.APPROVED_INVOICE_TOOLS - {"approve_invoice", "create_invoice"} and "create_approved_invoice" in default
+    assert via_update == write_matrix.APPROVED_INVOICE_TOOLS - {"create_approved_invoice"} and {"approve_invoice", "create_invoice"} <= via_update
+    assert write_matrix.APPROVE_VIA_UPDATE_TOOLS == {"create_invoice", "approve_invoice"}
+    assert not (default | via_update) & {"export_invoice_pdf", "create_item", "update_invoice"}
 
 
 def test_create_approved_invoice_is_named_only_in_the_approved_run_s_own_tool_set_and_in_its_area():
@@ -1801,8 +1836,9 @@ def test_create_approved_invoice_is_named_only_in_the_approved_run_s_own_tool_se
         for with_invoices in (False, True):
             assert "create_approved_invoice" not in write_matrix.tools_for(with_items, with_invoices)
             assert "create_approved_invoice" not in write_matrix.tools_for(with_items, with_invoices, False)
-            # ... and the run that has the approved flag may call nothing but its own seven tools
-            assert write_matrix.tools_for(with_items, with_invoices, True) == write_matrix.APPROVED_INVOICE_TOOLS
+            # ... and the run that has the approved flag may call nothing but its own seven tools (create_approved_invoice, the default)
+            assert write_matrix.tools_for(with_items, with_invoices, True) == write_matrix.APPROVED_INVOICE_TOOLS - {"approve_invoice", "create_invoice"}
+            assert "create_approved_invoice" not in write_matrix.tools_for(with_items, with_invoices, True, approve_via_update=True)
     # nowhere in the module is the tool NAMED as a value except in that set and in the area that calls it (a call, a set
     # member, an argument): everywhere else only prose mentions it
     tree = ast.parse(inspect.getsource(write_matrix))
@@ -1826,8 +1862,8 @@ async def test_a_failing_area_fails_alone_the_rest_runs_and_the_cleanup_still_ha
     found = results(report)
     assert found["tickets"].status == "FAIL" and "update_ticket" in found["tickets"].detail
     others = [r for r in report.results if r.area != "tickets"]
-    assert [r.status for r in others] == ["pass"] * 6 + ["skipped", "skipped", "skipped", "pass", "skipped"] + ["pass"] * 2  # custom assets, custom properties, documents, approved invoice off
-    assert [r.area for r in others if r.status == "skipped"] == ["custom_assets", "custom_properties", "documents", "approved_invoice"]
+    assert [r.status for r in others] == ["pass"] * 6 + ["skipped", "skipped", "skipped", "pass", "skipped"] + ["skipped"] * len(NEW_AREAS) + ["pass"] * 2  # custom assets, custom properties, documents, approved invoice and the 1.5.0 areas off
+    assert [r.area for r in others if r.status == "skipped"] == ["custom_assets", "custom_properties", "documents", "approved_invoice", *NEW_AREAS]
     assert not report.ok and report.exit_code == 1
     assert fake.leftovers() == [] and report.cleanup.ok  # everything it had created is gone
     assert lines[-1] == "result: FAILED"
@@ -1939,7 +1975,7 @@ async def test_skip_email_leaves_the_email_area_out_and_never_touches_second(run
     fake = FakeGorelo()
     report = await run(fake, skip_email=True)
     assert report.ok and "email" not in results(report)
-    assert len(report.results) == 13  # items, custom_assets, custom_properties, documents, invoices and approved_invoice are skipped by default, and email is left out
+    assert len(report.results) == 13 + len(NEW_AREAS)  # items, custom_assets, custom_properties, documents, invoices, approved_invoice and the 1.5.0 areas are skipped by default, and email is left out
     for request in fake.mock.requests:
         body = request.json or {}
         assert body.get("ClientId") != SECOND and body.get("ContactId") != OPERATOR_CONTACT
@@ -1954,8 +1990,9 @@ async def test_only_runs_the_named_areas_in_matrix_order_and_a_dependent_area_ma
     tickets = [t for t in fake.tickets.values() if t["Title"].startswith(RUN)]
     assert len(tickets) == 1 and tickets[0]["Title"] == f"{RUN} plain ticket"  # made once, shared by comments and time
     ops = area_ops(fake, report)
-    assert ops["comments"][:5] == [
+    assert ops["comments"][:7] == [
         "GET /v1/tickets/statuses", "GET /v1/tickets/types", "GET /v1/organization/groups",
+        "GET /v1/tickets/sources", "GET /v1/tickets/priorities",
         "POST /v1/tickets", "GET /v1/tickets/{ticketId}",
     ]
 
@@ -1984,11 +2021,14 @@ def test_unknown_areas_and_empty_selections_are_usage_errors():
     ]  # and the documents right after the custom properties
     assert [a.key for a in write_matrix.AREAS] == [
         "clients", "contacts", "tickets", "comments", "email", "time", "items", "custom_assets", "custom_properties",
-        "documents", "invoices", "approved_invoice", "uptime", "projects",
+        "documents", "invoices", "approved_invoice", "alert_status", "asset_types", "client_locations", "client_domains",
+        "contact_tags", "product_charges", "invoice_update", "contracts", "comment_edits", "ticket_source", "uptime", "projects",
     ]
+    assert [a.key for a in write_matrix.AREAS if a.key in NEW_AREAS] == list(NEW_AREAS)  # the 1.5.0 areas, in the order of OPT_INS
     areas = (
         "clients, contacts, tickets, comments, email, time, items, custom_assets, custom_properties, documents, invoices, "
-        "approved_invoice, uptime, projects"
+        "approved_invoice, alert_status, asset_types, client_locations, client_domains, contact_tags, product_charges, invoice_update, "
+        "contracts, comment_edits, ticket_source, uptime, projects"
     )
     with pytest.raises(write_matrix.UsageError, match=f"the areas are {areas}"):
         write_matrix.select_areas(["bogus"], False)
@@ -2060,7 +2100,9 @@ async def test_a_leftover_fails_the_run_even_when_every_area_passed(run, lines):
     fake.fail("DELETE /v1/contacts/{contactId}", error_envelope(409, [("070901", "The contact has open tickets.")]))
     report = await run(fake, with_items=True, with_invoices=True)
     assert all(
-        r.status == "pass" for r in report.results if r.area not in ("approved_invoice", "custom_assets", "custom_properties", "documents")
+        r.status == "pass"
+        for r in report.results
+        if r.area not in ("approved_invoice", "custom_assets", "custom_properties", "documents", *NEW_AREAS)
     )
     assert not report.ok and report.exit_code == 1 and report.summary["leftovers"] == 1
     assert any("LEFTOVER   contact" in line for line in lines) and lines[-1] == "result: FAILED"
@@ -2394,7 +2436,10 @@ async def test_email_a_rejection_that_is_not_about_the_approver_still_fails_the_
 # Who a ticket would email is checked on what Gorelo STORED, before anything else is sent for it
 # --------------------------------------------------------------------------
 
-LOOKUPS = ["GET /v1/tickets/statuses", "GET /v1/tickets/types", "GET /v1/organization/groups"]
+LOOKUPS = [
+    "GET /v1/tickets/statuses", "GET /v1/tickets/types", "GET /v1/organization/groups", "GET /v1/tickets/sources",
+    "GET /v1/tickets/priorities",  # network reads since 1.5.0 (they were local tables before)
+]
 CREATE_AND_READ_BACK = ["POST /v1/tickets", "GET /v1/tickets/{ticketId}"]
 
 
@@ -2878,14 +2923,15 @@ async def test_a_default_full_run_skips_only_the_items_custom_assets_custom_prop
     assert all(
         result.status == "pass"
         for area, result in found.items()
-        if area not in ("items", "custom_assets", "custom_properties", "documents", "invoices", "approved_invoice")
+        if area not in ("items", "custom_assets", "custom_properties", "documents", "invoices", "approved_invoice", *NEW_AREAS)
     )
     assert not any("/assets/custom" in r.path for r in fake.mock.requests)
     assert report.ok and fake.items == {} and fake.invoices == {}
     assert not any("/items" in r.path or "/invoices" in r.path for r in fake.mock.requests)
     assert not any(r.method == "GET" and r.path == "/v1/contacts" for r in fake.mock.requests)  # not the precondition read
     assert area_ops(fake, report) == {
-        **GOLDEN, "items": [], "custom_assets": [], "custom_properties": [], "documents": [], "invoices": [], "approved_invoice": []
+        **GOLDEN, "items": [], "custom_assets": [], "custom_properties": [], "documents": [], "invoices": [], "approved_invoice": [],
+        **{key: [] for key in NEW_AREAS},
     }
     assert not any(r.method == "PATCH" and r.path == f"/v1/clients/{TEST_CLIENT}" for r in fake.mock.requests)  # never written
     assert report.summary["created"] == 19  # the 21 records of a run with both flags, less the product and the invoice
@@ -3613,7 +3659,7 @@ APPROVED_CREATE_BODY = {
     "ClientId": TEST_CLIENT,
     "StatusId": 5,
     "Reference": APPROVED_LABEL,
-    "LineItems": [{"ItemId": GLOBAL_PRODUCT, "Quantity": 1, "Description": APPROVED_LABEL, "UnitPrice": 1.0, "TaxId": None}],
+    "LineItems": [{"ItemId": GLOBAL_PRODUCT, "Quantity": 1, "Description": APPROVED_LABEL, "UnitPrice": 1.0, "TaxId": TAX_EXEMPT_ID}],
 }
 VOIDED_OUTCOME = "voided by the write matrix (still listed as Void)"
 READ = "GET /v1/invoices/{invoiceId}"
@@ -3667,15 +3713,16 @@ async def test_approved_invoice_the_happy_path_creates_waits_voids_and_leaves_on
     assert report.ok and report.exit_code == 0 and found.status == "pass", "\n".join(lines)
     assert [r.area for r in report.results] == ["approved_invoice"]
     # exactly the documented requests, and the cleanup that follows sends nothing: a voided invoice is a known residue
-    assert area_ops(fake, report) == {"approved_invoice": GOLDEN_APPROVED, "cleanup": []} and found.requests == 10
-    contacts, locations, items, post, readback, poll, lookup, delete, after, listing = fake.mock.requests
+    assert area_ops(fake, report) == {"approved_invoice": GOLDEN_APPROVED, "cleanup": []} and found.requests == 11
+    contacts, locations, items, taxes, post, readback, poll, lookup, delete, after, listing = fake.mock.requests
     invoice = the_invoice(fake)
     assert contacts.query["ClientIds"] == "9501" and contacts.query["PageSize"] == "200"
     assert locations.path == "/v1/clients/9501/locations"
     assert items.query["TypeIds"] == "1" and items.query["StatusIds"] == "1" and items.query["PageSize"] == "50"
-    # one line: that item, quantity 1, unit price 1.0, no tax, the label as its text and as the reference; StatusId 5; no
-    # recipient and no dates (Gorelo's defaults)
-    assert post.json == APPROVED_CREATE_BODY
+    assert taxes.path == "/v1/taxes" and taxes.method == "GET"
+    # one line: that item, quantity 1, unit price 1.0, the tax-exempt rate (TaxId 7: a null would apply the item's own tax), the label
+    # as its text and as the reference; StatusId 5; no recipient and no dates (Gorelo's defaults)
+    assert post.json == APPROVED_CREATE_BODY and post.json["LineItems"][0]["TaxId"] == TAX_EXEMPT_ID
     assert not {"RecipientEmails", "InvoiceDate", "DueDate"} & set(post.json) and fake.emailed == []
     assert readback.path == poll.path == after.path == f"/v1/invoices/{invoice['Id']}"
     assert lookup.query["Number"] == "1042" and delete.path == f"/v1/invoices/{invoice['Id']}" and delete.json is None
@@ -3704,7 +3751,7 @@ async def test_approved_invoice_the_happy_path_creates_waits_voids_and_leaves_on
     assert f"approved invoice INV-1042: pushed to the accounting system, ExternalId {external}, PaymentLink set" in notes
     assert "no-tax check passed: TotalTax is 0 and Total is 1.0 on the read after the void" in notes
     assert not any("WARNING" in note for note in notes) and not any(external in line and "PaymentLink" in line and "https" in line for line in lines)
-    assert "area approved_invoice: pass, 10 requests" in lines
+    assert "area approved_invoice: pass, 11 requests" in lines
     assert f"known undeletable: invoice {invoice['Id']}: {VOIDED_OUTCOME}" in lines
     assert "records: 1 created, 0 cleaned, 0 left over, 1 known undeletable, 0 announced without an id" in lines
     assert "result: nothing left over" not in lines  # an invoice stays in Gorelo, as Void: never claimed to be gone
@@ -3769,7 +3816,7 @@ def test_approved_invoice_the_command_line_runs_the_area_alone_with_its_flag(tmp
     )
     assert write_matrix.main(["--with-approved-invoice", "--only", "approved_invoice"]) == 0
     out = capsys.readouterr().out
-    assert "areas: approved_invoice" in out and "area approved_invoice: pass, 10 requests" in out
+    assert "areas: approved_invoice" in out and "area approved_invoice: pass, 11 requests" in out
     assert out.rstrip().endswith("result: PASSED") and fake.residue() == [f"invoice {the_invoice(fake)['Id']}"]
 
 
@@ -3806,7 +3853,8 @@ async def test_approved_invoice_is_announced_first_and_recorded_with_the_status_
     monkeypatch.setattr(Manifest, "intent", intent)
     report = await approved(fake)
     assert report.ok
-    assert seen == [("invoice", APPROVED_LABEL, {"status_id": 5})]  # announced as an invoice of status 5, nothing more
+    # announced as an invoice of status 5 with the tax-exempt rate chosen (its id and Percentage 0), nothing more
+    assert seen == [("invoice", APPROVED_LABEL, {"status_id": 5, "tax_id": TAX_EXEMPT_ID, "tax_percentage": 0})]
     kinds = [event[:2] for event in fake.events]
     assert kinds.index(("intent", "invoice")) < kinds.index(("request", "POST"))  # the intent comes before the create
 
@@ -3980,6 +4028,68 @@ async def test_approved_invoice_the_item_is_the_first_active_product_of_nobody_o
     assert next(r.json for r in fake.mock.requests if r.method == "POST")["LineItems"][0]["ItemId"] == GLOBAL_PRODUCT
 
 
+def tax_row(ident: int, name: str, percentage: float, code: str = "X") -> dict:
+    return {"Id": ident, "Name": name, "Code": code, "Percentage": percentage, "IsDefault": False, "SubTaxes": []}
+
+
+@pytest.mark.parametrize(
+    "taxes, found_text",
+    [
+        pytest.param([], "it holds none", id="no-rate-at-all"),
+        pytest.param([tax_row(8, "Sales tax", 8.5)], "it holds none", id="only-a-taxed-rate"),
+        pytest.param([tax_row(7, "Exempt", 0.0, "EX"), tax_row(8, "Zero rated", 0.0, "ZR")], "it holds none", id="zero-rates-with-other-names"),
+        pytest.param([tax_row(7, "Tax Exempt", 5.0, "TE")], "it holds none", id="the-name-with-a-rate-above-zero"),
+        pytest.param([tax_row(7, "Tax Exempt ", 0.0, "TE")], "it holds none", id="the-name-is-matched-whole-not-trimmed-or-in-part"),
+        pytest.param([tax_row(7, "Not Tax Exempt", 0.0, "TE")], "it holds none", id="the-name-is-matched-whole-not-in-part"),
+        pytest.param([tax_row(7, "Tax Exempt", 0.0, "TE"), tax_row(9, "x", 0.0, "tax exempt")], "it holds 2 (Ids 7, 9)", id="two-rates"),
+    ],
+)
+async def test_approved_invoice_without_exactly_one_tax_exempt_rate_the_area_is_skipped_with_a_note_and_nothing_is_written(
+    approved, taxes, found_text
+):
+    fake = FakeGorelo(taxes=taxes)
+    report = await approved(fake)
+    found = results(report)["approved_invoice"]
+    assert found.status == "skipped" and report.ok and found.requests == 4  # contacts, locations, items, taxes
+    assert "exactly one rate with Percentage 0 whose Name or Code is exactly 'Tax Exempt' (case-insensitive)" in found.detail
+    assert found.detail.endswith("nothing was written (no rate is guessed)") and found_text in found.detail
+    assert area_ops(fake, report)["approved_invoice"] == GOLDEN_APPROVED[:4] and fake.invoices == {}
+    assert not any(r.method != "GET" for r in fake.mock.requests) and report.summary["created"] == 0
+
+
+@pytest.mark.parametrize(
+    "rate",
+    [
+        pytest.param(tax_row(7, "TAX EXEMPT", 0.0, "TE"), id="the-name-in-capitals"),
+        pytest.param(tax_row(7, "Zero", 0.0, "tax exempt"), id="the-code"),
+        pytest.param(tax_row(7, "Tax Exempt", 0, "TE"), id="percentage-a-whole-zero"),
+    ],
+)
+async def test_approved_invoice_the_tax_exempt_rate_is_found_by_name_or_code_without_regard_to_case(approved, rate, monkeypatch):
+    seen = []
+    real = Manifest.intent
+
+    def spy(self, kind, label, details=None):
+        seen.append((kind, dict(details or {})))
+        return real(self, kind, label, details)
+
+    monkeypatch.setattr(Manifest, "intent", spy)
+    fake = FakeGorelo(taxes=[tax_row(8, "Sales tax", 8.5), rate])
+    report = await approved(fake)
+    assert results(report)["approved_invoice"].status == "pass" and report.ok
+    post = next(r for r in fake.mock.requests if r.method == "POST")
+    assert post.json["LineItems"][0]["TaxId"] == 7  # not the 8.5% rate, and never a null
+    # the choice is recorded in the manifest BEFORE the write: the intent of the invoice holds it, with its Percentage 0
+    assert ("invoice", {"status_id": 5, "tax_id": 7, "tax_percentage": 0}) in seen
+
+
+async def test_approved_invoice_the_tax_lookup_comes_after_the_item_and_before_any_write(approved):
+    fake = FakeGorelo()
+    report = await approved(fake)
+    ops = area_ops(fake, report)["approved_invoice"]
+    assert ops.index("GET /v1/items") < ops.index("GET /v1/taxes") < ops.index("POST /v1/invoices")
+
+
 # waiting for the push to the accounting system
 
 
@@ -3988,7 +4098,7 @@ async def test_approved_invoice_a_push_that_takes_a_few_reads_is_waited_for(appr
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     assert report.ok and found.status == "pass"
-    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:5], READ, *GOLDEN_APPROVED[5:]]
+    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:6], READ, *GOLDEN_APPROVED[6:]]
     assert the_invoice(fake)["ExternalId"] is not None and fake.residue()
 
 
@@ -4057,7 +4167,7 @@ async def test_approved_invoice_a_poll_read_that_fails_means_not_synced_yet_and_
     found = results(report)["approved_invoice"]
     assert found.status == "pass" and report.ok, found.detail
     ops = area_ops(fake, report)["approved_invoice"]
-    assert ops == [*GOLDEN_APPROVED[:5], *[READ] * requests, *GOLDEN_APPROVED[5:]]  # the failed poll is one more read, then the usual void
+    assert ops == [*GOLDEN_APPROVED[:6], *[READ] * requests, *GOLDEN_APPROVED[6:]]  # the failed poll is one more read, then the usual void
     assert ops.count("DELETE /v1/invoices/{invoiceId}") == 1 and area_ops(fake, report)["cleanup"] == []
     assert any(note.startswith(FAILED_READ) for note in found.notes)  # it is said, not hidden
     assert the_invoice(fake)["Status"] == {"Id": 4, "Name": "Void"} and fake.leftovers() == [] and fake.residue()
@@ -4071,7 +4181,7 @@ async def test_approved_invoice_several_failed_polls_in_a_row_are_waited_out_and
     report = await approved(fake)  # three polls after the first: reads 2 and 3 fail, read 4 sees ExternalId
     found = results(report)["approved_invoice"]
     assert found.status == "pass" and report.ok, found.detail
-    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:5], READ, READ, *GOLDEN_APPROVED[5:]]
+    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:6], READ, READ, *GOLDEN_APPROVED[6:]]
     assert len([note for note in found.notes if note.startswith("get_invoice failed at read")]) == 1  # one text, one note
 
 
@@ -4161,7 +4271,7 @@ async def test_approved_invoice_when_every_poll_read_fails_nothing_is_voided_and
     assert found.detail == f"{NOT_YET_SYNCED}{void_command(report)}"
     ops = area_ops(fake, report)
     # the read-back, then 4 polls of two requests each (a 502 is asked once more), no lookup, no DELETE
-    assert ops["approved_invoice"] == [*GOLDEN_APPROVED[:5], *[READ] * 8]
+    assert ops["approved_invoice"] == [*GOLDEN_APPROVED[:6], *[READ] * 8]
     assert not any(r.method == "DELETE" for r in fake.mock.requests)
     # the cleanup reads the invoice once, through its own plain HTTP client (no retry), and finds it still Approved
     assert ops["cleanup"] == [READ] and invoice["Status"]["Id"] == 5 and report.summary["leftovers"] == 1 and not report.ok
@@ -4181,7 +4291,7 @@ async def test_approved_invoice_the_note_of_a_failed_last_poll_says_that_no_poll
     found = results(report)["approved_invoice"]
     assert found.status == "FAIL" and found.detail.startswith(NOT_YET_SYNCED)
     # the read-back and polls 2 to 4 are one request each, the last poll (a 502, asked once more) is two
-    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:5], *[READ] * 5]
+    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:6], *[READ] * 5]
     first, last = [note for note in found.notes if note.startswith("get_invoice failed at read")]
     assert first.startswith("get_invoice failed at read 1 while waiting for the accounting system, so it is asked again at the next poll: ")
     assert last.startswith("get_invoice failed at read 4 while waiting for the accounting system, and no poll is left: ")
@@ -4208,7 +4318,7 @@ async def test_approved_invoice_a_failed_poll_does_not_hide_a_status_that_change
     assert found.status == "FAIL" and "has Status.Id 3 while waiting for the accounting system, not 5 (Approved)" in found.detail
     assert not any(r.method == "DELETE" for r in fake.mock.requests)
     # the read-back, the poll that failed, the poll that saw Paid: it stopped at the status, not at the failed read and not later
-    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:5], READ, READ]
+    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:6], READ, READ]
 
 
 async def test_approved_invoice_a_guard_refusal_while_waiting_is_never_read_as_not_synced_yet(approved, monkeypatch):
@@ -4247,7 +4357,7 @@ async def test_approved_invoice_a_read_that_answers_another_invoice_is_a_failed_
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     assert found.status == "FAIL" and found.detail == "get_invoice returned another invoice"
-    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:5], READ]  # the first poll was the last request
+    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:6], READ]  # the first poll was the last request
     assert not any(r.method == "DELETE" for r in fake.mock.requests)
 
 
@@ -4282,7 +4392,7 @@ async def test_approved_invoice_that_never_syncs_is_not_voided_the_area_fails_wi
     assert found.status == "FAIL"
     assert found.detail == f"{NOT_YET_SYNCED}{void_command(report)}"
     ops = area_ops(fake, report)
-    assert ops["approved_invoice"] == [*GOLDEN_APPROVED[:5], *[READ] * 4]  # the read-back, then 1 + 3 reads (the test's wait)
+    assert ops["approved_invoice"] == [*GOLDEN_APPROVED[:6], *[READ] * 4]  # the read-back, then 1 + 3 reads (the test's wait)
     assert not any(r.method == "DELETE" for r in fake.mock.requests)  # no lookup by Number and no DELETE: not voided
     assert ops["cleanup"] == [READ]  # read, found Approved, left for the user: the cleanup never voids without the flag
     assert invoice["Status"]["Id"] == 5 and invoice["ExternalId"] is None
@@ -4303,7 +4413,7 @@ async def test_approved_invoice_that_never_syncs_is_not_voided_the_area_fails_wi
     record = invoice_record_of(report)
     assert record.outcome == "voided by the cleanup with delete_invoice (still listed as Void)" and not record.cleaned
     assert record.details["status_id"] == 4
-    # that cleanup says what the area's hint only said in brackets: its void is in Gorelo only, the Xero copy stays open
+    # that cleanup says what the area's hint only said in brackets: its void is in Gorelo only, the accounting system's copy stays open
     assert again.voided == ["INV-1042"]
     assert lines[-2:] == [
         f"reminder: approved invoice INV-1042: {REMINDER}",
@@ -4323,7 +4433,7 @@ async def test_approved_invoice_created_as_paid_fails_the_area_and_is_left_for_t
     assert "create_approved_invoice Status.Id: expected 5 (Approved), got 3 (Paid)" in found.detail
     assert "refuses to delete or void a Paid invoice, so it is left for the user" in found.detail
     ops = area_ops(fake, report)
-    assert ops["approved_invoice"] == GOLDEN_APPROVED[:5]  # not one request after the read-back
+    assert ops["approved_invoice"] == GOLDEN_APPROVED[:6]  # not one request after the read-back
     assert ops["cleanup"] == [READ]  # the cleanup reads it, finds it Paid and leaves it
     assert not any(r.method == "DELETE" for r in fake.mock.requests)
     invoice = the_invoice(fake)
@@ -4370,7 +4480,7 @@ async def test_approved_invoice_a_failing_check_after_the_create_stops_the_area_
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     assert found.status == "FAIL" and said in found.detail
-    assert area_ops(fake, report)["approved_invoice"] == GOLDEN_APPROVED[:5]  # nothing after the read-back: no wait, no void
+    assert area_ops(fake, report)["approved_invoice"] == GOLDEN_APPROVED[:6]  # nothing after the read-back: no wait, no void
     assert not any(r.method == "DELETE" for r in fake.mock.requests)
     invoice = the_invoice(fake)
     assert invoice["Status"]["Id"] == 5 and not report.ok and report.summary["leftovers"] == 1
@@ -4406,7 +4516,7 @@ async def test_approved_invoice_with_no_number_cannot_be_found_by_delete_invoice
     assert found.detail == (
         f"approved invoice INV-1042 has no Number, so delete_invoice cannot find it; void it with: {void_command(report)}"
     )
-    assert area_ops(fake, report)["approved_invoice"] == GOLDEN_APPROVED[:6]  # up to the first read: no lookup, no DELETE
+    assert area_ops(fake, report)["approved_invoice"] == GOLDEN_APPROVED[:7]  # up to the first read: no lookup, no DELETE
     assert invoice["Status"]["Id"] == 5 and not report.ok
     assert invoice_record_of(report).details == {"status_id": 5, "number": None, "display_number": "INV-1042"}
     # the cleanup with the flag has the raw DELETE backstop for exactly this case
@@ -4426,7 +4536,7 @@ async def test_approved_invoice_a_lookup_by_number_that_lags_is_asked_again_befo
     found = results(report)["approved_invoice"]
     assert found.status == "pass" and report.ok, found.detail
     ops = area_ops(fake, report)["approved_invoice"]
-    assert ops == [*GOLDEN_APPROVED[:6], "GET /v1/invoices", *GOLDEN_APPROVED[6:]] and ops.count("DELETE /v1/invoices/{invoiceId}") == 1
+    assert ops == [*GOLDEN_APPROVED[:7], "GET /v1/invoices", *GOLDEN_APPROVED[7:]] and ops.count("DELETE /v1/invoices/{invoiceId}") == 1
     assert "delete_invoice found the invoice by its Number on attempt 2" in found.notes
 
 
@@ -4454,7 +4564,7 @@ async def test_approved_invoice_a_void_answer_that_is_not_status_4_fails_the_are
     found = results(report)["approved_invoice"]
     assert found.status == "FAIL" and "delete_invoice StatusId (Void): expected 4, got 6" in found.detail
     ops = area_ops(fake, report)
-    assert ops["approved_invoice"] == GOLDEN_APPROVED[:8]  # no get_invoice and no listing after a wrong answer
+    assert ops["approved_invoice"] == GOLDEN_APPROVED[:9]  # no get_invoice and no listing after a wrong answer
     # the matrix recorded no outcome; the cleanup read the invoice, found it void and noted the residue
     assert ops["cleanup"] == [READ]
     record = invoice_record_of(report)
@@ -4492,7 +4602,7 @@ async def test_approved_invoice_that_still_reads_as_approved_after_the_void_is_n
     report = await approved(fake)  # the answer says Void, the invoice stays Approved
     found = results(report)["approved_invoice"]
     assert found.status == "FAIL" and "get_invoice Status.Id after the void: expected 4, got 5" in found.detail
-    assert area_ops(fake, report)["approved_invoice"] == GOLDEN_APPROVED[:9]
+    assert area_ops(fake, report)["approved_invoice"] == GOLDEN_APPROVED[:10]
     record = invoice_record_of(report)
     assert record.details["status_id"] == 5 and record.outcome.startswith("left for the user: invoice INV-1042 has status Approved")
     assert report.summary["leftovers"] == 1 and report.summary["undeletable"] == 0
@@ -4539,7 +4649,7 @@ async def test_approved_invoice_a_failed_read_back_still_records_the_invoice_as_
     found = results(report)["approved_invoice"]
     assert found.status == "FAIL" and "the write succeeded but reading it back failed" in found.detail
     ops = area_ops(fake, report)
-    assert ops["approved_invoice"] == GOLDEN_APPROVED[:5]
+    assert ops["approved_invoice"] == GOLDEN_APPROVED[:6]
     # the answer was only {Id, warning}: no number to record, and the status is 5, never the 1 of a Draft
     assert invoice_record_of(report).details == {"status_id": 5, "number": None, "display_number": None}
     assert ops["cleanup"] == [READ]  # the cleanup reads it: Approved, so a leftover that needs the user
@@ -4559,10 +4669,10 @@ async def test_approved_invoice_a_create_whose_answer_was_lost_is_found_by_the_r
     fake.handlers["POST /v1/invoices"] = lost_answer
     report = await approved(fake)
     found = results(report)["approved_invoice"]
-    assert found.status == "FAIL" and "create_approved_invoice" in found.detail and found.requests == 4
+    assert found.status == "FAIL" and "create_approved_invoice" in found.detail and found.requests == 5
     ops = area_ops(fake, report)
     assert ops["cleanup"] == ["GET /v1/invoices", READ]  # the search by the run label, then the invoice it found is read
-    search = fake.mock.requests[4]
+    search = fake.mock.requests[5]
     assert search.query["ClientIds"] == "9501" and search.query["Query"] == APPROVED_LABEL
     record = invoice_record_of(report)
     assert record.label == APPROVED_LABEL and record.details == {"status_id": 5, "number": 1042, "display_number": "INV-1042"}
@@ -4580,7 +4690,7 @@ async def test_approved_invoice_a_create_gorelo_refuses_settles_its_intent_and_n
     found = results(report)["approved_invoice"]
     assert found.status == "FAIL" and "create_approved_invoice" in found.detail and "reference: Reference is too long" in found.detail
     assert report.summary["unresolved_intents"] == 0 and fake.invoices == {} and area_ops(fake, report)["cleanup"] == []
-    assert area_ops(fake, report)["approved_invoice"] == GOLDEN_APPROVED[:4]
+    assert area_ops(fake, report)["approved_invoice"] == GOLDEN_APPROVED[:5]
 
 
 async def test_approved_invoice_a_create_that_made_nothing_but_was_not_confirmed_stays_reported(approved, lines):
@@ -4615,7 +4725,7 @@ async def test_approved_invoice_a_429_on_the_create_is_not_retried_and_settles_t
     assert found.status == "FAIL" and found.detail == rate_limited
     # ONE POST was sent and answered: the client retried nothing, so the guard never saw a second Approved invoice
     assert [(r.method, r.path) for r in fake.mock.requests] == [
-        ("GET", "/v1/contacts"), ("GET", "/v1/clients/9501/locations"), ("GET", "/v1/items"), ("POST", "/v1/invoices"),
+        ("GET", "/v1/contacts"), ("GET", "/v1/clients/9501/locations"), ("GET", "/v1/items"), ("GET", "/v1/taxes"), ("POST", "/v1/invoices"),
     ]
     assert fake.invoices == {} and report.refused == 0 and [r.tripped for r in report.results] == [False]
     # a plain rejected create: its intent is settled as failed with what Gorelo said, not as "nothing was sent"
@@ -4680,7 +4790,7 @@ async def test_approved_invoice_the_429_retries_are_off_for_the_create_call_alon
     # client's normal retries. This is also the proof that the client the matrix switches is the one the tools send with.
     normal = CLIENT_RETRIES
     assert [(method, retries) for method, path, retries in seen] == [
-        ("GET", normal), ("GET", normal), ("GET", normal), ("POST", 0), ("GET", 0),
+        ("GET", normal), ("GET", normal), ("GET", normal), ("GET", normal), ("POST", 0), ("GET", 0),
         ("GET", normal), ("GET", normal), ("DELETE", normal), ("GET", normal), ("GET", normal),
     ]
     assert [client.max_429_retries for client in clients] == [normal, normal]  # the matrix's client and the cleanup's own: both normal
@@ -4815,7 +4925,7 @@ async def test_approved_invoice_one_429_on_a_poll_read_is_retried_by_the_client_
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     assert found.status == "pass" and report.ok, found.detail
-    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:5], READ, *GOLDEN_APPROVED[5:]]  # the retry is one read
+    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:6], READ, *GOLDEN_APPROVED[6:]]  # the retry is one read
     assert not any(note.startswith("get_invoice failed") for note in found.notes)  # no poll failed: nothing to note
 
 
@@ -4825,7 +4935,7 @@ async def test_approved_invoice_a_429_that_outlasts_the_clients_retries_on_a_pol
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     assert found.status == "pass" and report.ok, found.detail
-    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:5], *[READ] * GIVES_UP, *GOLDEN_APPROVED[5:]]
+    assert area_ops(fake, report)["approved_invoice"] == [*GOLDEN_APPROVED[:6], *[READ] * GIVES_UP, *GOLDEN_APPROVED[6:]]
     assert any(note.startswith(FAILED_READ + "Gorelo is rate limiting requests (HTTP 429) for get_invoice") for note in found.notes)
 
 
@@ -4849,10 +4959,10 @@ async def test_approved_invoice_one_429_on_the_lookup_or_the_delete_is_retried_b
     fake = FakeGorelo()
     if where == "lookup":
         throttled_number_lookups(fake, 1)
-        at, extra = 6, INVOICE_LIST
+        at, extra = 7, INVOICE_LIST
     else:
         fake.fail(INVOICE_DELETE, TOO_MANY)
-        at, extra = 7, INVOICE_DELETE
+        at, extra = 8, INVOICE_DELETE
     report = await approved(fake)
     found = results(report)["approved_invoice"]
     assert found.status == "pass" and report.ok, found.detail
@@ -4868,7 +4978,7 @@ async def test_approved_invoice_a_429_on_the_lookup_that_outlasts_the_clients_re
     found = results(report)["approved_invoice"]
     assert found.status == "pass" and report.ok, found.detail
     ops = area_ops(fake, report)["approved_invoice"]
-    assert ops == [*GOLDEN_APPROVED[:6], *[INVOICE_LIST] * GIVES_UP, *GOLDEN_APPROVED[6:]]  # then the second attempt: lookup, DELETE
+    assert ops == [*GOLDEN_APPROVED[:7], *[INVOICE_LIST] * GIVES_UP, *GOLDEN_APPROVED[7:]]  # then the second attempt: lookup, DELETE
     assert ops.count(INVOICE_DELETE) == 1 and area_ops(fake, report)["cleanup"] == []
     assert "delete_invoice was rate limited by Gorelo (HTTP 429) 1 time and went through on attempt 2" in found.notes
     assert not any("found the invoice by its Number" in note for note in found.notes)  # the lookup did not lag: it was throttled
@@ -4884,7 +4994,7 @@ async def test_approved_invoice_a_429_on_the_delete_that_outlasts_the_clients_re
     assert found.status == "pass" and report.ok, found.detail
     ops = area_ops(fake, report)["approved_invoice"]
     # the first attempt: the lookup, then the DELETE GIVES_UP times (Gorelo processed none of them); the second: lookup, DELETE
-    assert ops == [*GOLDEN_APPROVED[:7], *[INVOICE_DELETE] * GIVES_UP, INVOICE_LIST, *GOLDEN_APPROVED[7:]]
+    assert ops == [*GOLDEN_APPROVED[:8], *[INVOICE_DELETE] * GIVES_UP, INVOICE_LIST, *GOLDEN_APPROVED[8:]]
     assert "delete_invoice was rate limited by Gorelo (HTTP 429) 1 time and went through on attempt 2" in found.notes
     invoice = the_invoice(fake)
     assert invoice["Status"] == {"Id": 4, "Name": "Void"} and fake.residue()
@@ -4900,7 +5010,7 @@ async def test_approved_invoice_a_lagging_lookup_and_a_429_share_the_three_attem
     found = results(report)["approved_invoice"]
     assert found.status == "pass" and report.ok, found.detail
     assert area_ops(fake, report)["approved_invoice"] == [
-        *GOLDEN_APPROVED[:6], *[INVOICE_LIST] * GIVES_UP, INVOICE_LIST, *GOLDEN_APPROVED[6:]
+        *GOLDEN_APPROVED[:7], *[INVOICE_LIST] * GIVES_UP, INVOICE_LIST, *GOLDEN_APPROVED[7:]
     ]
     assert "delete_invoice found the invoice by its Number on attempt 3" in found.notes
     assert "delete_invoice was rate limited by Gorelo (HTTP 429) 1 time and went through on attempt 3" in found.notes
@@ -4934,7 +5044,7 @@ async def test_approved_invoice_a_429_that_never_stops_on_the_lookup_is_given_up
     found = results(report)["approved_invoice"]
     assert found.status == "FAIL" and found.detail == RATE_LIMITED_TEXT
     ops = area_ops(fake, report)
-    assert ops["approved_invoice"] == [*GOLDEN_APPROVED[:6], *[INVOICE_LIST] * (3 * GIVES_UP)]  # 3 attempts, no DELETE
+    assert ops["approved_invoice"] == [*GOLDEN_APPROVED[:7], *[INVOICE_LIST] * (3 * GIVES_UP)]  # 3 attempts, no DELETE
     assert ops["cleanup"] == [READ]  # the cleanup reads it and leaves it: it never voids without --void-approved
     assert not any(r.method == "DELETE" for r in fake.mock.requests)
     assert the_invoice(fake)["Status"]["Id"] == 5 and report.summary["leftovers"] == 1 and not report.ok
@@ -4950,7 +5060,7 @@ async def test_approved_invoice_a_429_that_never_stops_on_the_delete_is_given_up
     found = results(report)["approved_invoice"]
     assert found.status == "FAIL" and found.detail == RATE_LIMITED_TEXT
     ops = area_ops(fake, report)
-    assert ops["approved_invoice"] == [*GOLDEN_APPROVED[:6], *([INVOICE_LIST, *[INVOICE_DELETE] * GIVES_UP] * 3)]
+    assert ops["approved_invoice"] == [*GOLDEN_APPROVED[:7], *([INVOICE_LIST, *[INVOICE_DELETE] * GIVES_UP] * 3)]
     assert ops["cleanup"] == [READ]
     assert the_invoice(fake)["Status"]["Id"] == 5 and report.summary["leftovers"] == 1 and not report.ok
     assert write_matrix.VOID_REMINDER not in found.notes and report.voided == []
@@ -4981,8 +5091,8 @@ async def test_approved_invoice_a_429_on_the_creates_read_back_is_not_retried_an
     assert found.status == "FAIL"
     assert "the write succeeded but reading it back failed" in found.detail and "was rate limited by Gorelo (HTTP 429)" in found.detail
     ops = area_ops(fake, report)
-    assert ops["approved_invoice"] == GOLDEN_APPROVED[:5]  # the POST and ONE read-back: not asked again, nothing polled or voided
-    assert [(method, retries) for method, path, retries in seen[3:5]] == [("POST", 0), ("GET", 0)]  # no retry: it is part of the call
+    assert ops["approved_invoice"] == GOLDEN_APPROVED[:6]  # the POST and ONE read-back: not asked again, nothing polled or voided
+    assert [(method, retries) for method, path, retries in seen[4:6]] == [("POST", 0), ("GET", 0)]  # no retry: it is part of the call
     assert clients[0].max_429_retries == CLIENT_RETRIES  # and the window is closed again
     assert not any(r.method == "DELETE" for r in fake.mock.requests)
     # recorded as Approved (never as a Draft) and left for the user, with the command that voids it
@@ -5122,7 +5232,7 @@ async def test_approved_invoice_that_reads_with_tax_after_the_void_is_noted_loud
     warnings = [note for note in found.notes if note.startswith("WARNING: no-tax check FAILED: ")]
     assert len(warnings) == 1 and said in warnings[0]
     assert (
-        "so Gorelo may not have taken the explicit TaxId null as no tax; read after the void, invoice INV-1042; at the last "
+        "so Gorelo may not have applied the tax-exempt rate as no tax; read after the void, invoice INV-1042; at the last "
         "read before the void it was TotalTax "
     ) in warnings[0]
     assert not any(note.startswith("no-tax check passed") for note in found.notes)
@@ -5187,7 +5297,7 @@ def test_tax_problem_is_none_only_for_no_tax_and_exactly_one_dollar():
     ):
         text = problem(record)
         assert text is not None and text.startswith("WARNING: no-tax check FAILED: TotalTax is "), record
-        assert "(expected 0)" in text and "(expected 1.0)" in text and "TaxId null" in text
+        assert "(expected 0)" in text and "(expected 1.0)" in text and "tax-exempt rate" in text
     assert write_matrix.amount_text(0.08) == "0.08" and write_matrix.amount_text(1) == "1"
     assert [write_matrix.amount_text(v) for v in (None, "1", True, [], float("nan"))] == ["null", "str", "bool", "list", "float"]
     assert write_matrix.amount_text(write_matrix._MISSING) == "missing"
@@ -5399,7 +5509,7 @@ async def test_approved_invoice_without_an_intent_the_guard_stops_the_run_before
     fake = FakeGorelo()
 
     async def forgetful(matrix):
-        await matrix.tool("create_approved_invoice", client_id=TEST_CLIENT, line_items=[{"item_id": GLOBAL_PRODUCT, "quantity": 1, "unit_price": 1.0}], confirm=True)
+        await matrix.tool("create_approved_invoice", client_id=TEST_CLIENT, line_items=[{"item_id": GLOBAL_PRODUCT, "quantity": 1, "unit_price": 1.0, "tax_id": TAX_EXEMPT_ID}], confirm=True)
 
     monkeypatch.setattr(write_matrix, "AREAS", (write_matrix.Area("approved_invoice", forgetful),))
     report = await run(fake, areas=["approved_invoice"], with_approved_invoice=True)
@@ -5415,10 +5525,10 @@ async def test_approved_invoice_a_second_approved_invoice_in_the_same_run_is_sto
         for text in ("approved invoice", "approved invoice again"):
             label = matrix.manifest.label(text)
             await matrix.create(
-                "invoice", label, {"status_id": 5}, "create_approved_invoice",
+                "invoice", label, {"status_id": 5, "tax_id": TAX_EXEMPT_ID, "tax_percentage": 0}, "create_approved_invoice",
                 {
                     "client_id": TEST_CLIENT, "reference": label, "confirm": True,
-                    "line_items": [{"item_id": GLOBAL_PRODUCT, "quantity": 1, "unit_price": 1.0, "description": label, "no_tax": True}],
+                    "line_items": [{"item_id": GLOBAL_PRODUCT, "quantity": 1, "unit_price": 1.0, "description": label, "tax_id": TAX_EXEMPT_ID}],
                 },
                 recorded=lambda record: write_matrix.invoice_record(record, 5),
             )
@@ -5684,8 +5794,9 @@ def test_the_module_docstring_tells_the_rules_of_the_approved_run_as_the_code_ha
         "as its last line before the result",
         "a reminder line that the void is in Gorelo only: check the accounting system and void the invoice there too (Gorelo's void "
         "is not pushed to the connected accounting system, seen with Xero)",
-        # TaxId null is sent, and the totals are checked after the void, as a note
-        "no tax: TaxId is sent as an explicit null, which the guard insists on",
+        # the tax-exempt rate is the line's TaxId, and the totals are checked after the void, as a note
+        "tax_id of the tax-exempt rate, which the guard compares with the id the intent recorded",
+        "exactly ONE rate with Percentage 0 whose Name or Code is exactly \"Tax Exempt\" (case-insensitive)",
         "The read after the void also checks TotalTax 0 and Total 1.0",
         "when it reads otherwise, a loud note says the no-tax check FAILED",
         "never stop or skip the void or its bookkeeping",
@@ -5789,6 +5900,8 @@ CACHED_IN_A_FULL_RUN = [
     "GET /v1/tickets/statuses",
     "GET /v1/tickets/types",
     "GET /v1/organization/groups",
+    "GET /v1/tickets/sources",
+    "GET /v1/tickets/priorities",
 ]
 
 
@@ -5809,12 +5922,12 @@ def test_the_projects_list_of_the_docstring_is_what_only_projects_sends_with_the
     """The list used to leave out the test client's location (and the three ticket lookups), which a run of `--only
     projects` sends right after its two scope probes: a dry listing of the area was short of them."""
     listed = listed_requests("projects")
-    assert [request for request, _ in listed] == GOLDEN_PROJECTS_ALONE and len(listed) == 16
+    assert [request for request, _ in listed] == GOLDEN_PROJECTS_ALONE and len(listed) == 18
     marked = [request for request, comment in listed if "cached" in comment]
     assert marked == CACHED_IN_A_FULL_RUN[:2]  # the note of the three lookups sits on the first of them
     assert "an earlier area of the run" in dict(listed)["GET /v1/clients/{clientId}/locations"]
     assert "the tickets area ran first" in dict(listed)["GET /v1/tickets/statuses"]
-    # a full run sends the same list without those four requests
+    # a full run sends the same list without those six requests
     without = list(GOLDEN_PROJECTS_ALONE)
     for request in CACHED_IN_A_FULL_RUN:
         without.remove(request)
@@ -5827,10 +5940,10 @@ def test_the_projects_list_of_the_docstring_is_what_only_projects_sends_with_the
     ) in doc
 
 
-async def test_projects_run_alone_sends_exactly_the_sixteen_requests_the_list_names(run):
+async def test_projects_run_alone_sends_exactly_the_eighteen_requests_the_list_names(run):
     fake = FakeGorelo()
     report = await run(fake, areas=["projects"])
-    assert report.ok and results(report)["projects"].requests == 16
+    assert report.ok and results(report)["projects"].requests == 18
     assert area_ops(fake, report)["projects"] == GOLDEN_PROJECTS_ALONE
 
 
@@ -6113,9 +6226,13 @@ def test_the_command_line_passes_its_flags_and_turns_the_report_into_an_exit_sta
     assert write_matrix.main(["--with-custom-properties", "--only", "custom_properties"]) == 1
     assert write_matrix.main(["--with-documents", "--only", "documents"]) == 1
     assert write_matrix.main(["--with-custom-assets", "--with-asset-move", "--only", "custom_assets"]) == 1
+    assert write_matrix.main(["--with-approved-invoice", "--approve-via-update", "--only", "approved_invoice"]) == 1
+    for key in NEW_AREAS:  # one flag per area of 1.5.0, named like the area
+        assert write_matrix.main([f"--with-{key.replace('_', '-')}", "--only", key]) == 1
     flags = {
         "with_items": False, "with_invoices": False, "with_approved_invoice": False, "with_custom_assets": False,
-        "with_custom_properties": False, "with_documents": False, "with_asset_move": False,
+        "with_custom_properties": False, "with_documents": False, "with_asset_move": False, "approve_via_update": False,
+        **{f"with_{key}": False for key in NEW_AREAS},
     }
     assert calls == [
         {"areas": ["items", " uptime"], "skip_email": True, "leftovers": True, **flags},
@@ -6131,6 +6248,11 @@ def test_the_command_line_passes_its_flags_and_turns_the_report_into_an_exit_sta
             "areas": ["custom_assets"], "skip_email": False, "leftovers": False,
             **{**flags, "with_custom_assets": True, "with_asset_move": True},
         },
+        {"areas": ["approved_invoice"], "skip_email": False, "leftovers": False, **{**flags, "with_approved_invoice": True, "approve_via_update": True}},
+        *(
+            {"areas": [key], "skip_email": False, "leftovers": False, **{**flags, f"with_{key}": True}}
+            for key in NEW_AREAS
+        ),
     ]
 
     async def passed(**options):
@@ -6185,7 +6307,12 @@ def test_the_help_names_the_flags_and_the_areas(capsys):
                  "--with-approved-invoice", "ALONE (needs --only approved_invoice and no other flag)", "approves a $1 invoice on the test client, "
                  "which pushes it to the connected accounting system, then voids it", "also under --only approved_invoice",
                  "clients, contacts, tickets, comments, email, time, items, custom_assets, custom_properties, documents, invoices, "
-                 "approved_invoice, uptime, projects",
+                 "approved_invoice, alert_status, asset_types, client_locations, client_domains, contact_tags, product_charges, "
+                 "invoice_update, contracts, comment_edits, ticket_source, uptime, projects",
+                 "--approve-via-update", "approve_invoice (a PATCH of StatusId 5)", "void the accounting system's copy by hand",
+                 "--with-alert-status", "--with-asset-types", "--with-client-locations", "--with-client-domains", "--with-contact-tags",
+                 "--with-product-charges", "--with-invoice-update", "--with-contracts", "--with-comment-edits", "--with-ticket-source",
+                 "also under --only alert_status", "It needs the test client Active, like every write run",
                  "--with-custom-assets", "this harness never deletes a custom asset (the spec's soft DELETE is not used)", "also under --only custom_assets",
                  "--with-asset-move", "MOVE the custom asset of the custom_assets area to the second client and back",
                  "only together with the custom assets flag", "--with-documents", "creates two documents on the test client",
@@ -6368,7 +6495,7 @@ def test_documents_the_tools_are_named_apart_and_share_document_is_in_no_tool_se
     assert write_matrix.tools_for(False, with_documents=True) == (
         write_matrix.MATRIX_TOOLS - write_matrix.ITEM_TOOLS - write_matrix.INVOICE_TOOLS | write_matrix.DOCUMENT_TOOLS
     )
-    assert write_matrix.tools_for(False, False, True, False, True) == write_matrix.APPROVED_INVOICE_TOOLS  # the approved run takes nothing else
+    assert write_matrix.tools_for(False, False, True, False, True) == write_matrix.tools_for(False, False, True)  # the approved run takes nothing else
     assert '"share_document"' not in inspect.getsource(write_matrix.area_documents)  # no call by name
 
 

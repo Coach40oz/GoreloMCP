@@ -1561,7 +1561,8 @@ def test_the_cleanup_docstring_says_who_clears_what_and_when():
 def test_the_area_needs_no_tool_of_its_own_and_the_flag_does_not_widen_the_tool_set():
     assert {"get_client", "update_client"} <= write_matrix.MATRIX_TOOLS
     assert write_matrix.tools_for(False) == write_matrix.tools_for(False, False, False, False)
-    assert write_matrix.tools_for(False, False, True) == write_matrix.APPROVED_INVOICE_TOOLS  # the approved run takes no custom tool
+    assert "update_client" not in write_matrix.tools_for(False, False, True)  # the approved run takes no custom tool
+    assert write_matrix.tools_for(False, False, True) == write_matrix.APPROVED_INVOICE_TOOLS - write_matrix.APPROVE_VIA_UPDATE_TOOLS
 
 
 def test_the_area_sits_right_after_the_custom_assets_and_is_selected_by_name():
@@ -1623,7 +1624,7 @@ async def test_the_approved_invoice_flag_beside_the_custom_properties_flag_is_a_
 def test_the_module_docstring_describes_the_area_its_flag_its_record_and_its_leftover():
     text = " ".join(write_matrix.__doc__.split())
     for said in (
-        "[--with-custom-assets] [--with-asset-move] [--with-custom-properties] [--with-documents] [--with-approved-invoice]",
+        "[--with-custom-assets] [--with-asset-move] [--with-custom-properties] [--with-documents] [--with-approved-invoice [--approve-via-update]]",
         "custom_properties get_client of the TEST CLIENT, then ONE client custom field value on that client itself",
         "SKIPPED unless --with-custom-properties is given (also under --only custom_properties without it: nothing is sent, not even a read)",
         "Every update_client call with custom fields reads the client first (a GET) and refuses locally an Id the client does not list (no PATCH, no second GET)",

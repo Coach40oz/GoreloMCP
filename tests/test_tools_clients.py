@@ -1,4 +1,5 @@
-"""tools/clients.py: list_clients, get_client, create_client, update_client, list_client_locations."""
+"""tools/clients.py: list_clients, get_client, create_client, update_client, list_client_types, list_client_custom_fields,
+the client location tools and the client web domain tools."""
 
 import copy
 import json
@@ -35,6 +36,15 @@ CLIENT_9101 = "/v1/clients/9101"  # update_client: the id is in the path only (t
 LOCATIONS = "/v1/clients/9101/locations"
 CLIENT_SCALE = "1 Active, 3 Credit hold, 4 Archived"
 
+LOCATION_CREATE_PARAMS = [
+    "client_id", "name", "phone_country_code", "phone", "phone_ext", "address1", "address2", "city", "state", "country",
+    "postal_code", "time_zone", "primary_contact_id", "billing_contact_ids", "is_default", "is_default_billing",
+]
+LOCATION_UPDATE_PARAMS = [
+    "client_id", "location_id", *LOCATION_CREATE_PARAMS[1:14], "remove_billing_contact_ids", *LOCATION_CREATE_PARAMS[14:],
+    "clear_fields",
+]
+
 TOOLS = {
     # name: (kind, ops, destructive_hint, parameters in order, required parameters)
     "list_clients": (
@@ -48,17 +58,49 @@ TOOLS = {
         [
             "name", "location_name", "billing_name", "alternate_name", "domain", "location_phone_country_code",
             "location_phone", "location_phone_ext", "location_address1", "location_address2", "location_city",
-            "location_state", "location_country", "location_postal_code", "location_time_zone",
+            "location_state", "location_country", "location_postal_code", "location_time_zone", "client_type_id",
         ],
         ["name", "location_name"],
     ),
     "update_client": (
         "write", ["GET /v1/clients/{clientId}", "PATCH /v1/clients/{clientId}"], True,
-        ["client_id", "name", "status_id", "billing_name", "alternate_name", "custom_properties", "clear_custom_property_ids", "group_ids"],
+        ["client_id", "name", "status_id", "billing_name", "alternate_name", "custom_properties", "clear_custom_property_ids", "group_ids", "client_type_id"],
         ["client_id"],
     ),
     "list_client_locations": (
         "read", ["GET /v1/clients/{clientId}/locations"], False, ["client_id"], ["client_id"]
+    ),
+    "list_client_types": ("read", ["GET /v1/clients/types"], False, [], []),
+    "list_client_custom_fields": ("read", ["GET /v1/clients/custom-fields"], False, [], []),
+    "get_client_location": (
+        "read", ["GET /v1/clients/{clientId}/locations/{locationId}"], False,
+        ["client_id", "location_id"], ["client_id", "location_id"],
+    ),
+    "create_client_location": (
+        "write", ["POST /v1/clients/{clientId}/locations", "GET /v1/clients/{clientId}/locations/{locationId}"], False,
+        LOCATION_CREATE_PARAMS, ["client_id", "name"],
+    ),
+    "update_client_location": (
+        "write", ["PATCH /v1/clients/{clientId}/locations/{locationId}", "GET /v1/clients/{clientId}/locations/{locationId}"],
+        True, LOCATION_UPDATE_PARAMS, ["client_id", "location_id"],
+    ),
+    "create_client_domain": (
+        "write", ["POST /v1/clients/{clientId}/domains", "GET /v1/clients/{clientId}"], False,
+        ["client_id", "name", "expiration_date"], ["client_id", "name"],
+    ),
+    "update_client_domain": (
+        "write", ["PATCH /v1/clients/{clientId}/domains/{domainId}", "GET /v1/clients/{clientId}"], True,
+        ["client_id", "domain_id", "name", "expiration_date", "reset_expiration_date"], ["client_id", "domain_id"],
+    ),
+}
+
+# The two gated tools: registered only when deletes are enabled, kind "destructive", and always with confirm.
+GATED_TOOLS = {
+    "delete_client_location": (
+        ["DELETE /v1/clients/{clientId}/locations/{locationId}"], ["client_id", "location_id", "confirm"],
+    ),
+    "delete_client_domain": (
+        ["DELETE /v1/clients/{clientId}/domains/{domainId}"], ["client_id", "domain_id", "confirm"],
     ),
 }
 
@@ -199,11 +241,18 @@ def test_every_query_name_of_a_list_tool_is_a_query_param_of_the_op(name, spec_i
     assert {path.lower() for path in spec.field_map.values()} == allowed
 
 
+# reads of 1.5.0 that state "Resolve ids first:" and "Side effects: None (read-only)." like the other new reads
+TEMPLATE_READS = {"list_client_types", "list_client_custom_fields", "get_client_location"}
+
+
 @pytest.mark.parametrize("name", sorted(TOOLS))
 def test_docstrings_follow_the_template(name):
     spec = next(s for s in REGISTRY.specs if s.name == name)
     doc = spec.fn.__doc__
-    assert (TOOLS[name][0] == "write") == ("Side effects:" in doc)  # only writes have side effects to state
+    if name in TEMPLATE_READS:  # the 1.5.0 reads say so explicitly
+        assert "Resolve ids first:" in doc and "Side effects: None (read-only)." in doc
+    else:
+        assert (TOOLS[name][0] == "write") == ("Side effects:" in doc)  # only writes have side effects to state
     assert ("Paging:" in doc) == (name == "list_clients")
 
 
@@ -919,8 +968,10 @@ def test_update_client_declares_the_published_operation_and_no_override_is_invol
     assert "PATCH /v1/clients" not in spec_index.ops  # the collection form is gone from the published spec
     op = spec_index.op("PATCH /v1/clients/{clientId}")
     assert op.path_params == {"clientId": {"type": "integer", "format": "int64"}}
-    # GroupIds is new in contract 05200951c89e
-    assert set(op.body["fields"]) == {"Name", "StatusId", "BillingName", "AlternateName", "CustomProperties", "GroupIds"}
+    # GroupIds is new in contract 05200951c89e, ClientTypeId in 6c30770dffc0
+    assert set(op.body["fields"]) == {
+        "Name", "StatusId", "BillingName", "AlternateName", "CustomProperties", "GroupIds", "ClientTypeId",
+    }
     assert op.body["required"] == []
     assert "Id" not in op.body["fields"]
     custom = op.body["fields"]["CustomProperties"]  # contract 1b1c0cec0e9a: an upsert by Id, null Value clears
@@ -1017,7 +1068,7 @@ async def test_update_client_with_nothing_to_change_is_a_local_error(server, moc
     text = await call_tool_error(server, "update_client", {"client_id": 9101})
     assert text == (
         "nothing to update: pass at least one of name, status_id, billing_name, alternate_name, group_ids, "
-        "custom_properties or clear_custom_property_ids (only the fields you pass are changed)"
+        "client_type_id, custom_properties or clear_custom_property_ids (only the fields you pass are changed)"
     )
     assert mock_gorelo.requests == []
 
@@ -3620,3 +3671,1089 @@ async def test_the_optional_parameters_default_to_null_without_advertising_a_nul
     assert [p for p, definition in props.items() if "default" in definition] == ["page_size"]
     assert not tool.inputSchema.get("required")
     assert all("anyOf" not in p for p in props.values())
+
+
+# --------------------------------------------------------------------------
+# Contract 6c30770dffc0 (release 1.5.0): client types, client custom fields, ClientTypeId
+# --------------------------------------------------------------------------
+
+TYPES = "/v1/clients/types"
+CUSTOM_FIELDS = "/v1/clients/custom-fields"
+
+
+@pytest.fixture
+def gated_server(server_factory):
+    """core toolset with the gated tools registered."""
+    return server_factory(toolsets={"core"}, destructive=True)
+
+
+async def test_list_client_types_reads_the_unpaged_list_with_no_query(server, mock_gorelo):
+    rows = [
+        {"Id": 1, "Name": "Business", "CreatedOn": None, "UpdatedOn": None, "IsBuiltIn": True},
+        {"Id": 9, "Name": "Partner", "CreatedOn": None, "UpdatedOn": None, "IsBuiltIn": False},
+    ]
+    mock_gorelo.on("GET", TYPES, envelope(rows))
+    result = await call_tool(server, "list_client_types", {})
+    assert result == {"items": rows, "count": 2}
+    assert (mock_gorelo.last.method, mock_gorelo.last.path, mock_gorelo.last.query) == ("GET", TYPES, {})
+
+
+async def test_list_client_types_refuses_a_non_list_answer(server, mock_gorelo):
+    mock_gorelo.on("GET", TYPES, envelope({"Items": []}))
+    assert "expected Data to be a list" in await call_tool_error(server, "list_client_types", {})
+
+
+async def test_list_client_custom_fields_reads_the_unpaged_list_and_an_empty_tenant_is_count_zero(server, mock_gorelo):
+    mock_gorelo.on("GET", CUSTOM_FIELDS, envelope([]))
+    assert await call_tool(server, "list_client_custom_fields", {}) == {"items": [], "count": 0}
+    assert (mock_gorelo.last.method, mock_gorelo.last.path, mock_gorelo.last.query) == ("GET", CUSTOM_FIELDS, {})
+
+
+async def test_list_client_custom_fields_returns_the_rows_unchanged(server, mock_gorelo):
+    rows = [{
+        "Id": 4, "Variable": "contract_ref", "Name": "Contract ref", "Type": {"Id": 3, "Name": "Dropdown"},
+        "Description": None, "IsRequired": True, "DefaultValue": "A", "Options": ["A", "B"], "IsHidden": False,
+        "CreatedOn": None, "UpdatedOn": None,
+    }]
+    mock_gorelo.on("GET", CUSTOM_FIELDS, envelope(rows))
+    assert (await call_tool(server, "list_client_custom_fields", {}))["items"] == rows
+
+
+def test_the_two_lookup_tools_say_what_their_ids_feed():
+    types = flat(clients_module.list_client_types.__doc__)
+    assert "client_type_id" in types and "create_client" in types and "update_client" in types
+    fields = flat(clients_module.list_client_custom_fields.__doc__)
+    assert "custom_properties" in fields and "clear_custom_property_ids" in fields and "update_client" in fields
+
+
+async def test_create_client_sends_client_type_id_as_clienttypeid(server, mock_gorelo):
+    mock_gorelo.on("POST", CLIENTS, envelope(client_record(9120, "MCPTEST-T", ClientTypeId=9)))
+    result = await call_tool(server, "create_client", {"name": "MCPTEST-T", "location_name": "HQ", "client_type_id": 9})
+    assert mock_gorelo.last.json == {"Name": "MCPTEST-T", "ClientTypeId": 9, "Location": {"Name": "HQ"}}
+    assert result["ClientTypeId"] == 9
+
+
+async def test_create_client_without_a_type_sends_none_and_invents_none(server, mock_gorelo):
+    mock_gorelo.on("POST", CLIENTS, envelope(client_record(9121, "MCPTEST-U")))
+    await call_tool(server, "create_client", {"name": "MCPTEST-U", "location_name": "HQ"})
+    assert "ClientTypeId" not in mock_gorelo.last.json
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "3", 2.5])
+async def test_client_type_id_must_be_a_strict_positive_id_on_create_and_update(server, mock_gorelo, bad):
+    text = await call_tool_error(server, "create_client", {"name": "N", "location_name": "HQ", "client_type_id": bad})
+    assert "client_type_id" in text
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, "client_type_id": bad})
+    assert "client_type_id" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_update_client_sends_client_type_id_alone_as_one_patch_with_no_read(server, mock_gorelo):
+    mock_gorelo.on("PATCH", CLIENT_9101, envelope(client_record(9101, ClientTypeId=9)))
+    result = await call_tool(server, "update_client", {"client_id": 9101, "client_type_id": 9})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("PATCH", CLIENT_9101)]
+    assert mock_gorelo.last.json == {"ClientTypeId": 9}
+    assert result["ClientTypeId"] == 9
+
+
+async def test_update_client_type_id_travels_with_the_other_fields(server, mock_gorelo):
+    mock_gorelo.on("PATCH", CLIENT_9101, envelope(client_record(9101)))
+    await call_tool(server, "update_client", {"client_id": 9101, "name": "New", "client_type_id": 2, "status_id": 3})
+    assert mock_gorelo.last.json == {"Name": "New", "StatusId": 3, "ClientTypeId": 2}
+
+
+async def test_update_client_with_a_type_and_a_custom_field_keeps_the_read_check_read_flow(server, mock_gorelo):
+    mock_gorelo.on("GET", CLIENT_9101, in_order(
+        envelope(client_with_custom_properties(saved=(), cleared=(5,))),
+        envelope(client_with_custom_properties(saved=(5,), ClientTypeId=2)),
+    ))
+    mock_gorelo.on("PATCH", CLIENT_9101, envelope(client_record(9101)))
+    result = await call_tool(
+        server, "update_client",
+        {"client_id": 9101, "client_type_id": 2, "custom_properties": [{"id": 5, "value": "x"}]},
+    )
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH", "GET"]
+    assert mock_gorelo.calls("PATCH", CLIENT_9101)[0].json == {
+        "ClientTypeId": 2, "CustomProperties": [{"Id": 5, "Value": "x"}]
+    }
+    assert result["ClientTypeId"] == 2
+
+
+@pytest.mark.parametrize("tool, arguments", [
+    ("create_client", {"name": "N", "location_name": "HQ", "client_type_id": 99}),
+    ("update_client", {"client_id": 9101, "client_type_id": 99}),
+])
+async def test_a_gorelo_error_about_the_client_type_names_client_type_id(server, mock_gorelo, tool, arguments):
+    route = ("POST", CLIENTS) if tool == "create_client" else ("PATCH", CLIENT_9101)
+    mock_gorelo.on(*route, error_envelope(400, [("070101", "Client type 99 does not exist.", "ClientTypeId")]))
+    text = await call_tool_error(server, tool, arguments)
+    assert text == trace(f"Gorelo rejected {tool} (HTTP 400, code 070101): client_type_id: Client type 99 does not exist.")
+
+
+async def test_update_client_offers_no_way_to_clear_the_type(server):
+    # the spec text of UpdateClientCommand.ClientTypeId: "Leave null to keep the current value."
+    tool = next(t for t in await list_tools(server) if t.name == "update_client")
+    assert "clear_fields" not in tool.inputSchema["properties"]
+    assert "cannot be cleared" in tool.inputSchema["properties"]["client_type_id"]["description"]
+    assert "list_client_types" in tool.inputSchema["properties"]["client_type_id"]["description"]
+    create = next(t for t in await list_tools(server) if t.name == "create_client")
+    assert "list_client_types" in create.inputSchema["properties"]["client_type_id"]["description"]
+
+
+@pytest.mark.skipif(not LATEST_SPEC.exists(), reason="backups/swagger-latest.json is missing")
+def test_the_spec_text_says_the_type_is_kept_when_null_and_the_location_and_domain_rules():
+    """The promises the client tools make about null, 409 and clears are pinned to the raw spec text (contract 6c30770dffc0)."""
+    spec = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))
+    schemas = spec["components"]["schemas"]
+    text = lambda value: " ".join(value.split())  # noqa: E731
+    assert "Leave null to keep the current value" in text(schemas["UpdateClientCommand"]["properties"]["ClientTypeId"]["description"])
+    patch = text(spec["paths"]["/v1/clients/{clientId}/locations/{locationId}"]["patch"]["description"])
+    assert "null clears a clearable one" in patch and "answers 409" in patch
+    clearable = {
+        name for name, prop in schemas["UpdateClientLocationCommand"]["properties"].items()
+        if "Send null to clear it" in text(prop["description"])
+    }
+    assert clearable == {
+        "PhoneCountryCode", "Phone", "PhoneExt", "Address1", "Address2", "City", "State", "Country", "PostalCode",
+        "TimeZone", "PrimaryContactId",
+    }
+    assert "[] clears them" in text(schemas["UpdateClientLocationCommand"]["properties"]["BillingContactIds"]["description"])
+    delete = text(spec["paths"]["/v1/clients/{clientId}/locations/{locationId}"]["delete"]["description"])
+    assert "default location, its default billing location or its only location" in delete
+    assert "open tickets, assets, active contacts, contracts, products or bundles" in delete
+    assert "Deleting an already-deleted location succeeds" in delete
+    domain = text(spec["paths"]["/v1/clients/{clientId}/domains/{domainId}"]["patch"]["description"])
+    assert "null returns the expiry to the registry's date" in domain
+    assert "appears in the client's Domains" in text(spec["paths"]["/v1/clients/{clientId}/domains"]["post"]["description"])
+
+
+# --------------------------------------------------------------------------
+# Client locations
+# --------------------------------------------------------------------------
+
+LOC_9001 = "/v1/clients/9101/locations/9001"
+LOC_9005 = "/v1/clients/9101/locations/9005"
+
+
+def full_location(location_id=9005, **extra):
+    record = location_record(location_id, IsDefault=False, IsDefaultBilling=False, Name="Branch")
+    record.update(extra)
+    return record
+
+
+async def test_get_client_location_reads_the_single_location(server, mock_gorelo):
+    mock_gorelo.on("GET", LOC_9001, envelope(location_record()))
+    result = await call_tool(server, "get_client_location", {"client_id": 9101, "location_id": 9001})
+    assert result == location_record()
+    request = mock_gorelo.last
+    assert (request.method, request.path, request.query, request.content) == ("GET", LOC_9001, {}, b"")
+
+
+async def test_get_client_location_maps_a_404_and_the_ids(server, mock_gorelo):
+    mock_gorelo.on("GET", LOC_9001, in_order(
+        error_envelope(404, [("070202", "The requested resource was not found.")]),
+        error_envelope(400, [("070101", "The id is not valid.", "locationId")]),
+    ))
+    text = await call_tool_error(server, "get_client_location", {"client_id": 9101, "location_id": 9001})
+    assert text == trace("Gorelo rejected get_client_location (HTTP 404, code 070202): The requested resource was not found.")
+    text = await call_tool_error(server, "get_client_location", {"client_id": 9101, "location_id": 9001})
+    assert text == trace("Gorelo rejected get_client_location (HTTP 400, code 070101): location_id: The id is not valid.")
+
+
+@pytest.mark.parametrize("arguments, param", [
+    ({"client_id": 0, "location_id": 1}, "client_id"),
+    ({"client_id": 1, "location_id": 0}, "location_id"),
+    ({"client_id": 1, "location_id": True}, "location_id"),
+    ({"client_id": "1", "location_id": 1}, "client_id"),
+])
+async def test_get_client_location_refuses_bad_ids_before_any_http(server, mock_gorelo, arguments, param):
+    assert param in await call_tool_error(server, "get_client_location", arguments)
+    assert mock_gorelo.requests == []
+
+
+async def test_get_client_location_refuses_an_empty_answer(server, mock_gorelo):
+    mock_gorelo.on("GET", LOC_9001, envelope(None))
+    await call_tool_error(server, "get_client_location", {"client_id": 9101, "location_id": 9001})
+
+
+EVERY_LOCATION_ARGUMENT = {
+    "client_id": 9101, "name": "Branch Office", "phone_country_code": "NZ", "phone": "09 123 4567", "phone_ext": "12",
+    "address1": "12 Queen Street", "address2": "Level 2", "city": "Auckland", "state": "Auckland", "country": "New Zealand",
+    "postal_code": "1010", "time_zone": "Pacific/Auckland", "primary_contact_id": 501, "billing_contact_ids": [502, 503],
+    "is_default": True, "is_default_billing": False,
+}
+EVERY_LOCATION_BODY = {
+    "Name": "Branch Office", "PhoneCountryCode": "NZ", "Phone": "09 123 4567", "PhoneExt": "12",
+    "Address1": "12 Queen Street", "Address2": "Level 2", "City": "Auckland", "State": "Auckland",
+    "Country": "New Zealand", "PostalCode": "1010", "TimeZone": "Pacific/Auckland", "PrimaryContactId": 501,
+    "BillingContactIds": [502, 503], "IsDefault": True, "IsDefaultBilling": False,
+}
+
+
+async def test_create_client_location_sends_every_field_under_its_pascal_name_then_reads_it_back(server, mock_gorelo):
+    mock_gorelo.on("POST", LOCATIONS, envelope(full_location(9005)))
+    mock_gorelo.on("GET", LOC_9005, envelope(full_location(9005, Name="Branch Office")))
+    result = await call_tool(server, "create_client_location", EVERY_LOCATION_ARGUMENT)
+    post, get = mock_gorelo.requests
+    assert (post.method, post.path, post.query) == ("POST", LOCATIONS, {})
+    assert post.json == EVERY_LOCATION_BODY
+    assert (get.method, get.path, get.query) == ("GET", LOC_9005, {})
+    assert result == full_location(9005, Name="Branch Office")  # the read-back, not the POST answer
+
+
+async def test_create_client_location_with_only_the_required_fields_sends_only_those(server, mock_gorelo):
+    mock_gorelo.on("POST", LOCATIONS, envelope(full_location(9005)))
+    mock_gorelo.on("GET", LOC_9005, envelope(full_location(9005)))
+    await call_tool(server, "create_client_location", {"client_id": 9101, "name": "Annex"})
+    assert mock_gorelo.calls("POST", LOCATIONS)[0].json == {"Name": "Annex"}
+
+
+async def test_create_client_location_sends_the_default_flags_false_when_the_caller_says_false(server, mock_gorelo):
+    mock_gorelo.on("POST", LOCATIONS, envelope(full_location(9005)))
+    mock_gorelo.on("GET", LOC_9005, envelope(full_location(9005)))
+    await call_tool(server, "create_client_location", {"client_id": 9101, "name": "A", "is_default": False})
+    assert mock_gorelo.calls("POST", LOCATIONS)[0].json == {"Name": "A", "IsDefault": False}
+
+
+async def test_create_client_location_returns_id_and_a_warning_when_the_read_back_fails(server, mock_gorelo):
+    mock_gorelo.on("POST", LOCATIONS, envelope(full_location(9005)))
+    mock_gorelo.on("GET", LOC_9005, error_envelope(500, [("090500", "Internal error.")]))
+    result = await call_tool(server, "create_client_location", {"client_id": 9101, "name": "Annex"})
+    assert result["Id"] == 9005 and "the write succeeded; re-reading it failed" in result["warning"]
+    assert "Do not repeat the write" in result["warning"]
+    assert len(mock_gorelo.calls("POST", LOCATIONS)) == 1
+
+
+@pytest.mark.parametrize("answer", [None, {}, True, [], {"Name": "x"}])
+async def test_create_client_location_without_an_id_in_the_answer_is_a_write_unconfirmed_error(server, mock_gorelo, answer):
+    mock_gorelo.on("POST", LOCATIONS, envelope(answer))
+    text = await call_tool_error(server, "create_client_location", {"client_id": 9101, "name": "Annex"})
+    assert "may have been applied" in text or "Verify" in text
+    assert [r.method for r in mock_gorelo.requests] == ["POST"]
+
+
+@pytest.mark.parametrize(
+    "extra, fragment",
+    [
+        ({"name": "  "}, "name:"),
+        ({"phone": "09 123 4567"}, "phone_country_code: required when phone is given"),
+        ({"phone_country_code": "NZ"}, "phone_country_code: Gorelo refuses a region code without its phone number"),
+        ({"phone": "09 123", "phone_country_code": "64"}, "phone_country_code: expected a 2 letter ISO region code"),
+        ({"phone": "09 123", "phone_country_code": "nz"}, "phone_country_code: expected a 2 letter ISO region code"),
+        ({"city": ""}, "city:"),
+        ({"address1": "  "}, "address1:"),
+        ({"billing_contact_ids": []}, "billing_contact_ids: must not be an empty list"),
+        ({"billing_contact_ids": list(range(1, 102))}, "billing_contact_ids: at most 100 values"),
+        ({"billing_contact_ids": [0]}, "billing_contact_ids"),
+        ({"primary_contact_id": 0}, "primary_contact_id"),
+        ({"primary_contact_id": True}, "primary_contact_id"),
+        ({"is_default": "yes"}, "is_default"),
+        ({"is_default_billing": 1}, "is_default_billing"),
+        ({"client_id": 0}, "client_id"),
+    ],
+)
+async def test_create_client_location_local_errors_name_the_parameter_and_send_nothing(server, mock_gorelo, extra, fragment):
+    text = await call_tool_error(server, "create_client_location", {"client_id": 9101, "name": "Annex", **extra})
+    assert fragment in text and mock_gorelo.requests == []
+
+
+async def test_create_client_location_requires_client_id_and_name(server, mock_gorelo):
+    for missing in ("client_id", "name"):
+        arguments = {"client_id": 9101, "name": "Annex"}
+        del arguments[missing]
+        assert missing in await call_tool_error(server, "create_client_location", arguments)
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("property_name, param", [
+    ("Name", "name"), ("PhoneCountryCode", "phone_country_code"), ("Phone", "phone"), ("PhoneExt", "phone_ext"),
+    ("Address1", "address1"), ("Address2", "address2"), ("City", "city"), ("State", "state"), ("Country", "country"),
+    ("PostalCode", "postal_code"), ("TimeZone", "time_zone"), ("PrimaryContactId", "primary_contact_id"),
+    ("BillingContactIds", "billing_contact_ids"), ("IsDefault", "is_default"), ("IsDefaultBilling", "is_default_billing"),
+    ("clientId", "client_id"),
+])
+async def test_create_client_location_maps_a_gorelo_error_to_the_snake_case_parameter(server, mock_gorelo, property_name, param):
+    mock_gorelo.on("POST", LOCATIONS, error_envelope(400, [("070101", "Value is not valid.", property_name)]))
+    text = await call_tool_error(server, "create_client_location", {"client_id": 9101, "name": "Annex"})
+    assert text == trace(f"Gorelo rejected create_client_location (HTTP 400, code 070101): {param}: Value is not valid.")
+
+
+async def test_create_client_location_on_the_internal_client_shows_the_409(server, mock_gorelo):
+    mock_gorelo.on("POST", LOCATIONS, error_envelope(409, [("070409", "The internal client's locations are managed in Gorelo.")]))
+    text = await call_tool_error(server, "create_client_location", {"client_id": 9101, "name": "Annex"})
+    assert "HTTP 409" in text and "managed in Gorelo" in text
+    assert [r.method for r in mock_gorelo.requests] == ["POST"]
+
+
+async def test_create_client_location_that_times_out_says_gorelo_did_not_confirm_and_is_not_repeated(server, mock_gorelo):
+    mock_gorelo.on("POST", LOCATIONS, httpx.ReadTimeout("slow"))
+    text = await call_tool_error(server, "create_client_location", {"client_id": 9101, "name": "Annex"})
+    assert text.startswith("Gorelo did not confirm create_client_location") and "Verify with a read before retrying" in text
+    assert [r.method for r in mock_gorelo.requests] == ["POST"]
+
+
+def test_create_client_location_text_carries_the_spec_rules():
+    doc = flat(clients_module.create_client_location.__doc__)
+    assert "MOVE that flag from the client's current default location" in doc
+    assert "active contacts of this client" in doc and "The internal client answers 409" in doc
+    assert "Side effects:" in doc
+
+
+async def test_update_client_location_sends_only_the_changed_fields_then_reads_it_back(server, mock_gorelo):
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record(Name="Renamed")))
+    mock_gorelo.on("GET", LOC_9001, envelope(location_record(Name="Renamed")))
+    result = await call_tool(server, "update_client_location", {"client_id": 9101, "location_id": 9001, "name": "Renamed"})
+    patch, get = mock_gorelo.requests
+    assert (patch.method, patch.path, patch.query) == ("PATCH", LOC_9001, {})
+    assert patch.json == {"Name": "Renamed"}
+    assert (get.method, get.path) == ("GET", LOC_9001)
+    assert result == location_record(Name="Renamed")
+
+
+async def test_update_client_location_sends_every_field_under_its_pascal_name(server, mock_gorelo):
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    mock_gorelo.on("GET", LOC_9001, envelope(location_record(BillingContactIds="[]")))
+    arguments = {**EVERY_LOCATION_ARGUMENT, "location_id": 9001}
+    await call_tool(server, "update_client_location", arguments)
+    assert mock_gorelo.calls("PATCH", LOC_9001)[0].json == EVERY_LOCATION_BODY
+
+
+async def test_update_client_location_clear_fields_send_null_for_each_clearable_field(server, mock_gorelo):
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    mock_gorelo.on("GET", LOC_9001, envelope(location_record()))
+    clearable = list(clients_module.LOCATION_CLEARABLE)
+    await call_tool(server, "update_client_location", {"client_id": 9101, "location_id": 9001, "clear_fields": clearable})
+    body = mock_gorelo.calls("PATCH", LOC_9001)[0].json
+    assert body == {
+        "PhoneCountryCode": None, "Phone": None, "PhoneExt": None, "Address1": None, "Address2": None, "City": None,
+        "State": None, "Country": None, "PostalCode": None, "TimeZone": None, "PrimaryContactId": None,
+    }
+    assert "Name" not in body and "IsDefault" not in body and "IsDefaultBilling" not in body and "BillingContactIds" not in body
+
+
+async def test_update_client_location_offers_clear_only_for_what_the_spec_clears_with_null(server):
+    tool = next(t for t in await list_tools(server) if t.name == "update_client_location")
+    items = tool.inputSchema["properties"]["clear_fields"]["items"]
+    assert set(items["enum"]) == {
+        "phone_country_code", "phone", "phone_ext", "address1", "address2", "city", "state", "country", "postal_code",
+        "time_zone", "primary_contact_id",
+    }
+    assert not {"name", "is_default", "is_default_billing", "billing_contact_ids"} & set(items["enum"])
+
+
+async def test_update_client_location_empty_billing_contact_list_clears_with_an_empty_array(server, mock_gorelo):
+    # a location with no billing contact answers the text "[]": [] then drops nothing, so nothing has to be named
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    mock_gorelo.on("GET", LOC_9001, envelope(location_record(BillingContactIds="[]")))
+    await call_tool(server, "update_client_location", {"client_id": 9101, "location_id": 9001, "billing_contact_ids": []})
+    assert mock_gorelo.calls("PATCH", LOC_9001)[0].json == {"BillingContactIds": []}
+
+
+async def test_update_client_location_sends_false_default_flags_and_the_409_is_gorelos(server, mock_gorelo):
+    mock_gorelo.on("PATCH", LOC_9001, error_envelope(409, [("070409", "The default location cannot be cleared.", "IsDefault")]))
+    text = await call_tool_error(server, "update_client_location", {"client_id": 9101, "location_id": 9001, "is_default": False})
+    assert mock_gorelo.calls("PATCH", LOC_9001)[0].json == {"IsDefault": False}
+    assert text == trace("Gorelo rejected update_client_location (HTTP 409, code 070409): is_default: The default location cannot be cleared.")
+
+
+async def test_update_client_location_with_a_changed_phone_does_not_invent_a_region(server, mock_gorelo):
+    # a stored region may exist: whether the location has one is Gorelo's to say
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    mock_gorelo.on("GET", LOC_9001, envelope(location_record()))
+    await call_tool(server, "update_client_location", {"client_id": 9101, "location_id": 9001, "phone": "2025550142"})
+    assert mock_gorelo.calls("PATCH", LOC_9001)[0].json == {"Phone": "2025550142"}
+
+
+@pytest.mark.parametrize(
+    "extra, fragment",
+    [
+        ({}, "nothing to update: pass at least one of name, phone_country_code"),
+        ({"clear_fields": []}, "clear_fields: must not be an empty list"),
+        ({"name": " "}, "name:"),
+        ({"city": ""}, 'city: must be text that is not empty or whitespace only; to remove the stored value pass clear_fields=["city"]'),
+        ({"phone_country_code": "1"}, "phone_country_code: expected a 2 letter ISO region code"),
+        ({"city": "X", "clear_fields": ["city"]}, "city: cannot be given a value and listed in clear_fields"),
+        ({"phone_country_code": "NZ", "clear_fields": ["phone"]}, "phone_country_code: cannot be set while phone is cleared"),
+        ({"phone": "09 1", "clear_fields": ["phone_country_code"]}, "phone_country_code: cannot be cleared while phone is given"),
+        ({"billing_contact_ids": list(range(1, 102))}, "billing_contact_ids: at most 100 values"),
+        ({"billing_contact_ids": [-1]}, "billing_contact_ids"),
+        ({"primary_contact_id": 0}, "primary_contact_id"),
+        ({"is_default": "true"}, "is_default"),
+        ({"clear_fields": ["name"]}, "clear_fields"),
+        ({"clear_fields": ["is_default"]}, "clear_fields"),
+        ({"clear_fields": ["billing_contact_ids"]}, "clear_fields"),
+        ({"location_id": 0}, "location_id"),
+    ],
+)
+async def test_update_client_location_local_errors_name_the_parameter_and_send_nothing(server, mock_gorelo, extra, fragment):
+    text = await call_tool_error(server, "update_client_location", {"client_id": 9101, "location_id": 9001, **extra})
+    assert fragment in text and mock_gorelo.requests == []
+
+
+def test_the_location_clear_list_names_the_reason_for_what_it_refuses():
+    for name, fragment in (
+        ("billing_contact_ids", "billing_contact_ids=[]"),
+        ("is_default", "only moves by marking another location"),
+        ("is_default_billing", "only moves by marking another location"),
+        ("name", "pass a new name instead"),
+    ):
+        with pytest.raises(ValueError, match=re.escape(fragment)):
+            clients_module._location_clear_list([name])
+    assert clients_module._location_clear_list(["city", "city", "phone"]) == ["city", "phone"]
+    with pytest.raises(ValueError, match="cannot be cleared; allowed"):
+        clients_module._location_clear_list(["nope"])
+
+
+@pytest.mark.parametrize("property_name, param", [
+    ("Name", "name"), ("PhoneCountryCode", "phone_country_code"), ("PrimaryContactId", "primary_contact_id"),
+    ("BillingContactIds", "billing_contact_ids"), ("IsDefaultBilling", "is_default_billing"),
+    ("locationId", "location_id"), ("clientId", "client_id"),
+])
+async def test_update_client_location_maps_a_gorelo_error_to_the_snake_case_parameter(server, mock_gorelo, property_name, param):
+    mock_gorelo.on("PATCH", LOC_9001, error_envelope(400, [("070101", "Value is not valid.", property_name)]))
+    text = await call_tool_error(server, "update_client_location", {"client_id": 9101, "location_id": 9001, "name": "X"})
+    assert text == trace(f"Gorelo rejected update_client_location (HTTP 400, code 070101): {param}: Value is not valid.")
+
+
+async def test_update_client_location_a_404_is_gorelos_and_nothing_is_read_back(server, mock_gorelo):
+    mock_gorelo.on("PATCH", LOC_9001, error_envelope(404, [("070202", "The requested resource was not found.")]))
+    text = await call_tool_error(server, "update_client_location", {"client_id": 9101, "location_id": 9001, "name": "X"})
+    assert "HTTP 404" in text and [r.method for r in mock_gorelo.requests] == ["PATCH"]
+
+
+async def test_update_client_location_returns_id_and_warning_when_the_read_back_fails(server, mock_gorelo):
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    mock_gorelo.on("GET", LOC_9001, error_envelope(500, [("090500", "Internal error.")]))
+    result = await call_tool(server, "update_client_location", {"client_id": 9101, "location_id": 9001, "name": "X"})
+    assert result["Id"] == 9001 and "Do not repeat the write" in result["warning"]
+
+
+@pytest.mark.parametrize("answer", [None, {}, False, []])
+async def test_update_client_location_with_no_record_in_the_answer_is_a_write_unconfirmed_error(server, mock_gorelo, answer):
+    mock_gorelo.on("PATCH", LOC_9001, envelope(answer))
+    text = await call_tool_error(server, "update_client_location", {"client_id": 9101, "location_id": 9001, "name": "X"})
+    assert "may have been applied" in text or "Verify" in text
+    assert [r.method for r in mock_gorelo.requests] == ["PATCH"]
+
+
+async def test_update_client_location_that_times_out_is_not_repeated(server, mock_gorelo):
+    mock_gorelo.on("PATCH", LOC_9001, httpx.ReadTimeout("slow"))
+    text = await call_tool_error(server, "update_client_location", {"client_id": 9101, "location_id": 9001, "name": "X"})
+    assert text.startswith("Gorelo did not confirm update_client_location") and "Verify with a read before retrying" in text
+    assert [r.method for r in mock_gorelo.requests] == ["PATCH"]
+
+
+def test_update_client_location_text_carries_the_spec_rules():
+    doc = flat(clients_module.update_client_location.__doc__)
+    assert "name and the two default flags cannot be cleared (the default only moves by marking another location)" in doc
+    assert "billing_contact_ids replaces the whole list ([] clears)" in doc
+    assert "a contact taken off the billing list leaves the client's contracts" in doc
+
+
+async def test_the_location_tools_name_the_tools_that_resolve_their_ids(server):
+    tools = {t.name: t for t in await list_tools(server)}
+    for name in ("get_client_location", "create_client_location", "update_client_location"):
+        assert "list_clients" in tools[name].inputSchema["properties"]["client_id"]["description"]
+    for name in ("get_client_location", "update_client_location"):
+        assert "list_client_locations" in tools[name].inputSchema["properties"]["location_id"]["description"]
+    for name in ("create_client_location", "update_client_location"):
+        for param in ("primary_contact_id", "billing_contact_ids"):
+            description = tools[name].inputSchema["properties"][param]["description"]
+            assert "list_contacts" in description and "ACTIVE" in description or "active" in description
+
+
+async def test_location_ids_given_as_text_or_booleans_are_refused_by_the_schema(server, mock_gorelo):
+    for tool, base in (
+        ("get_client_location", {}),
+        ("update_client_location", {"name": "X"}),
+    ):
+        for bad in (True, "9001", 9001.5):
+            text = await call_tool_error(server, tool, {"client_id": 9101, "location_id": bad, **base})
+            assert "location_id" in text
+    assert mock_gorelo.requests == []
+
+
+# ---- update_client_location reads the billing contacts first and refuses to drop one silently ----
+
+
+def with_billing(text, **extra):
+    return location_record(BillingContactIds=text, **extra)
+
+
+async def test_update_client_location_with_billing_contacts_reads_the_location_then_writes_then_reads_back(server, mock_gorelo):
+    mock_gorelo.on("GET", LOC_9001, in_order(envelope(with_billing("41,42")), envelope(with_billing("41,42,43"))))
+    mock_gorelo.on("PATCH", LOC_9001, envelope(with_billing("41,42")))
+    result = await call_tool(
+        server, "update_client_location", {"client_id": 9101, "location_id": 9001, "billing_contact_ids": [41, 42, 43]}
+    )
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", LOC_9001), ("PATCH", LOC_9001), ("GET", LOC_9001)]
+    assert mock_gorelo.requests[0].query == {} and mock_gorelo.requests[0].content == b""
+    assert mock_gorelo.requests[1].json == {"BillingContactIds": [41, 42, 43]}
+    assert result == with_billing("41,42,43")  # nothing was taken off: no note, no warning
+
+
+async def test_update_client_location_without_billing_contacts_does_not_read_first(server, mock_gorelo):
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    mock_gorelo.on("GET", LOC_9001, envelope(location_record()))
+    await call_tool(server, "update_client_location", {"client_id": 9101, "location_id": 9001, "city": "Tacoma"})
+    assert [r.method for r in mock_gorelo.requests] == ["PATCH", "GET"]
+
+
+async def test_a_billing_list_that_drops_a_current_contact_is_refused_before_any_patch(server, mock_gorelo):
+    mock_gorelo.on("GET", LOC_9001, envelope(with_billing("41,42")))
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    text = await call_tool_error(
+        server, "update_client_location", {"client_id": 9101, "location_id": 9001, "billing_contact_ids": [41]}
+    )
+    assert "billing_contact_ids:" in text and "billing contact(s) 42 would be removed" in text
+    assert "current list: 41, 42" in text and "remove_billing_contact_ids" in text and "client's contracts" in text
+    assert "Nothing was changed" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]  # the read only: no PATCH
+
+
+async def test_naming_the_dropped_contact_in_remove_billing_contact_ids_allows_it_and_the_result_confirms_it(server, mock_gorelo):
+    mock_gorelo.on("GET", LOC_9001, in_order(envelope(with_billing("41,42")), envelope(with_billing("41"))))
+    mock_gorelo.on("PATCH", LOC_9001, envelope(with_billing("41")))
+    result = await call_tool(
+        server,
+        "update_client_location",
+        {"client_id": 9101, "location_id": 9001, "billing_contact_ids": [41], "remove_billing_contact_ids": [42]},
+    )
+    assert mock_gorelo.calls("PATCH", LOC_9001)[0].json == {"BillingContactIds": [41]}
+    assert "remove_billing_contact_ids" not in mock_gorelo.calls("PATCH", LOC_9001)[0].json
+    assert result["BillingContactIds"] == "41"
+    assert result["note"] == "billing contact(s) 42 are taken off this location, and so off the client's contracts"
+    assert "warning" not in result
+
+
+async def test_clearing_the_billing_contacts_needs_every_current_id_named(server, mock_gorelo):
+    arguments = {"client_id": 9101, "location_id": 9001, "billing_contact_ids": []}
+    mock_gorelo.on("GET", LOC_9001, envelope(with_billing("[41, 42]")))
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    text = await call_tool_error(server, "update_client_location", arguments)
+    assert "billing contact(s) 41, 42 would be removed" in text and "billing_contact_ids=[] needs every current id" in text
+    text = await call_tool_error(server, "update_client_location", {**arguments, "remove_billing_contact_ids": [41]})
+    assert "billing contact(s) 42 would be removed" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "GET"]  # two refusals, no PATCH
+
+
+async def test_clearing_the_billing_contacts_with_every_current_id_named_sends_the_empty_list_and_confirms_it(server, mock_gorelo):
+    arguments = {"client_id": 9101, "location_id": 9001, "billing_contact_ids": []}
+    mock_gorelo.on("GET", LOC_9001, in_order(envelope(with_billing("[41, 42]")), envelope(with_billing("[]"))))
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    result = await call_tool(server, "update_client_location", {**arguments, "remove_billing_contact_ids": [42, 41]})
+    assert mock_gorelo.calls("PATCH", LOC_9001)[0].json == {"BillingContactIds": []}
+    assert result["BillingContactIds"] == "[]"
+    assert result["note"] == "billing contact(s) 41, 42 are taken off this location, and so off the client's contracts"
+    assert "warning" not in result
+
+
+@pytest.mark.parametrize(
+    "stored, expected",
+    [
+        ("", []),
+        ("[]", []),
+        ("  ", []),
+        ("41", [41]),
+        ("41,42", [41, 42]),
+        ("[41, 42]", [41, 42]),
+        ("[41,42]", [41, 42]),
+        (" 41 , 42 ", [41, 42]),
+        ("42,41,42", [42, 41]),
+        ([41, 42], [41, 42]),
+    ],
+)
+def test_the_stored_billing_contact_text_is_parsed_in_every_form_gorelo_may_answer(stored, expected):
+    assert clients_module._billing_ids_of({"BillingContactIds": stored}, "GET x", "update_client_location") == expected
+
+
+@pytest.mark.parametrize(
+    "record",
+    [{}, {"BillingContactIds": None}, {"BillingContactIds": "abc"}, {"BillingContactIds": "41,,42"}, {"BillingContactIds": "[41"},
+     {"BillingContactIds": "41]"}, {"BillingContactIds": "0"}, {"BillingContactIds": "-3"}, {"BillingContactIds": "4.5"},
+     {"BillingContactIds": 41}, {"BillingContactIds": [True]}, {"BillingContactIds": ["41"]}, {"BillingContactIds": {"a": 1}}],
+)
+async def test_a_billing_contact_text_that_cannot_be_read_stops_the_update_before_any_write(server, mock_gorelo, record):
+    with pytest.raises(GoreloAPIError, match="could not read BillingContactIds of the location"):
+        clients_module._billing_ids_of(record, "GET x", "update_client_location")
+    mock_gorelo.on("GET", LOC_9001, envelope(location_record(**record)))
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    text = await call_tool_error(
+        server, "update_client_location", {"client_id": 9101, "location_id": 9001, "billing_contact_ids": [41]}
+    )
+    assert "BillingContactIds" in text and "nothing was changed" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+@pytest.mark.parametrize("stored", ["", "[]", "41,42", "[41, 42]"])
+async def test_each_stored_form_works_end_to_end_with_the_same_list_and_with_a_dropped_one(server, mock_gorelo, stored):
+    current = clients_module._billing_ids_of({"BillingContactIds": stored}, "GET x", "t")
+    mock_gorelo.on("GET", LOC_9001, envelope(with_billing(stored)))
+    mock_gorelo.on("PATCH", LOC_9001, envelope(with_billing(stored)))
+    arguments = {"client_id": 9101, "location_id": 9001, "billing_contact_ids": [7, *current]}
+    await call_tool(server, "update_client_location", arguments)
+    assert mock_gorelo.calls("PATCH", LOC_9001)[0].json == {"BillingContactIds": [7, *current]}
+    mock_gorelo.reset()
+    mock_gorelo.on("GET", LOC_9001, envelope(with_billing(stored)))
+    mock_gorelo.on("PATCH", LOC_9001, envelope(with_billing(stored)))
+    if current:
+        text = await call_tool_error(server, "update_client_location", {**arguments, "billing_contact_ids": [7]})
+        assert f"billing contact(s) {', '.join(map(str, current))} would be removed" in text
+        assert mock_gorelo.calls("PATCH", LOC_9001) == []
+
+
+@pytest.mark.parametrize(
+    "extra, stored, fragment",
+    [
+        ({"billing_contact_ids": [41], "remove_billing_contact_ids": [99]}, "41,42", "remove_billing_contact_ids[0]: 99 is not a current billing contact"),
+        ({"billing_contact_ids": [41, 42], "remove_billing_contact_ids": [42]}, "41,42", "remove_billing_contact_ids[0]: 42 is also in billing_contact_ids"),
+        ({"billing_contact_ids": [41, 5], "remove_billing_contact_ids": [41, 42]}, "41,42", "remove_billing_contact_ids[0]: 41 is also in billing_contact_ids"),
+    ],
+)
+async def test_remove_billing_contact_ids_must_name_current_contacts_the_list_leaves_out(server, mock_gorelo, extra, stored, fragment):
+    mock_gorelo.on("GET", LOC_9001, envelope(with_billing(stored)))
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    text = await call_tool_error(server, "update_client_location", {"client_id": 9101, "location_id": 9001, **extra})
+    assert fragment in text and "Nothing was changed" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+@pytest.mark.parametrize(
+    "extra, fragment",
+    [
+        ({"remove_billing_contact_ids": [42]}, "remove_billing_contact_ids: only together with billing_contact_ids"),
+        ({"billing_contact_ids": [41], "remove_billing_contact_ids": []}, "remove_billing_contact_ids: expected at least one id, got an empty list"),
+        ({"billing_contact_ids": [41], "remove_billing_contact_ids": [0]}, "remove_billing_contact_ids"),
+        ({"billing_contact_ids": [41], "remove_billing_contact_ids": [True]}, "remove_billing_contact_ids"),
+        ({"billing_contact_ids": [41], "remove_billing_contact_ids": ["42"]}, "remove_billing_contact_ids"),
+    ],
+)
+async def test_remove_billing_contact_ids_local_errors_send_nothing(server, mock_gorelo, extra, fragment):
+    text = await call_tool_error(server, "update_client_location", {"client_id": 9101, "location_id": 9001, **extra})
+    assert fragment in text and mock_gorelo.requests == []
+
+
+async def test_an_error_of_the_read_before_the_write_is_gorelos_and_nothing_is_written(server, mock_gorelo):
+    mock_gorelo.on("GET", LOC_9001, error_envelope(404, [("070202", "The requested resource was not found.")]))
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    text = await call_tool_error(
+        server, "update_client_location", {"client_id": 9101, "location_id": 9001, "billing_contact_ids": [41]}
+    )
+    assert "HTTP 404" in text and [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_the_billing_result_warns_when_the_read_back_does_not_show_the_list_that_was_asked_for(server, mock_gorelo):
+    mock_gorelo.on("GET", LOC_9001, in_order(envelope(with_billing("41,42")), envelope(with_billing("41,42"))))
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    result = await call_tool(
+        server,
+        "update_client_location",
+        {"client_id": 9101, "location_id": 9001, "billing_contact_ids": [41], "remove_billing_contact_ids": [42]},
+    )
+    assert "note" not in result  # the answer shows 42 still on the location
+    assert "the read-back shows billing contacts 41, 42 but the call asked for 41" in result["warning"]
+
+
+async def test_the_billing_result_says_so_when_the_read_back_fails_after_a_contact_was_taken_off(server, mock_gorelo):
+    mock_gorelo.on("GET", LOC_9001, in_order(envelope(with_billing("41,42")), error_envelope(500, [("090500", "Internal error.")])))
+    mock_gorelo.on("PATCH", LOC_9001, envelope(location_record()))
+    result = await call_tool(
+        server,
+        "update_client_location",
+        {"client_id": 9101, "location_id": 9001, "billing_contact_ids": [41], "remove_billing_contact_ids": [42]},
+    )
+    assert result["Id"] == 9001 and "Do not repeat the write" in result["warning"]
+    assert "asked to take billing contact(s) 42 off this location and off the client's contracts" in result["note"]
+
+
+async def test_the_update_client_location_texts_say_where_the_current_list_comes_from(server):
+    tool = next(t for t in await list_tools(server) if t.name == "update_client_location")
+    properties = tool.inputSchema["properties"]
+    assert "get_client_location" in properties["billing_contact_ids"]["description"]
+    assert "remove_billing_contact_ids" in properties["billing_contact_ids"]["description"]
+    assert "client's contracts" in properties["remove_billing_contact_ids"]["description"]
+    assert properties["remove_billing_contact_ids"]["items"]["type"] == "integer"
+    doc = flat(clients_module.update_client_location.__doc__)
+    assert "a current contact left off is refused unless remove_billing_contact_ids names it" in doc
+
+
+# ---- parameter texts ----
+
+
+async def test_no_client_tool_parameter_text_points_to_clear_fields_where_the_tool_has_none(server):
+    tools = {t.name: t for t in await list_tools(server)}
+    domain = tools["update_client_domain"].inputSchema["properties"]
+    assert "clear_fields" not in domain  # the parameter is reset_expiration_date
+    for name, definition in domain.items():
+        assert "clear_fields" not in definition["description"], name
+    assert "reset_expiration_date" in domain["expiration_date"]["description"]
+    assert "clear_fields" not in tools["create_client_domain"].inputSchema["properties"]["expiration_date"]["description"]
+
+
+async def test_the_create_client_location_parameter_texts_end_in_one_period(server):
+    tool = next(t for t in await list_tools(server) if t.name == "create_client_location")
+    for name, definition in tool.inputSchema["properties"].items():
+        text = definition["description"]
+        assert ".." not in text and not text.endswith(".."), (name, text)
+    assert tool.inputSchema["properties"]["postal_code"]["description"] == "Postal or ZIP code."
+
+
+# ---- delete_client_location (gated) ----
+
+
+async def test_the_gated_client_tools_do_not_exist_unless_deletes_are_enabled(server, server_factory, mock_gorelo):
+    names = {t.name for t in await list_tools(server)}
+    assert not names & set(GATED_TOOLS)
+    for name, arguments in (
+        ("delete_client_location", {"client_id": 9101, "location_id": 9001, "confirm": True}),
+        ("delete_client_domain", {"client_id": 9101, "domain_id": 5, "confirm": True}),
+    ):
+        assert "unknown tool" in (await call_tool_error(server, name, arguments)).lower()
+    assert mock_gorelo.requests == []
+    enabled = {t.name for t in await list_tools(server_factory(toolsets={"core"}, destructive=True))}
+    assert set(GATED_TOOLS) <= enabled
+    only = {t.name for t in await list_tools(server_factory(toolsets={"core"}, destructive=True, destructive_tools=frozenset({"delete_client_domain"})))}
+    assert "delete_client_domain" in only and "delete_client_location" not in only
+
+
+@pytest.mark.parametrize("name", sorted(GATED_TOOLS))
+def test_each_gated_tool_is_declared_destructive_core_and_not_forbidden(name, spec_index):
+    ops, _params = GATED_TOOLS[name]
+    spec = next(s for s in REGISTRY.specs if s.name == name)
+    assert (spec.toolset, spec.kind, spec.ops) == ("core", "destructive", ops)
+    assert all(op in spec_index.ops for op in spec.ops) and not set(spec.ops) & FORBIDDEN_OPS
+    doc = flat(spec.fn.__doc__)
+    assert "Side effects:" in doc and doc.endswith("Ask the user first; needs confirm=true.")
+
+
+@pytest.mark.parametrize("name", sorted(GATED_TOOLS))
+async def test_each_gated_tool_exposes_exactly_its_parameters_with_a_false_confirm_default(name, gated_server):
+    _ops, params = GATED_TOOLS[name]
+    tool = next(t for t in await list_tools(gated_server) if t.name == name)
+    assert list(tool.inputSchema["properties"]) == params
+    assert tool.inputSchema["properties"]["confirm"]["type"] == "boolean"
+    assert tool.inputSchema["properties"]["confirm"]["default"] is False
+    assert tool.inputSchema.get("required", []) == [p for p in params if p != "confirm"]
+    assert all(p.get("description") for p in tool.inputSchema["properties"].values())
+    assert tool.annotations.destructiveHint is True and tool.annotations.readOnlyHint is False
+
+
+@pytest.mark.parametrize("arguments", [{}, {"confirm": False}])
+async def test_delete_client_location_refuses_without_confirm_and_makes_no_http_call(gated_server, mock_gorelo, arguments):
+    text = await call_tool_error(gated_server, "delete_client_location", {"client_id": 9101, "location_id": 9001, **arguments})
+    assert text.startswith("confirm: refusing to delete location 9001 of client 9101 without confirm=true.")
+    assert "marked inactive" in text and "default or default billing location" in text and "only location" in text
+    assert "open tickets, assets, active contacts, contracts, products or bundles" in text
+    assert "Nothing has been sent to Gorelo." in text
+    assert "Call again with confirm=true if you really want to delete location 9001 of client 9101." in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("bad", ["true", 1, "yes", None])
+async def test_delete_client_location_refuses_a_confirm_that_is_not_a_json_boolean(gated_server, mock_gorelo, bad):
+    await call_tool_error(gated_server, "delete_client_location", {"client_id": 9101, "location_id": 9001, "confirm": bad})
+    assert mock_gorelo.requests == []
+
+
+async def test_delete_client_location_with_confirm_sends_one_delete_and_returns_the_id(gated_server, mock_gorelo):
+    mock_gorelo.on("DELETE", LOC_9001, envelope({"Id": 9001}))
+    result = await call_tool(gated_server, "delete_client_location", {"client_id": 9101, "location_id": 9001, "confirm": True})
+    assert result == {"Id": 9001}
+    assert [(r.method, r.path, r.query) for r in mock_gorelo.requests] == [("DELETE", LOC_9001, {})]
+
+
+async def test_delete_client_location_shows_gorelos_409_message_with_what_blocks_it(gated_server, mock_gorelo):
+    message = "The location is the client's default location; 2 open tickets and 3 assets are still at it."
+    mock_gorelo.on("DELETE", LOC_9001, error_envelope(409, [("070409", message)]))
+    text = await call_tool_error(gated_server, "delete_client_location", {"client_id": 9101, "location_id": 9001, "confirm": True})
+    assert text == trace(f"Gorelo rejected delete_client_location (HTTP 409, code 070409): {message}")
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_delete_client_location_maps_the_ids_and_a_404(gated_server, mock_gorelo):
+    mock_gorelo.on("DELETE", LOC_9001, in_order(
+        error_envelope(400, [("070101", "The id is not valid.", "locationId")]),
+        error_envelope(404, [("070202", "The requested resource was not found.")]),
+    ))
+    text = await call_tool_error(gated_server, "delete_client_location", {"client_id": 9101, "location_id": 9001, "confirm": True})
+    assert text == trace("Gorelo rejected delete_client_location (HTTP 400, code 070101): location_id: The id is not valid.")
+    assert "HTTP 404" in await call_tool_error(gated_server, "delete_client_location", {"client_id": 9101, "location_id": 9001, "confirm": True})
+
+
+@pytest.mark.parametrize("answer", [None, {}, True, []])
+async def test_delete_client_location_with_no_record_in_the_answer_is_a_write_unconfirmed_error(gated_server, mock_gorelo, answer):
+    mock_gorelo.on("DELETE", LOC_9001, envelope(answer))
+    text = await call_tool_error(gated_server, "delete_client_location", {"client_id": 9101, "location_id": 9001, "confirm": True})
+    assert "may have been applied" in text or "Verify" in text
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_delete_client_location_that_times_out_is_not_repeated(gated_server, mock_gorelo):
+    mock_gorelo.on("DELETE", LOC_9001, httpx.ReadTimeout("slow"))
+    text = await call_tool_error(gated_server, "delete_client_location", {"client_id": 9101, "location_id": 9001, "confirm": True})
+    assert text.startswith("Gorelo did not confirm delete_client_location")
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_delete_client_location_refuses_bad_ids_before_any_http_even_with_confirm(gated_server, mock_gorelo):
+    for arguments, param in (({"client_id": 0, "location_id": 1}, "client_id"), ({"client_id": 1, "location_id": 0}, "location_id")):
+        assert param in await call_tool_error(gated_server, "delete_client_location", {**arguments, "confirm": True})
+    assert mock_gorelo.requests == []
+
+
+def test_delete_client_location_text_says_what_is_refused():
+    doc = flat(clients_module.delete_client_location.__doc__)
+    assert "default location, its default billing location or its only location" in doc
+    assert "open tickets, assets, active contacts, contracts, products or bundles" in doc
+    assert "Deleting an already deleted location succeeds" in doc and "marked inactive, not removed" in doc
+
+
+# --------------------------------------------------------------------------
+# Client web domains
+# --------------------------------------------------------------------------
+
+DOMAINS = "/v1/clients/9101/domains"
+DOMAIN_5 = "/v1/clients/9101/domains/5"
+
+
+def domain(domain_id=5, name="corp.example.com", **extra):
+    record = {
+        "Id": domain_id, "Name": name, "CreatedOn": "2026-10-30T00:00:00Z", "UpdatedOn": None,
+        "ExpirationDate": "2027-01-31", "IsDateSetManually": False, "Status": {"Id": 1, "Name": "Active"},
+    }
+    record.update(extra)
+    return record
+
+
+async def test_create_client_domain_sends_name_and_date_then_returns_the_entry_of_the_clients_domains(server, mock_gorelo):
+    mock_gorelo.on("POST", DOMAINS, envelope(domain(5)))
+    mock_gorelo.on("GET", CLIENT_9101, envelope(client_record(9101, Domains=[domain(4, "old.example"), domain(5, IsDateSetManually=True)])))
+    result = await call_tool(server, "create_client_domain", {"client_id": 9101, "name": "corp.example.com", "expiration_date": "2027-01-31"})
+    post, get = mock_gorelo.requests
+    assert (post.method, post.path, post.query) == ("POST", DOMAINS, {})
+    assert post.json == {"Name": "corp.example.com", "ExpirationDate": "2027-01-31"}
+    assert (get.method, get.path, get.query) == ("GET", CLIENT_9101, {})
+    assert result == domain(5, IsDateSetManually=True)  # the entry of the read, not the POST answer
+
+
+async def test_create_client_domain_without_a_date_sends_no_expirationdate(server, mock_gorelo):
+    mock_gorelo.on("POST", DOMAINS, envelope(domain(5)))
+    mock_gorelo.on("GET", CLIENT_9101, envelope(client_record(9101, Domains=[domain(5)])))
+    await call_tool(server, "create_client_domain", {"client_id": 9101, "name": "corp.example.com"})
+    assert mock_gorelo.calls("POST", DOMAINS)[0].json == {"Name": "corp.example.com"}
+
+
+async def test_create_client_domain_answers_with_a_warning_when_the_read_fails_or_does_not_list_it(server, mock_gorelo):
+    mock_gorelo.on("POST", DOMAINS, envelope(domain(5)))
+    mock_gorelo.on("GET", CLIENT_9101, in_order(
+        error_envelope(500, [("090500", "Internal error.")]),
+        envelope(client_record(9101, Domains=[domain(4, "other.example")])),
+        envelope(client_record(9101)),  # no Domains list that holds it
+    ))
+    result = await call_tool(server, "create_client_domain", {"client_id": 9101, "name": "corp.example.com"})
+    assert result["Id"] == 5 and result["Name"] == "corp.example.com"
+    assert "the write succeeded; re-reading it failed" in result["warning"] and "Do not repeat the write" in result["warning"]
+    result = await call_tool(server, "create_client_domain", {"client_id": 9101, "name": "corp.example.com"})
+    assert result["Id"] == 5 and "did not list domain 5" in result["warning"] and "get_client(9101)" in result["warning"]
+    assert "warning" in await call_tool(server, "create_client_domain", {"client_id": 9101, "name": "corp.example.com"})
+
+
+@pytest.mark.parametrize("answer", [None, {}, True, [], {"Name": "x"}])
+async def test_create_client_domain_without_an_id_in_the_answer_is_a_write_unconfirmed_error(server, mock_gorelo, answer):
+    mock_gorelo.on("POST", DOMAINS, envelope(answer))
+    text = await call_tool_error(server, "create_client_domain", {"client_id": 9101, "name": "corp.example.com"})
+    assert "may have been applied" in text or "Verify" in text
+    assert [r.method for r in mock_gorelo.requests] == ["POST"]
+
+
+@pytest.mark.parametrize(
+    "extra, fragment",
+    [
+        ({"name": ""}, "name:"),
+        ({"name": "  "}, "name:"),
+        ({"expiration_date": "2027-13-01"}, "expiration_date: expected a calendar date as YYYY-MM-DD"),
+        ({"expiration_date": "2027-02-30"}, "expiration_date: expected a calendar date as YYYY-MM-DD"),
+        ({"expiration_date": "2027-01-31T00:00:00Z"}, "expiration_date: expected a calendar date as YYYY-MM-DD"),
+        ({"expiration_date": "31/01/2027"}, "expiration_date: expected a calendar date as YYYY-MM-DD"),
+        ({"expiration_date": ""}, "expiration_date"),
+        ({"client_id": 0}, "client_id"),
+    ],
+)
+async def test_create_client_domain_local_errors_name_the_parameter_and_send_nothing(server, mock_gorelo, extra, fragment):
+    text = await call_tool_error(server, "create_client_domain", {"client_id": 9101, "name": "corp.example.com", **extra})
+    assert fragment in text and mock_gorelo.requests == []
+
+
+async def test_create_client_domain_requires_client_id_and_name(server, mock_gorelo):
+    assert "name" in await call_tool_error(server, "create_client_domain", {"client_id": 9101})
+    assert "client_id" in await call_tool_error(server, "create_client_domain", {"name": "corp.example.com"})
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("property_name, param", [("Name", "name"), ("ExpirationDate", "expiration_date"), ("clientId", "client_id")])
+async def test_create_client_domain_maps_a_gorelo_error_to_the_snake_case_parameter(server, mock_gorelo, property_name, param):
+    mock_gorelo.on("POST", DOMAINS, error_envelope(400, [("070101", "Value is not valid.", property_name)]))
+    text = await call_tool_error(server, "create_client_domain", {"client_id": 9101, "name": "corp.example.com"})
+    assert text == trace(f"Gorelo rejected create_client_domain (HTTP 400, code 070101): {param}: Value is not valid.")
+
+
+async def test_create_client_domain_held_by_another_client_shows_the_400_on_name(server, mock_gorelo):
+    mock_gorelo.on("POST", DOMAINS, error_envelope(400, [("070101", "The domain is already held by another client.", "Name")]))
+    text = await call_tool_error(server, "create_client_domain", {"client_id": 9101, "name": "corp.example.com"})
+    assert "name: The domain is already held by another client." in text
+    assert [r.method for r in mock_gorelo.requests] == ["POST"]
+
+
+async def test_create_client_domain_that_times_out_is_not_repeated(server, mock_gorelo):
+    mock_gorelo.on("POST", DOMAINS, httpx.ReadTimeout("slow"))
+    text = await call_tool_error(server, "create_client_domain", {"client_id": 9101, "name": "corp.example.com"})
+    assert text.startswith("Gorelo did not confirm create_client_domain") and len(mock_gorelo.requests) == 1
+
+
+def test_the_domain_tools_text_carries_the_spec_rules():
+    create = flat(clients_module.create_client_domain.__doc__)
+    assert "Inbound email from the domain is matched to this client" in create
+    assert "a domain belongs to ONE client only" in create and "a 400 on name" in create
+    assert "Side effects:" in create
+    update = flat(clients_module.update_client_domain.__doc__)
+    assert "A sent expiry is kept as set by hand; reset_expiration_date returns it to the registry's date" in update
+    delete = flat(clients_module.delete_client_domain.__doc__)
+    assert "inbound email from it is no longer matched to the client" in delete and "already deleted domain succeeds" in delete
+
+
+async def test_the_expiry_text_says_it_is_looked_up_when_not_given(server):
+    tool = next(t for t in await list_tools(server) if t.name == "create_client_domain")
+    assert "looks it up from the registry" in tool.inputSchema["properties"]["expiration_date"]["description"]
+
+
+async def test_update_client_domain_sends_the_changed_fields_then_returns_the_entry_from_the_client(server, mock_gorelo):
+    mock_gorelo.on("PATCH", DOMAIN_5, envelope(domain(5, "new.example")))
+    mock_gorelo.on("GET", CLIENT_9101, envelope(client_record(9101, Domains=[domain(5, "new.example", IsDateSetManually=True)])))
+    result = await call_tool(
+        server, "update_client_domain",
+        {"client_id": 9101, "domain_id": 5, "name": "new.example", "expiration_date": "2028-02-29"},
+    )
+    patch, get = mock_gorelo.requests
+    assert (patch.method, patch.path, patch.query) == ("PATCH", DOMAIN_5, {})
+    assert patch.json == {"Name": "new.example", "ExpirationDate": "2028-02-29"}
+    assert (get.method, get.path) == ("GET", CLIENT_9101)
+    assert result == domain(5, "new.example", IsDateSetManually=True)
+
+
+async def test_update_client_domain_reset_expiration_date_sends_a_null_expiry(server, mock_gorelo):
+    mock_gorelo.on("PATCH", DOMAIN_5, envelope(domain(5)))
+    mock_gorelo.on("GET", CLIENT_9101, envelope(client_record(9101, Domains=[domain(5)])))
+    await call_tool(server, "update_client_domain", {"client_id": 9101, "domain_id": 5, "reset_expiration_date": True})
+    assert mock_gorelo.calls("PATCH", DOMAIN_5)[0].json == {"ExpirationDate": None}
+    await call_tool(server, "update_client_domain", {"client_id": 9101, "domain_id": 5, "name": "x.example", "reset_expiration_date": True})
+    assert mock_gorelo.calls("PATCH", DOMAIN_5)[1].json == {"Name": "x.example", "ExpirationDate": None}
+
+
+async def test_update_client_domain_reset_false_is_the_same_as_not_given(server, mock_gorelo):
+    mock_gorelo.on("PATCH", DOMAIN_5, envelope(domain(5)))
+    mock_gorelo.on("GET", CLIENT_9101, envelope(client_record(9101, Domains=[domain(5)])))
+    await call_tool(server, "update_client_domain", {"client_id": 9101, "domain_id": 5, "name": "x.example", "reset_expiration_date": False})
+    assert mock_gorelo.calls("PATCH", DOMAIN_5)[0].json == {"Name": "x.example"}
+    text = await call_tool_error(server, "update_client_domain", {"client_id": 9101, "domain_id": 5, "reset_expiration_date": False})
+    assert text.startswith("nothing to update") and len(mock_gorelo.calls("PATCH", DOMAIN_5)) == 1
+
+
+async def test_update_client_domain_has_no_clear_fields_because_only_the_expiry_clears(server):
+    tool = next(t for t in await list_tools(server) if t.name == "update_client_domain")
+    assert "clear_fields" not in tool.inputSchema["properties"]
+    assert "registry" in tool.inputSchema["properties"]["reset_expiration_date"]["description"]
+
+
+@pytest.mark.parametrize(
+    "extra, fragment",
+    [
+        ({}, "nothing to update: pass name, expiration_date or reset_expiration_date"),
+        ({"name": " "}, "name:"),
+        ({"expiration_date": "2027-1-1"}, "expiration_date: expected a calendar date"),
+        ({"expiration_date": "2027-01-31", "reset_expiration_date": True}, "expiration_date: cannot be given a value together with reset_expiration_date"),
+        ({"reset_expiration_date": "yes"}, "reset_expiration_date"),
+        ({"reset_expiration_date": 1}, "reset_expiration_date"),
+        ({"domain_id": 0}, "domain_id"),
+        ({"domain_id": True}, "domain_id"),
+    ],
+)
+async def test_update_client_domain_local_errors_name_the_parameter_and_send_nothing(server, mock_gorelo, extra, fragment):
+    text = await call_tool_error(server, "update_client_domain", {"client_id": 9101, "domain_id": 5, **extra})
+    assert fragment in text and mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("property_name, param", [("Name", "name"), ("ExpirationDate", "expiration_date"), ("domainId", "domain_id"), ("clientId", "client_id")])
+async def test_update_client_domain_maps_a_gorelo_error_to_the_snake_case_parameter(server, mock_gorelo, property_name, param):
+    mock_gorelo.on("PATCH", DOMAIN_5, error_envelope(400, [("070101", "Value is not valid.", property_name)]))
+    text = await call_tool_error(server, "update_client_domain", {"client_id": 9101, "domain_id": 5, "name": "x.example"})
+    assert text == trace(f"Gorelo rejected update_client_domain (HTTP 400, code 070101): {param}: Value is not valid.")
+
+
+async def test_update_client_domain_a_404_is_gorelos_and_nothing_is_read_back(server, mock_gorelo):
+    mock_gorelo.on("PATCH", DOMAIN_5, error_envelope(404, [("070202", "The requested resource was not found.")]))
+    text = await call_tool_error(server, "update_client_domain", {"client_id": 9101, "domain_id": 5, "name": "x.example"})
+    assert "HTTP 404" in text and [r.method for r in mock_gorelo.requests] == ["PATCH"]
+
+
+async def test_update_client_domain_answers_with_a_warning_when_the_client_read_fails(server, mock_gorelo):
+    mock_gorelo.on("PATCH", DOMAIN_5, envelope(domain(5, "x.example")))
+    mock_gorelo.on("GET", CLIENT_9101, error_envelope(500, [("090500", "Internal error.")]))
+    result = await call_tool(server, "update_client_domain", {"client_id": 9101, "domain_id": 5, "name": "x.example"})
+    assert result["Name"] == "x.example" and "Do not repeat the write" in result["warning"]
+
+
+async def test_update_client_domain_that_times_out_is_not_repeated(server, mock_gorelo):
+    mock_gorelo.on("PATCH", DOMAIN_5, httpx.ReadTimeout("slow"))
+    text = await call_tool_error(server, "update_client_domain", {"client_id": 9101, "domain_id": 5, "name": "x.example"})
+    assert text.startswith("Gorelo did not confirm update_client_domain") and [r.method for r in mock_gorelo.requests] == ["PATCH"]
+
+
+@pytest.mark.parametrize("arguments", [{}, {"confirm": False}])
+async def test_delete_client_domain_refuses_without_confirm_and_makes_no_http_call(gated_server, mock_gorelo, arguments):
+    text = await call_tool_error(gated_server, "delete_client_domain", {"client_id": 9101, "domain_id": 5, **arguments})
+    assert text.startswith("confirm: refusing to delete domain 5 of client 9101 without confirm=true.")
+    assert "inbound email from it is no longer matched to the client" in text and "Nothing has been sent to Gorelo." in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("bad", ["true", 1, None])
+async def test_delete_client_domain_refuses_a_confirm_that_is_not_a_json_boolean(gated_server, mock_gorelo, bad):
+    await call_tool_error(gated_server, "delete_client_domain", {"client_id": 9101, "domain_id": 5, "confirm": bad})
+    assert mock_gorelo.requests == []
+
+
+async def test_delete_client_domain_with_confirm_sends_one_delete_and_returns_the_id(gated_server, mock_gorelo):
+    mock_gorelo.on("DELETE", DOMAIN_5, envelope({"Id": 5}))
+    result = await call_tool(gated_server, "delete_client_domain", {"client_id": 9101, "domain_id": 5, "confirm": True})
+    assert result == {"Id": 5}
+    assert [(r.method, r.path, r.query) for r in mock_gorelo.requests] == [("DELETE", DOMAIN_5, {})]
+
+
+async def test_delete_client_domain_maps_a_gorelo_error_and_refuses_a_non_record_answer(gated_server, mock_gorelo):
+    mock_gorelo.on("DELETE", DOMAIN_5, in_order(
+        error_envelope(400, [("070101", "The id is not valid.", "domainId")]),
+        envelope(True),
+    ))
+    text = await call_tool_error(gated_server, "delete_client_domain", {"client_id": 9101, "domain_id": 5, "confirm": True})
+    assert text == trace("Gorelo rejected delete_client_domain (HTTP 400, code 070101): domain_id: The id is not valid.")
+    text = await call_tool_error(gated_server, "delete_client_domain", {"client_id": 9101, "domain_id": 5, "confirm": True})
+    assert "may have been applied" in text or "Verify" in text
+
+
+async def test_delete_client_domain_that_times_out_is_not_repeated(gated_server, mock_gorelo):
+    mock_gorelo.on("DELETE", DOMAIN_5, httpx.ReadTimeout("slow"))
+    text = await call_tool_error(gated_server, "delete_client_domain", {"client_id": 9101, "domain_id": 5, "confirm": True})
+    assert text.startswith("Gorelo did not confirm delete_client_domain") and len(mock_gorelo.requests) == 1
+
+
+async def test_delete_client_domain_refuses_bad_ids_before_any_http_even_with_confirm(gated_server, mock_gorelo):
+    for arguments, param in (({"client_id": 0, "domain_id": 1}, "client_id"), ({"client_id": 1, "domain_id": 0}, "domain_id")):
+        assert param in await call_tool_error(gated_server, "delete_client_domain", {**arguments, "confirm": True})
+    assert mock_gorelo.requests == []
+
+
+def test_no_client_tool_reaches_the_forbidden_client_or_contact_delete():
+    for spec in REGISTRY.specs:
+        if spec.fn.__module__ == "tools.clients":
+            assert not set(spec.ops) & FORBIDDEN_OPS
+            assert "DELETE /v1/clients/{clientId}" not in spec.ops

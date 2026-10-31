@@ -43,6 +43,13 @@ names, never the text of a record):
                    list_agent_tags of the first listed agent, list_agent_available_updates of the first listed Windows agent (Os says
                    Windows; none listed, or a 400 naming DeviceId: the row is skipped), list_asset_types, list_scripts and get_script of the first listed script
                    (counts and ids only: the Content of a script is never printed)
+    1.5.0 reads       (contract 6c30770dffc0) list_ticket_priorities and list_ticket_sources are NETWORK reads now (GET /v1/tickets/priorities
+                   and /sources, no longer served locally), list_org_roles, get_org_group and get_org_user of the first listed group and
+                   user, get_alert of the first listed alert, list_policies and get_policy, list_asset_tags, list_client_types,
+                   list_client_custom_fields, list_contact_tags, list_project_templates (scope Project), get_client_location of the first
+                   location of the TEST CLIENT, list_payments and get_payment, list_product_charges and get_product_charge, and the
+                   structured documents of the Documents scope (list_structured_documents, get_structured_document, its submissions
+                   and the first submission). Each single read uses the first id its list taught; an empty list skips it
     others         get_custom_asset (the first listed custom asset) and list_deletions (types 1 Client and 2 Contact only: a key
                    without the scope of a type gets a 403 for the whole call)
     test client    its status has a row of its own: the check of the site clients that runs first reads each configured client
@@ -604,7 +611,7 @@ class Case:
     """One smoke call.
 
     tool      the read tool to call (a registry name)
-    shape     what the answer must look like: health, paged, list, all, search, record or local (no HTTP at all)
+    shape     what the answer must look like: health, paged, list, all, search, record, object or file
     args      builds the arguments from what was found so far; raises Skip when something is missing
     label     the row name when it is not the tool name (get_ticket is called three times)
     provides  the Found keys this case teaches; pick(result) returns the value (None: the list was empty)
@@ -658,10 +665,32 @@ CASES: tuple[Case, ...] = (
         extra=custom_properties_of_test_client_note,
     ),
     Case("list_client_locations", "list", args=_by("client", "a client", "client_id"), nonempty=True),
+    Case(
+        "list_client_locations",
+        "list",
+        label="list_client_locations (test client)",
+        args=_by("test_client", "the test client", "client_id"),
+        provides="test_location",
+    ),
+    Case(
+        "get_client_location",
+        "record",
+        args=lambda found: {
+            "client_id": found.need("test_client", "the test client"),
+            "location_id": found.need("test_location", "a location of the test client"),
+        },
+        same_id="test_location",
+    ),
+    Case("list_client_types", "list"),
+    Case("list_client_custom_fields", "list"),
     Case("list_contacts", "paged", args=lambda found: {"page_size": 20}, provides="contact"),
     Case("get_contact", "record", args=_by("contact", "a contact", "contact_id"), same_id="contact"),
-    Case("list_org_groups", "list", nonempty=True),
-    Case("list_org_users", "all", nonempty=True, complete=True),
+    Case("list_contact_tags", "list"),
+    Case("list_org_groups", "list", nonempty=True, provides="org_group"),
+    Case("get_org_group", "record", args=_by("org_group", "an organization group", "group_id"), same_id="org_group"),
+    Case("list_org_users", "all", nonempty=True, complete=True, provides="org_user"),
+    Case("get_org_user", "record", args=_by("org_user", "an organization user", "user_id"), same_id="org_user"),
+    Case("list_org_roles", "list"),
     Case(
         "list_agents",
         "paged",
@@ -686,6 +715,9 @@ CASES: tuple[Case, ...] = (
     ),
     Case("list_agent_tags", "list", args=_by("agent", "an agent", "agent_id")),
     Case("list_asset_types", "list", nonempty=True),
+    Case("list_asset_tags", "list"),
+    Case("list_policies", "paged", args=lambda found: {"page_size": 20}, provides="policy"),
+    Case("get_policy", "record", args=_by("policy", "a policy", "policy_id"), same_id="policy"),
     Case("list_custom_assets", "paged", args=lambda found: {"page_size": 10}, provides="custom_asset"),
     Case(
         "get_custom_asset",
@@ -694,7 +726,8 @@ CASES: tuple[Case, ...] = (
         same_id="custom_asset",
     ),
     Case("list_custom_asset_hardware_types", "list"),
-    Case("list_alerts", "paged", args=lambda found: {"page_size": 20}),
+    Case("list_alerts", "paged", args=lambda found: {"page_size": 20}, provides="alert"),
+    Case("get_alert", "record", args=_by("alert", "an alert", "alert_id"), same_id="alert"),
     # types 1 Client and 2 Contact only: a key without the scope of a type gets a 403 for the whole call, and nothing says that
     # a tenant has deletions, so the answer may be empty
     Case("list_deletions", "paged", args=lambda found: {"type_ids": [1, 2], "page_size": 20}),
@@ -704,8 +737,8 @@ CASES: tuple[Case, ...] = (
     Case("list_ticket_statuses", "list", nonempty=True),
     Case("list_ticket_types", "list", nonempty=True),
     Case("list_ticket_tags", "list"),
-    Case("list_ticket_priorities", "local", nonempty=True),
-    Case("list_ticket_sources", "local", nonempty=True),
+    Case("list_ticket_priorities", "list", nonempty=True),
+    Case("list_ticket_sources", "list", nonempty=True),
     Case("list_tickets", "paged", args=lambda found: {"page_size": 50}, provides="ticket", pick=_pick_ticket),
     Case("search_tickets", "search", args=_search_args),
     Case("get_ticket", "record", label="get_ticket (guid)", args=_ticket_guid, same_id="ticket"),
@@ -738,6 +771,15 @@ CASES: tuple[Case, ...] = (
     # billing
     Case("list_contracts", "paged", args=lambda found: {"page_size": 20}, provides="contract"),
     Case("get_contract", "record", args=_by("contract", "a contract", "contract_id"), same_id="contract"),
+    Case("list_payments", "paged", args=lambda found: {"page_size": 20}, provides="payment"),
+    Case("get_payment", "record", args=_by("payment", "a payment", "payment_id"), same_id="payment"),
+    Case("list_product_charges", "paged", args=lambda found: {"page_size": 20}, provides="product_charge"),
+    Case(
+        "get_product_charge",
+        "record",
+        args=_by("product_charge", "a product charge", "product_charge_id"),
+        same_id="product_charge",
+    ),
     Case("list_invoices", "paged", args=lambda found: {"page_size": 20}, provides="invoice"),
     Case("get_invoice", "record", args=_by("invoice", "an invoice", "invoice_id"), same_id="invoice"),
     Case("list_items", "paged", args=lambda found: {"page_size": 20}, provides="item"),
@@ -752,6 +794,7 @@ CASES: tuple[Case, ...] = (
     Case("get_project", "record", args=_by("project", "a project", "project_id"), same_id="project"),
     Case("list_project_tags", "list"),
     Case("list_project_types", "list"),
+    Case("list_project_templates", "paged", args=lambda found: {"page_size": 20}),
     Case("list_project_sections", "list", args=_by("project", "a project", "project_id")),
     Case(
         "list_project_tasks",
@@ -817,6 +860,31 @@ CASES: tuple[Case, ...] = (
         id_key="VersionId",
     ),
     Case("list_document_related_items", "list", args=_by("document", "a document", "document_id")),
+    Case("list_structured_documents", "paged", args=lambda found: {"page_size": 20}, provides="structured_document"),
+    Case(
+        "get_structured_document",
+        "record",
+        args=_by("structured_document", "a structured document", "structured_document_id"),
+        same_id="structured_document",
+    ),
+    Case(
+        "list_structured_document_submissions",
+        "paged",
+        args=lambda found: {
+            "structured_document_id": found.need("structured_document", "a structured document"),
+            "page_size": 20,
+        },
+        provides="structured_submission",
+    ),
+    Case(
+        "get_structured_document_submission",
+        "record",
+        args=lambda found: {
+            "structured_document_id": found.need("structured_document", "a structured document"),
+            "submission_id": found.need("structured_submission", "a structured document submission"),
+        },
+        same_id="structured_submission",
+    ),
 )
 
 
@@ -831,7 +899,7 @@ def _validate_shape(case: Case, found: Found, result: Mapping[str, Any]) -> str:
     shape = case.shape
     if shape == "health":
         return check_health(result)
-    if shape in ("list", "local"):
+    if shape == "list":
         return check_list(result, nonempty=case.nonempty)
     if shape == "paged":
         return check_paged(result, nonempty=case.nonempty)

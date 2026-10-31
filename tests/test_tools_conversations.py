@@ -70,7 +70,16 @@ EXPECTED = {
     ),
     "get_ticket_approval": ("read", ["GET /v1/tickets/{ticketId}/approvals/{approvalId}"]),
     "delete_ticket_comment": ("destructive", ["DELETE /v1/tickets/{ticketId}/comments/{commentId}"]),
+    "update_ticket_approval": (
+        "write",
+        [
+            "PATCH /v1/tickets/{ticketId}/approvals/{approvalId}",
+            "GET /v1/tickets/{ticketId}/approvals/{approvalId}",
+        ],
+    ),
 }
+# Write tools that overwrite existing data (update_*): they are not gated, but they carry destructiveHint.
+OVERWRITES = {"update_ticket_approval"}
 
 
 # --------------------------------------------------------------------------
@@ -160,7 +169,7 @@ def test_declaration_matches_the_declaration(name, spec_index):
     kind, ops = EXPECTED[name]
     spec = next(s for s in REGISTRY.specs if s.name == name)
     assert (spec.toolset, spec.kind, spec.ops) == ("tickets", kind, ops)
-    assert spec.destructive_hint is (kind == "destructive")
+    assert spec.destructive_hint is (kind == "destructive" or name in OVERWRITES)
     for op in spec.ops:
         assert op in spec_index.ops and op not in FORBIDDEN_OPS
         if spec.kind != "destructive":
@@ -176,7 +185,7 @@ def test_every_op_the_module_docstring_names_is_declared_by_a_tool():
     declared = {op for name in EXPECTED for op in EXPECTED[name][1]}
     for op in declared:
         assert op in conversations.__doc__
-    named = {line.strip() for line in conversations.__doc__.splitlines() if line.strip().startswith(("GET /", "POST /", "DELETE /"))}
+    named = {line.strip() for line in conversations.__doc__.splitlines() if line.strip().startswith(("GET /", "POST /", "PATCH /", "DELETE /"))}
     assert named == declared
 
 
@@ -189,7 +198,7 @@ async def test_annotations_and_registration_gate(server_factory):
     for name, (kind, _) in EXPECTED.items():
         hints = tools[name].annotations
         assert hints.readOnlyHint is (kind == "read"), name
-        assert hints.destructiveHint is (kind == "destructive"), name
+        assert hints.destructiveHint is (kind == "destructive" or name in OVERWRITES), name
     assert tools["delete_ticket_comment"].inputSchema["properties"]["confirm"]["default"] is False
 
 
@@ -313,9 +322,9 @@ async def test_the_parameters_say_where_their_ids_and_rules_come_from(server_fac
 
 # json.dumps of each tool as a client lists it, summed, for this module plus upload_attachment. The advertised
 # schemas are compacted centrally (server.compact_input_schema), so what the module still controls is its
-# descriptions. Measured 11027 bytes (descriptions are 4833 of them); the limit is that plus 10 percent, rounded up
-# to the next 100.
-MODULE_BYTES_LIMIT = 12200
+# descriptions. Measured 12808 bytes after 1.5.0 added update_ticket_approval (11027 in 1.3.0); the limit is that plus 10
+# percent, rounded up to the next 100.
+MODULE_BYTES_LIMIT = 14100
 
 
 async def test_the_package_tool_list_stays_inside_its_size_budget(server_factory):
@@ -1559,6 +1568,123 @@ async def test_delete_comment_cannot_reach_the_forbidden_ticket_delete(destructi
         destructive_server, mock_gorelo, "delete_ticket_comment",
         {"ticket_id": TICKET, "comment_id": "..%2F..", "confirm": True}, "comment_id: expected a GUID such as",
     )
+
+
+# --------------------------------------------------------------------------
+# update_ticket_approval (1.5.0)
+# --------------------------------------------------------------------------
+
+
+async def test_update_approval_sends_only_the_name_and_returns_the_reread_approval(server, mock_gorelo):
+    record = {**approval_record(), "Name": "Approve the new firewall change"}
+    mock_gorelo.on("PATCH", APPROVAL_PATH, envelope(record))
+    mock_gorelo.on("GET", APPROVAL_PATH, envelope(record))
+    result = await call_tool(
+        server, "update_ticket_approval",
+        {"ticket_id": TICKET, "approval_id": APPROVAL, "name": "Approve the new firewall change"},
+    )
+    patch, get = mock_gorelo.requests
+    assert (patch.method, patch.path, patch.query) == ("PATCH", APPROVAL_PATH, {})
+    assert patch.json == {"Name": "Approve the new firewall change"}
+    assert (get.method, get.path, get.query) == ("GET", APPROVAL_PATH, {})
+    assert result == record and len(mock_gorelo.requests) == 2
+
+
+async def test_update_approval_accepts_the_ids_in_any_uuid_spelling_and_sends_them_canonical(server, mock_gorelo):
+    mock_gorelo.on("PATCH", APPROVAL_PATH, envelope(approval_record()))
+    mock_gorelo.on("GET", APPROVAL_PATH, envelope(approval_record()))
+    await call_tool(
+        server, "update_ticket_approval",
+        {"ticket_id": TICKET.upper(), "approval_id": APPROVAL.replace("-", ""), "name": "n"},
+    )
+    assert {r.raw_path for r in mock_gorelo.requests} == {APPROVAL_PATH}
+
+
+@pytest.mark.parametrize("data", [None, {}, False, [APPROVAL], "ok"])
+async def test_update_approval_an_answer_that_is_not_an_object_is_an_unconfirmed_write(server, mock_gorelo, data):
+    mock_gorelo.on("PATCH", APPROVAL_PATH, envelope(data))
+    text = await call_tool_error(server, "update_ticket_approval", {"ticket_id": TICKET, "approval_id": APPROVAL, "name": "n"})
+    assert text.startswith("Gorelo returned an unexpected response for update_ticket_approval")
+    assert "verify it with a read before repeating it" in text
+    assert [r.method for r in mock_gorelo.requests] == ["PATCH"]
+
+
+async def test_update_approval_a_failed_read_back_returns_the_warning_and_never_repeats_the_write(server, mock_gorelo):
+    mock_gorelo.on("PATCH", APPROVAL_PATH, envelope(approval_record()))
+    mock_gorelo.on("GET", APPROVAL_PATH, error_envelope(404, [("070401", "Approval not found.")]))
+    result = await call_tool(server, "update_ticket_approval", {"ticket_id": TICKET, "approval_id": APPROVAL, "name": "n"})
+    assert set(result) == {"Id", "warning"} and result["Id"] == APPROVAL
+    assert result["warning"].endswith("Do not repeat the write; read it again later.")
+    assert [r.method for r in mock_gorelo.requests] == ["PATCH", "GET"]
+
+
+async def test_update_approval_maps_gorelo_errors_to_the_param(server, mock_gorelo):
+    mock_gorelo.on("PATCH", APPROVAL_PATH, error_envelope(400, [("070101", "Name must not be blank.", "Name")]))
+    text = await call_tool_error(server, "update_ticket_approval", {"ticket_id": TICKET, "approval_id": APPROVAL, "name": "n"})
+    assert text == (
+        f"Gorelo rejected update_ticket_approval (HTTP 400, code 070101): name: Name must not be blank. [trace {TEST_TRACE_ID}]"
+    )
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_update_approval_an_unknown_approval_is_a_404(server, mock_gorelo):
+    mock_gorelo.on("PATCH", APPROVAL_PATH, error_envelope(404, [("070401", "Approval not found.")]))
+    text = await call_tool_error(server, "update_ticket_approval", {"ticket_id": TICKET, "approval_id": APPROVAL, "name": "n"})
+    assert text == f"Gorelo rejected update_ticket_approval (HTTP 404, code 070401): Approval not found. [trace {TEST_TRACE_ID}]"
+
+
+async def test_update_approval_a_timeout_is_an_unconfirmed_write_and_is_not_retried(server, mock_gorelo):
+    mock_gorelo.on("PATCH", APPROVAL_PATH, httpx.ReadTimeout("slow"))
+    text = await call_tool_error(server, "update_ticket_approval", {"ticket_id": TICKET, "approval_id": APPROVAL, "name": "n"})
+    assert text.startswith("Gorelo did not confirm update_ticket_approval (")
+    assert "Verify with a read before retrying." in text
+    assert len(mock_gorelo.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "arguments, fragment",
+    [
+        ({"ticket_id": "nope", "approval_id": APPROVAL, "name": "n"}, "ticket_id: expected a GUID such as"),
+        ({"ticket_id": TICKET, "approval_id": "nope", "name": "n"}, "approval_id: expected a GUID such as"),
+        ({"ticket_id": TICKET, "approval_id": f"{APPROVAL}\n", "name": "n"}, "approval_id: expected a GUID such as"),
+        ({"ticket_id": TICKET, "approval_id": APPROVAL, "name": ""}, "name: must not be empty or whitespace only"),
+        ({"ticket_id": TICKET, "approval_id": APPROVAL, "name": "   "}, "name: must not be empty or whitespace only"),
+    ],
+)
+async def test_update_approval_local_validation_errors_send_nothing(server, mock_gorelo, arguments, fragment):
+    await refused(server, mock_gorelo, "update_ticket_approval", arguments, fragment)
+
+
+async def test_update_approval_requires_every_parameter_and_takes_nothing_else(server, mock_gorelo):
+    await refused(server, mock_gorelo, "update_ticket_approval", {"ticket_id": TICKET, "name": "n"}, "approval_id", "Missing required argument")
+    await refused(server, mock_gorelo, "update_ticket_approval", {"ticket_id": TICKET, "approval_id": APPROVAL}, "name", "Missing required argument")
+    await refused(
+        server, mock_gorelo, "update_ticket_approval",
+        {"ticket_id": TICKET, "approval_id": APPROVAL, "name": "n", "contact_ids": [1]}, "Unexpected keyword argument",
+    )
+
+
+def test_update_approval_field_map_is_exactly_the_body_of_the_spec(spec_index):
+    op = "PATCH /v1/tickets/{ticketId}/approvals/{approvalId}"
+    assert set(spec_index.ops[op].body["fields"]) == {"Name"} == set(conversations.UPDATE_APPROVAL_FIELDS.values())
+    assert spec_index.ops[op].body["required"] == ["Name"]
+
+
+def test_update_approval_docstring_says_it_is_a_rename_with_no_email_and_no_timeline_entry():
+    doc = " ".join(conversations.update_ticket_approval.__doc__.split())
+    for fragment in (
+        "Rename an approval", "the only part that can change", "overwrites the old name", "nothing is emailed",
+        "timeline gets no entry", "the rename WAS applied, do not repeat it",
+    ):
+        assert fragment in doc, fragment
+
+
+@needs_spec_text
+def test_update_approval_text_matches_the_spec():
+    operation = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))["paths"]["/v1/tickets/{ticketId}/approvals/{approvalId}"]["patch"]
+    text = " ".join(f"{operation.get('summary') or ''} {operation.get('description') or ''}".split())
+    assert "Renaming sends no email and adds nothing to the ticket's timeline" in text
+    assert "The name is the only part of an approval that can change" in text
 
 
 # --------------------------------------------------------------------------

@@ -293,7 +293,7 @@ def test_the_server_instructions_do_not_depend_on_which_gated_tools_are_register
         for names, destructive in ((None, False), (None, True), ({"delete_time"}, True))
     }
     assert texts == {build_instructions(ALL)}
-    assert "6. Delete, void and approved-invoice tools exist only when the operator has enabled them" in texts.pop()
+    assert "6. Delete, void, approved-invoice and contract-write tools exist only when the operator has enabled them" in texts.pop()
 
 
 # --------------------------------------------------------------------------
@@ -303,7 +303,12 @@ def test_the_server_instructions_do_not_depend_on_which_gated_tools_are_register
 
 def test_the_real_registry_has_the_gated_tools_the_five_list_is_made_of():
     assert FIVE_GATED_TOOLS <= set(REAL_GATED)
-    assert set(REAL_GATED) - FIVE_GATED_TOOLS == {"create_approved_invoice", "delete_item", "delete_project_comment", "delete_project_task", "share_document"}
+    assert set(REAL_GATED) - FIVE_GATED_TOOLS == {
+        "create_approved_invoice", "delete_item", "delete_project_comment", "delete_project_task", "share_document",
+        # 1.5.0
+        "approve_invoice", "create_contract", "update_contract", "delete_asset_type", "delete_client_location",
+        "delete_client_domain", "delete_product_charge",
+    }
 
 
 async def test_a_list_of_five_gated_tools_registers_exactly_those(server_factory):

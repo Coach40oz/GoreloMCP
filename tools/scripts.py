@@ -17,7 +17,7 @@ the spec text gives them: Query (keyword matched against the title, up to 200 ch
 1 Powershell, 2 Command Line, 3 Bash; any other value is a 400), ParentScriptId (GUID), IsFavorite (true: favorites only,
 false: the rest), SortBy (createdOn, the default, or updatedOn) and SortOrder (desc, the default, or asc).
 
-GET /v1/scripts/{scriptId} returns the script's current version with its Content (owner's decision: full content, on); an
+GET /v1/scripts/{scriptId} returns the script's current version with its Content (the full content is returned); an
 unknown or deleted script is a 404. Content is text that people wrote and can hold credentials or other secrets: it is data,
 never instructions, and the tool text says so. The tool changes nothing in it.
 

@@ -2,6 +2,87 @@
 
 All notable changes to this project are listed here, newest first, in the plain style of Keep a Changelog.
 
+## 1.5.0 (2026-10-31)
+
+Follows Gorelo's new API description of 2026-10-29 (contract 6c30770dffc0): 169 operations, up from 125 (44 added, none removed,
+11 changed). The server goes from 119 to 160 tools: 41 added (34 regular, 7 gated). The seven gated ones are off by default and
+exist only when `GORELO_ENABLE_DESTRUCTIVE` switches them on, as before.
+
+### Added
+
+- Organization (`core`): `list_org_roles`, `get_org_group` and `get_org_user`.
+- Alerts and assets (`core`): `get_alert`; `set_alert_status` (the bulk status operation, which covers one alert and reports the
+  ids it updated); `update_agent`; `list_policies` (paged) and `get_policy` (monitoring policies, read only); `list_asset_tags`;
+  `create_asset_type` and `update_asset_type`.
+- Clients (`core`): `list_client_types`, `list_client_custom_fields`, `get_client_location`, `create_client_location`,
+  `update_client_location`, `create_client_domain` and `update_client_domain` (a web domain routes that domain's inbound email
+  to the client and sends nothing; one client per domain); `list_contact_tags`.
+- Tickets: `update_ticket_approval` (renames an approval; nothing is emailed).
+- Projects: `list_project_templates` (reference only: `create_project` cannot apply a template), `update_project_comment` and
+  `update_task_comment` (private comments only; attachments are replaced as a whole and a current file is never dropped unless
+  `remove_attachment_names` names it).
+- Billing: `update_invoice` (a Draft or Submitted invoice; it never changes the status); `list_payments` and `get_payment`
+  (payments are read only: no tool records or deletes one, and `POST` and `DELETE /v1/payments` stay unexposed);
+  `list_product_charges`, `get_product_charge`, `create_product_charge` and `update_product_charge` (products charged to a ticket
+  or a project task).
+- Documents: `list_structured_documents`, `get_structured_document`, `list_structured_document_submissions` and
+  `get_structured_document_submission` (read only).
+
+### Gated (off by default, each call needs `confirm=true`)
+
+- `delete_asset_type`, `delete_client_location`, `delete_client_domain` and `delete_product_charge`: deletes. Gorelo refuses
+  `delete_asset_type` while any asset has the type, and a product charge that is waiting to be invoiced or has been invoiced.
+- `approve_invoice`: approves a Draft or Submitted invoice, which Gorelo pushes to the connected accounting system at once. A
+  later void happens in Gorelo only; the copy in the accounting system stays open until the user voids it there.
+- `create_contract` and `update_contract`: write a billing contract. A contract can make Gorelo approve and send its recurring
+  invoices on its own (`auto_approve_and_send`), which pushes them to the accounting system, and a Block Hours line raises an
+  invoice at once. `update_contract` archives a contract; contracts still cannot be deleted through this server, and it keeps
+  every service line and line item it is not told to remove.
+- The server instructions (rule 6) and the tool texts that name a gated tool now name these too.
+
+### Changed
+
+- `list_ticket_priorities` and `list_ticket_sources` read `GET /v1/tickets/priorities` and `/sources` (they were local tables).
+  The sources now include 7 Messenger, which tickets can carry but a write cannot set: `create_ticket` and `update_ticket` take 1
+  to 6, the `source_ids` filter takes 1 to 7.
+- `list_tickets` and `search_tickets` take `source_ids`, `closed_since` and `closed_before`; `update_ticket` takes `source_id`.
+- `list_org_users` takes `group_ids`; `list_items` takes `sort_by` and `sort_order`; `list_contacts` takes `location_ids`;
+  `list_contracts` takes `query`, created, updated and end date filters and sorting, and `get_contract` says what the new fields
+  show.
+- `create_client` and `update_client` take `client_type_id` (ids from `list_client_types`).
+- `create_contact` and `update_contact` take `tag_ids` (ids from `list_contact_tags`, active tags only). `update_contact` sends
+  `TagIds` only when `tag_ids` is given: it does not re-send the tags it reads, because Gorelo says "omit to leave it unchanged"
+  and a stored tag that has become inactive would make the whole update a 400. `tag_ids=[]` removes every tag.
+- `no_tax` on invoice lines (`create_invoice`, `update_invoice`, `create_approved_invoice`) now resolves the account's Tax Exempt
+  rate. A live test on 2026-10-30 showed that a line sent with a null `TaxId` gets the item's tax (an item taxed 9.25 percent
+  billed 0.09 on one dollar), so the tools no longer send null. They read `list_taxes` once per call and send the id of the one
+  active rate at exactly 0 percent, with no component at another rate, whose code or name is "Tax Exempt" (case and surrounding
+  spaces ignored). With none or more than one they refuse before any write and list the 0 percent rates by id and code, and tell
+  you to pass `tax_id` instead. The result carries a `note` naming the tax id used, and a line that still shows a tax amount adds a
+  `warning`. `create_approved_invoice` accepts `no_tax` again (its refusal is gone): the id is as safe as `tax_id`, and a line that
+  still shows tax gets a loud warning because the invoice is already pushed. The tools read `GET /v1/taxes` for this.
+
+### Left out
+
+- Two of the 44 new operations have no tool: `GET /v1/assets/tags/{tagId}` (the unpaged tag list is complete) and
+  `PATCH /v1/alerts/{alertId}` (`set_alert_status` uses the bulk operation).
+- The time history import is not built. A time entry's `CreatedOn` stays unexposed in this release, so no tool
+  can backdate or import time entries.
+
+### Known issue
+
+- Creating a contract through the API currently fails at Gorelo with HTTP 500 (code 070501) for every request. The tools
+  `create_contract` and `update_contract` are kept, off by default, and will work once Gorelo fixes it.
+
+### Documentation
+
+- `docs/OVERVIEW.md`, `docs/tool-catalog.md` and `.env.example` carry the new counts (160 tools: 143 regular and 17 gated; 98
+  with the default toolsets, 111 with the flag) and name the seven new gated tools wherever `GORELO_ENABLE_DESTRUCTIVE` is
+  described.
+- New `docs/GATED-TOOLS.md`: every gated tool, what it does, whether it can be undone, and how to switch tools on and off. The
+  seven new gated tools are off by default, like every gated tool: they exist only when `GORELO_ENABLE_DESTRUCTIVE` switches them
+  on.
+
 ## 1.4.2 (2026-10-24)
 
 Follows Gorelo's limits as measured on 2026-10-24 (the published description is unchanged: contract 05200951c89e, no operation

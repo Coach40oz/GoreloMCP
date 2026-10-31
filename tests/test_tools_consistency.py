@@ -7,12 +7,13 @@ These checks look at ALL tools at once (every toolset on, delete tools enabled):
 * every write that can email says who is emailed (or that nobody is);
 * every paged list says how to read on: pass next_cursor back as cursor, same filters, until has_more is false;
 * no tool text names a destructive tool without saying that it exists only when the operator enabled the destructive
-  tools (", when deletes are enabled" for a delete or void tool, ", when enabled" for create_approved_invoice and
-  share_document, the two gated tools that are not deletes: the first approves an invoice, which pushes it to accounting);
+  tools (", when deletes are enabled" for a delete or void tool, ", when enabled" for create_approved_invoice,
+  approve_invoice, create_contract, update_contract and share_document, the gated tools that are not deletes: the invoice
+  ones approve an invoice, which pushes it to accounting);
 * every paged list refuses a blank cursor, every clear_fields lists its names in the schema, a tool outside the
   projects toolset says so when it points at a project tool, the attachments of every tool that takes them are the
   name and url upload_attachment returned, and no tool text carries a number that belongs to one tenant;
-* the two tools that approve or void an invoice say that a void happens in Gorelo ONLY and that the copy already pushed
+* the three tools that approve or void an invoice say that a void happens in Gorelo ONLY and that the copy already pushed
   to the accounting system stays open (observed with Xero), before the instruction to ask the user, and no
   other tool text talks about voiding.
 
@@ -65,9 +66,15 @@ async def test_the_checked_listing_holds_every_registered_tool(server_factory):
     tools = await all_tools(server_factory)
     assert set(tools) == {spec.name for spec in REGISTRY.specs}
     assert {name for name in tools if kind_of(name) == "destructive"} == {
+        "approve_invoice",
         "create_approved_invoice",
+        "create_contract",
+        "delete_asset_type",
+        "delete_client_domain",
+        "delete_client_location",
         "delete_invoice",
         "delete_item",
+        "delete_product_charge",
         "delete_project_comment",
         "delete_project_task",
         "delete_ticket_comment",
@@ -75,6 +82,7 @@ async def test_the_checked_listing_holds_every_registered_tool(server_factory):
         "delete_uptime_check",
         "remove_document_related_item",
         "share_document",
+        "update_contract",
     }
 
 
@@ -150,10 +158,23 @@ EMAIL_WHO = {
         "it does not say whether creating the invoice already sends it",
         "tell the user who",
     ),
+    # auto_approve_and_send=true makes Gorelo approve and send the recurring invoices, and the invoices of
+    # contracts were seen EMAILED to the client about 2 minutes after creation (IsEmailSent, live 2026-10-04)
+    "create_contract": ("it emails each to the client", "approval pushes them to the accounting system"),
+    "update_contract": ("it emails each to the client", "approval pushes them to the accounting system"),
     "upload_attachment": ("Nothing is emailed",),
     "delete_project_comment": ("nothing is emailed",),
     "delete_project_task": ("nothing is emailed",),
     "delete_ticket_comment": ("Emails nobody",),
+    # 1.5.0: a client domain routes INBOUND email to a client; nothing is sent. The three domain tools say so (their texts name the
+    # routing, and no recipient exists)
+    "create_client_domain": ("routes that domain's inbound email to this client",),
+    "update_client_domain": ("which client its inbound email is matched to",),
+    "delete_client_domain": ("inbound email from it is no longer matched to the client",),
+    # 1.5.0: renaming an approval and editing a private comment send nothing
+    "update_ticket_approval": ("nothing is emailed",),
+    "update_project_comment": ("nobody is notified",),
+    "update_task_comment": ("nobody is notified",),
 }
 
 
@@ -214,6 +235,13 @@ PAGED_LISTS = {
     "list_documents",
     "list_document_versions",
     "list_deletions",
+    # 1.5.0
+    "list_policies",
+    "list_structured_documents",
+    "list_structured_document_submissions",
+    "list_payments",
+    "list_product_charges",
+    "list_project_templates",
 }
 
 
@@ -239,10 +267,14 @@ async def test_every_paged_list_says_to_pass_next_cursor_back_until_has_more_is_
 
 
 # The words that must follow the name of a destructive tool in a text that is not itself destructive. Every delete or
-# void tool is "when deletes are enabled". create_approved_invoice and share_document do not delete anything: the flag that
+# void tool is "when deletes are enabled". create_approved_invoice, approve_invoice, create_contract, update_contract and
+# share_document do not delete anything: the flag that
 # registers them is the same one, but the model is told "when enabled", which is true of them and does not promise a delete.
 GATE_CONDITIONS = {
     "create_approved_invoice": ", when enabled",
+    "approve_invoice": ", when enabled",  # 1.5.0: approves an existing invoice, which pushes it to accounting
+    "create_contract": ", when enabled",  # 1.5.0: creates a contract that bills the client
+    "update_contract": ", when enabled",  # 1.5.0
     "share_document": ", when enabled",
     "remove_document_related_item": ", when deletes are enabled",
 }
@@ -267,6 +299,8 @@ async def test_no_tool_text_names_a_destructive_tool_without_saying_deletes_must
                     assert condition_for(target).lstrip(", ") in text, f"{name} ({where}) names {target} without the condition: {text}"
     # the tools that name a destructive tool today, so a removed or renamed mention is noticed
     assert {(name, target) for name, _, target in mentions} == {
+        ("create_client_domain", "delete_client_domain"),
+        ("create_client_location", "delete_client_location"),
         ("create_invoice", "create_approved_invoice"),
         ("create_invoice", "delete_invoice"),
         ("create_item", "delete_item"),
@@ -274,6 +308,8 @@ async def test_no_tool_text_names_a_destructive_tool_without_saying_deletes_must
         ("list_document_related_items", "remove_document_related_item"),
         ("unshare_document", "share_document"),
         ("update_document", "share_document"),
+        ("update_invoice", "approve_invoice"),
+        ("update_product_charge", "delete_product_charge"),
         ("update_time_entry", "delete_time_entry"),
     }
 
@@ -322,10 +358,10 @@ async def test_create_invoice_points_at_the_gated_approval_tool_with_the_gate_ph
 # Every spelling of voiding in a tool text. The status name ("4 Void" in the status filter of list_invoices) is a label,
 # not an action, so the list below names it apart.
 VOID_WORD = re.compile(r"\bvoid(?:s|ed|ing)?\b", re.IGNORECASE)
-TOOLS_THAT_APPROVE_OR_VOID = ("create_approved_invoice", "delete_invoice")
+TOOLS_THAT_APPROVE_OR_VOID = ("approve_invoice", "create_approved_invoice", "delete_invoice")
 
 
-async def test_the_two_tools_that_approve_or_void_an_invoice_say_the_accounting_copy_stays_open(server_factory):
+async def test_the_tools_that_approve_or_void_an_invoice_say_the_accounting_copy_stays_open(server_factory):
     """Gorelo pushes an Approved invoice to Xero, and the
     DELETE that voids it (StatusId 4, get_invoice shows Void) leaves the Xero copy open. A model
     that approves or voids an invoice has to tell the user to void the copy there, so both tools say so in the text it
@@ -354,8 +390,12 @@ async def test_no_other_tool_text_talks_about_voiding_so_none_can_leave_the_acco
     tools = {name: tool for name, tool in (await all_tools(server_factory)).items() if toolset_of(name) == "billing"}
     assert {"list_invoices", "delete_invoice", "create_approved_invoice", "create_invoice"} <= set(tools)
     talking = {name for name, tool in tools.items() if any(VOID_WORD.search(text) for text in texts_of(tool).values())}
-    # the two read tools only name the status ("4 Void", "A Void invoice can still show AmountDue"): neither voids anything
-    assert talking == {*TOOLS_THAT_APPROVE_OR_VOID, "list_invoices", "get_invoice"}
+    # the two read tools only name the status ("4 Void", "A Void invoice can still show AmountDue"): neither voids anything;
+    # update_product_charge (1.5.0) only names the billable status "5 Void" (a charge status, nothing to do with an invoice);
+    # create_product_charge refuses 5 and so no longer names it at all
+    assert talking == {*TOOLS_THAT_APPROVE_OR_VOID, "list_invoices", "get_invoice", "update_product_charge"}
+    mentions = [text for text in texts_of(tools["update_product_charge"]).values() if VOID_WORD.search(text)]
+    assert mentions == ["1 Billable, 2 No charge, 3 Non-billable, 5 Void."]
     for name in ("list_invoices", "get_invoice"):
         mentions = [text for text in texts_of(tools[name]).values() if VOID_WORD.search(text)]
         assert all(re.search(r"\bVoid\b", text) and "voided" not in text and "voids" not in text for text in mentions), name
@@ -376,6 +416,7 @@ PAGED_BASE_ARGS = {
     "list_document_versions": {"document_id": uid(1)},
     "list_ticket_comments": {"ticket_id": uid(1)},
     "list_form_responses": {"form_id": "form-1"},
+    "list_structured_document_submissions": {"structured_document_id": uid(1)},
     "list_project_comments": {"project_id": uid(1)},
     "list_project_tasks": {"project_id": uid(1)},
 }
@@ -400,8 +441,8 @@ async def test_every_clear_fields_parameter_lists_its_accepted_names_in_the_sche
     tools = await all_tools(server_factory)
     with_clear = {name for name, tool in tools.items() if "clear_fields" in tool.inputSchema["properties"]}
     assert with_clear == {
-        "update_contact", "update_custom_asset", "update_document", "update_item", "update_project", "update_project_task",
-        "update_ticket",
+        "update_agent", "update_client_location", "update_contact", "update_contract", "update_custom_asset", "update_document",
+        "update_invoice", "update_item", "update_project", "update_project_task", "update_ticket",
     }
     for name in sorted(with_clear):
         clear = tools[name].inputSchema["properties"]["clear_fields"]
@@ -433,7 +474,10 @@ async def test_a_tool_outside_the_projects_toolset_that_points_at_a_project_tool
     # the places that point at a project tool today, so a removed or new pointer is noticed
     assert mentions == {
         ("create_form_submission_link", "parameter task_id", "list_project_tasks"),
+        ("create_product_charge", "description", "list_project_tasks"),
+        ("create_product_charge", "parameter task_id", "list_project_tasks"),
         ("create_time_entry", "parameter task_id", "list_project_tasks"),
+        ("list_product_charges", "parameter task_ids", "list_project_tasks"),
         ("list_time_entries", "parameter task_ids", "list_project_tasks"),
         ("upload_attachment", "parameter item_id", "list_project_tasks"),
         ("upload_attachment", "parameter item_id", "list_projects"),
@@ -456,7 +500,10 @@ async def test_the_task_id_pointers_use_the_same_phrase(server_factory):
 async def test_every_attachments_parameter_says_to_pass_only_the_name_and_url_from_upload_attachment(server_factory):
     tools = await all_tools(server_factory)
     with_attachments = {name for name, tool in tools.items() if "attachments" in tool.inputSchema["properties"]}
-    assert with_attachments == {"create_project_comment", "create_ticket_comment", "create_time_entry", "update_document"}
+    assert with_attachments == {
+        "create_project_comment", "create_ticket_comment", "create_time_entry", "update_document", "update_project_comment",
+        "update_task_comment",
+    }
     for name in sorted(with_attachments):
         text = flat(tools[name].inputSchema["properties"]["attachments"]["description"])
         assert re.search(r"Pass only (?:the )?name and url", text), (name, text)

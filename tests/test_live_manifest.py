@@ -163,14 +163,24 @@ SAMPLE_IDS = {
     "custom_asset": uid(12),
     "custom_property": 17,
     "document": uid(13),
+    "asset_type": 41,
+    "client_location": 42,
+    "client_domain": 43,
+    "product_charge": 44,
+    "contract": 45,
+    "alert": uid(14),
 }
 
 
-def test_the_kinds_are_the_eighteen_the_harness_records():
+def test_the_kinds_are_the_twenty_four_the_harness_records():
     assert KINDS == (
         "client", "contact", "ticket", "comment", "time_entry", "item", "uptime", "project", "section", "task",
         "project_comment", "attachment", "side_conversation", "approval", "invoice", "custom_asset", "custom_property", "document",
+        "asset_type", "client_location", "client_domain", "product_charge", "contract", "alert",
     )
+    for kind in ("asset_type", "client_location", "client_domain", "product_charge", "contract"):
+        assert ID_TYPES[kind] == "int", kind  # their path ids are int64 in the spec
+    assert ID_TYPES["alert"] == "uuid"  # alertId is a uuid
     assert set(ID_TYPES) == set(KINDS) and set(SAMPLE_IDS) == set(KINDS)
     assert ID_TYPES["invoice"] == "uuid"  # an invoice is named by a GUID, never by a number
     assert ID_TYPES["custom_asset"] == "uuid"  # so is a custom asset (customAssetId is a uuid)
@@ -193,7 +203,8 @@ def test_a_custom_property_is_recorded_by_the_id_of_its_custom_field_with_the_de
         "so it is written BEFORE the first write",
         "was_set (exactly the JSON false: the field was NOT set before the run; the guard refuses every write to a field whose "
         "record does not say so, and the cleanup touches only such a field)",
-        "`id` is an int for client, contact, time_entry and custom_property",
+        "`id` is an int for client, contact, time_entry, custom_property, asset_type, client_location, client_domain, "
+        "product_charge and contract",
     ):
         assert said in text, said
 
@@ -2861,3 +2872,267 @@ async def test_without_settings_the_api_key_comes_from_live_settings(tmp_path, m
     with pytest.raises(_env.EnvError, match="stop here"):
         await cleanup.run_cleanup(run, pace=0)
     assert seen == [True]
+
+
+# --------------------------------------------------------------------------
+# cleanup of the records of the 1.5.0 areas (contract 6c30770dffc0)
+# --------------------------------------------------------------------------
+
+ASSET_TYPE, LOCATION, DOMAIN, CHARGE, CONTRACT_ID, ALERT_ID = 4101, 4201, 4301, 4401, 4501, uid(31)
+RESIDUE_CONTRACT = cleanup.contract_residue("archived by the cleanup (update_contract)")
+
+
+def populate_areas(manifest: Manifest) -> None:
+    """One record of every kind the 1.5.0 areas make, in the order a run would make them (the alert first: it is recorded before its change)."""
+    label = manifest.label
+    manifest.created("alert", ALERT_ID, label("alert"), {"client_id": 9501, "status_before": 1})
+    manifest.created("asset_type", ASSET_TYPE, label("asset type"))
+    manifest.created("client_location", LOCATION, label("location"), {"client_id": 9501})
+    manifest.created("client_domain", DOMAIN, label("domain"), {"client_id": 9501, "name": RUN.lower() + ".example"})
+    manifest.created("contract", CONTRACT_ID, label("contract"), {"client_id": 9501})
+    manifest.created("ticket", TICKET, label("ticket"), {"contact_id": None, "client_id": 9501})
+    manifest.created("product_charge", CHARGE, label("product charge"), {"ticket_id": TICKET, "client_id": 9501})
+
+
+def alert_row(status: int = 2) -> dict:
+    # a Dismissed alert was dismissed inside the window of the run (RUN is 2099-10-02 10:15:00 UTC), as the area does
+    return {
+        "Id": ALERT_ID, "ClientId": 9501, "Status": {"Id": status, "Name": {1: "New", 2: "Dismissed", 3: "Ticketed"}[status]},
+        "DismissedOn": "2099-10-02T10:16:00Z" if status == 2 else None,
+    }
+
+
+def contract_row(status: int = 1) -> dict:
+    return {"Id": CONTRACT_ID, "Name": f"{RUN} contract", "Status": {"Id": status, "Name": "Active"}, "Client": {"Id": 9501, "Name": "t"}, "ServiceLines": []}
+
+
+def route_areas(mock, *, alert_status: int = 2, contract_status: int = 1, overrides: dict | None = None):
+    contract = {"status": contract_status}  # PATCH moves it to Archived, so the tool's read-back shows the change like Gorelo does
+
+    def patch_contract(request):
+        contract["status"] = request.json.get("StatusId", contract["status"])
+        return envelope(contract_row(contract["status"]))
+
+    routes = {
+        ("DELETE", f"/v1/assets/types/{ASSET_TYPE}"): envelope({"Id": ASSET_TYPE}),
+        ("DELETE", f"/v1/clients/9501/locations/{LOCATION}"): envelope({"Id": LOCATION}),
+        ("DELETE", f"/v1/clients/9501/domains/{DOMAIN}"): envelope({"Id": DOMAIN}),
+        ("DELETE", f"/v1/product-charges/{CHARGE}"): envelope({"Id": CHARGE}),
+        ("DELETE", f"/v1/tickets/{TICKET}"): envelope({"Id": "x"}),
+        ("GET", f"/v1/alerts/{ALERT_ID}"): envelope(alert_row(alert_status)),
+        ("PATCH", "/v1/alerts"): envelope({"UpdatedIds": [ALERT_ID]}),
+        ("GET", f"/v1/contracts/{CONTRACT_ID}"): lambda request: envelope(contract_row(contract["status"])),
+        ("PATCH", f"/v1/contracts/{CONTRACT_ID}"): patch_contract,
+    }
+    routes.update(overrides or {})
+    for (method, path), response in routes.items():
+        mock.on(method, path, response)
+
+
+async def test_cleanup_deletes_the_records_of_the_1_5_0_areas_with_their_tools_newest_first(manifest, mock_gorelo, run_it, lines):
+    populate_areas(manifest)
+    route_areas(mock_gorelo)
+    report = await run_it()
+    assert sent(mock_gorelo) == [
+        ("DELETE", f"/v1/product-charges/{CHARGE}"),  # delete_product_charge, before its ticket
+        ("DELETE", f"/v1/tickets/{TICKET}"),
+        ("GET", f"/v1/contracts/{CONTRACT_ID}"),  # get_contract: the contract is archived, never deleted
+        ("PATCH", f"/v1/contracts/{CONTRACT_ID}"),  # update_contract
+        ("GET", f"/v1/contracts/{CONTRACT_ID}"),  # and its read-back
+        ("DELETE", f"/v1/clients/9501/domains/{DOMAIN}"),  # delete_client_domain
+        ("DELETE", f"/v1/clients/9501/locations/{LOCATION}"),  # delete_client_location
+        ("DELETE", f"/v1/assets/types/{ASSET_TYPE}"),  # delete_asset_type
+        ("GET", f"/v1/alerts/{ALERT_ID}"),  # get_alert
+        ("PATCH", "/v1/alerts"),  # set_alert_status: Dismissed back to New
+    ]
+    assert report.ok and manifest.unresolved_intents() == []
+    assert [mock_gorelo.requests[1].json, mock_gorelo.requests[3].json, mock_gorelo.requests[-1].json] == [
+        None, {"StatusId": 3}, {"AlertIds": [ALERT_ID], "StatusId": 1},
+    ]
+    outcomes = {(r.kind, r.id): r.outcome for r in manifest.all_created()}
+    assert outcomes[("product_charge", CHARGE)] == outcomes[("client_domain", DOMAIN)] == outcomes[("asset_type", ASSET_TYPE)] == "Deleted"
+    assert outcomes[("client_location", LOCATION)] == "Deleted"
+    assert outcomes[("alert", ALERT_ID)] == "restored to New by the cleanup (set_alert_status; 1 alert(s) of its stack changed)"
+    # a contract cannot be deleted: archived, a known residue (neither cleaned nor a leftover)
+    assert outcomes[("contract", CONTRACT_ID)] == RESIDUE_CONTRACT
+    assert [(r.kind, r.id) for r in report.undeletable] == [("contract", CONTRACT_ID)] and report.leftovers == []
+    assert lines[-1] == "result: cleanup complete; 1 known undeletable record remains (see above)"
+    assert not any(request.method == "DELETE" and "/contracts" in request.path for request in mock_gorelo.requests)
+
+
+async def test_a_second_cleanup_sends_nothing_for_an_archived_contract_or_a_restored_alert(manifest, mock_gorelo, run_it):
+    populate_areas(manifest)
+    route_areas(mock_gorelo)
+    await run_it()
+    first = len(mock_gorelo.requests)
+    report = await run_it()
+    assert len(mock_gorelo.requests) == first and report.ok and [r.id for r in report.undeletable] == [CONTRACT_ID]
+
+
+async def test_a_contract_that_is_already_archived_is_only_recorded_and_one_that_is_gone_is_cleaned(manifest, mock_gorelo, run_it):
+    manifest.created("contract", CONTRACT_ID, manifest.label("contract"), {"client_id": 9501})
+    route_areas(mock_gorelo, contract_status=3)
+    report = await run_it()
+    assert sent(mock_gorelo) == [("GET", f"/v1/contracts/{CONTRACT_ID}")]
+    assert manifest.record("contract", CONTRACT_ID).outcome == cleanup.contract_residue("already archived") and report.ok
+    manifest.created("contract", 4502, manifest.label("another"), {"client_id": 9501})
+    mock_gorelo.on("GET", "/v1/contracts/4502", error_envelope(404, [("070404", "contract not found")]))
+    report = await run_it()
+    assert manifest.record("contract", 4502).outcome == "already gone (HTTP 404)" and manifest.record("contract", 4502).cleaned and report.ok
+
+
+@pytest.mark.parametrize(
+    "overrides, said",
+    [
+        ({("GET", f"/v1/contracts/{CONTRACT_ID}"): envelope({"Id": CONTRACT_ID})}, "could not be read first (the record has no readable Status)"),
+        ({("GET", f"/v1/contracts/{CONTRACT_ID}"): error_envelope(500, [("070500", "boom")])}, "could not be read first"),
+        ({("PATCH", f"/v1/contracts/{CONTRACT_ID}"): error_envelope(409, [("070409", "has time")])}, "update_contract did not confirm"),
+        ({("PATCH", f"/v1/contracts/{CONTRACT_ID}"): envelope(contract_row(1))}, "the read-back does not show the change"),
+    ],
+)
+async def test_a_contract_that_cannot_be_archived_is_a_leftover_that_says_so(manifest, mock_gorelo, run_it, overrides, said):
+    manifest.created("contract", CONTRACT_ID, manifest.label("contract"), {"client_id": 9501})
+    route_areas(mock_gorelo, overrides=overrides)
+    report = await run_it()
+    assert not report.ok and report.undeletable == []
+    assert said in manifest.record("contract", CONTRACT_ID).outcome and not manifest.record("contract", CONTRACT_ID).cleaned
+
+
+async def test_an_alert_that_is_new_or_gone_needs_no_restore_and_a_ticketed_one_is_a_leftover(manifest, mock_gorelo, run_it):
+    manifest.created("alert", ALERT_ID, manifest.label("alert"), {"client_id": 9501, "status_before": 1})
+    route_areas(mock_gorelo, alert_status=1)
+    report = await run_it()
+    assert sent(mock_gorelo) == [("GET", f"/v1/alerts/{ALERT_ID}")] and report.ok
+    assert manifest.record("alert", ALERT_ID).outcome == "already New, nothing to restore"
+    manifest.created("alert", uid(32), manifest.label("gone"), {"client_id": 9501})
+    mock_gorelo.on("GET", f"/v1/alerts/{uid(32)}", error_envelope(404, [("070404", "alert not found")]))
+    manifest.created("alert", uid(33), manifest.label("ticketed"), {"client_id": 9501})
+    mock_gorelo.on("GET", f"/v1/alerts/{uid(33)}", envelope({**alert_row(3), "Id": uid(33)}))
+    report = await run_it()
+    assert manifest.record("alert", uid(32)).outcome == "already gone (HTTP 404)"
+    ticketed = manifest.record("alert", uid(33))
+    assert not ticketed.cleaned and "reads status 3, not Dismissed (2)" in ticketed.outcome and not report.ok
+    assert not any(request.method == "PATCH" for request in mock_gorelo.requests)  # a Ticketed alert is never changed
+
+
+@pytest.mark.parametrize(
+    "overrides, said",
+    [
+        ({("PATCH", "/v1/alerts"): error_envelope(409, [("070409", "refused")])}, "set_alert_status did not confirm"),
+        ({("PATCH", "/v1/alerts"): envelope({"UpdatedIds": []})}, "the answer does not list the alert in UpdatedIds"),
+        ({("GET", f"/v1/alerts/{ALERT_ID}"): envelope({"Id": ALERT_ID})}, "the record has no readable Status"),
+    ],
+)
+async def test_an_alert_that_cannot_be_restored_is_a_leftover_that_says_how_to_restore_it(manifest, mock_gorelo, run_it, overrides, said):
+    manifest.created("alert", ALERT_ID, manifest.label("alert"), {"client_id": 9501, "status_before": 1})
+    route_areas(mock_gorelo, overrides=overrides)
+    report = await run_it()
+    record = manifest.record("alert", ALERT_ID)
+    assert said in record.outcome and "in the Gorelo app" in record.outcome and not record.cleaned and not report.ok
+
+
+async def test_an_alert_dismissed_before_the_run_started_or_with_no_readable_date_is_not_restored(manifest, mock_gorelo, run_it):
+    for n, dismissed_on in enumerate(("2099-10-02T10:14:59Z", "2026-10-01T10:00:00+02:00", None, "yesterday", "2099-10-02T10:16:00")):
+        ident = uid(40 + n)
+        manifest.created("alert", ident, manifest.label(f"alert {n}"), {"client_id": 9501, "status_before": 1})
+        mock_gorelo.on("GET", f"/v1/alerts/{ident}", envelope({**alert_row(2), "Id": ident, "DismissedOn": dismissed_on}))
+    report = await run_it()
+    assert not report.ok and not any(request.method == "PATCH" for request in mock_gorelo.requests)  # nothing was restored
+    for n in range(5):
+        record = manifest.record("alert", uid(40 + n))
+        assert not record.cleaned and "not inside this run's window" in record.outcome and "somebody else dismissed it" in record.outcome
+
+
+async def test_an_alert_dismissed_inside_the_runs_window_is_restored_and_the_boundary_second_counts(manifest, mock_gorelo, run_it):
+    manifest.created("alert", ALERT_ID, manifest.label("alert"), {"client_id": 9501, "status_before": 1, "dismissed_ids": [ALERT_ID]})
+    route_areas(mock_gorelo, overrides={("GET", f"/v1/alerts/{ALERT_ID}"): envelope({**alert_row(2), "DismissedOn": "2099-10-02T10:15:00Z"})})
+    report = await run_it()
+    assert report.ok and manifest.record("alert", ALERT_ID).cleaned
+
+
+async def test_the_cleanup_that_restores_an_alert_also_moves_only_the_ids_the_run_recorded_and_names_any_other(manifest, mock_gorelo, run_it):
+    other = uid(60)
+    manifest.created("alert", ALERT_ID, manifest.label("alert"), {"client_id": 9501, "status_before": 1, "dismissed_ids": [ALERT_ID]})
+    route_areas(mock_gorelo, overrides={("PATCH", "/v1/alerts"): envelope({"UpdatedIds": [ALERT_ID, other]})})
+    report = await run_it()
+    record = manifest.record("alert", ALERT_ID)
+    assert not record.cleaned and not report.ok
+    assert f"also moved 1 alert(s) back to New that the run did not record as dismissed ({other})" in record.outcome
+
+
+async def test_the_cleanup_restores_an_alert_whose_stack_the_run_recorded_as_dismissed(manifest, mock_gorelo, run_it):
+    other = uid(60)
+    manifest.created("alert", ALERT_ID, manifest.label("alert"), {"client_id": 9501, "status_before": 1, "dismissed_ids": [ALERT_ID, other]})
+    route_areas(mock_gorelo, overrides={("PATCH", "/v1/alerts"): envelope({"UpdatedIds": [ALERT_ID.upper(), other.upper()]})})
+    report = await run_it()
+    assert report.ok and manifest.record("alert", ALERT_ID).cleaned
+
+
+async def test_an_alert_of_another_client_is_never_restored_by_the_cleanup_guard(manifest, mock_gorelo, run_it):
+    manifest.created("alert", ALERT_ID, manifest.label("alert"), {"client_id": 9502, "status_before": 1})  # not the test client
+    route_areas(mock_gorelo)
+    report = await run_it()
+    assert not report.ok and "the guard refused it" in manifest.record("alert", ALERT_ID).outcome
+    assert not any(request.method == "PATCH" for request in mock_gorelo.requests)
+
+
+async def test_records_that_are_gone_or_cannot_be_deleted_are_told_apart(manifest, mock_gorelo, run_it):
+    populate_areas(manifest)
+    route_areas(
+        mock_gorelo,
+        overrides={
+            ("DELETE", f"/v1/assets/types/{ASSET_TYPE}"): error_envelope(404, [("070404", "gone")]),
+            ("DELETE", f"/v1/clients/9501/domains/{DOMAIN}"): error_envelope(409, [("070409", "in use")]),
+            ("DELETE", f"/v1/product-charges/{CHARGE}"): error_envelope(409, [("070409", "already invoiced")]),
+        },
+    )
+    report = await run_it()
+    assert manifest.record("asset_type", ASSET_TYPE).outcome == "already gone (HTTP 404)" and manifest.record("asset_type", ASSET_TYPE).cleaned
+    left = {record.kind for record in report.leftovers}
+    assert left == {"client_domain", "product_charge"} and not report.ok
+    assert manifest.record("client_location", LOCATION).cleaned  # one failure does not stop the others
+
+
+async def test_a_location_or_domain_without_a_client_in_its_details_is_not_deleted(manifest, mock_gorelo, run_it):
+    manifest.created("client_location", LOCATION, manifest.label("location"), {})
+    manifest.created("client_domain", DOMAIN, manifest.label("domain"), {"client_id": "9501"})
+    report = await run_it()
+    assert mock_gorelo.requests == [] and not report.ok
+    for kind, ident in (("client_location", LOCATION), ("client_domain", DOMAIN)):
+        assert "have no client_id, so it cannot be deleted" in manifest.record(kind, ident).outcome
+
+
+async def test_a_location_or_domain_recorded_for_another_client_is_refused_by_the_cleanup_guard(manifest, mock_gorelo, run_it):
+    manifest.created("client_location", LOCATION, manifest.label("location"), {"client_id": 9502})
+    manifest.created("client_domain", DOMAIN, manifest.label("domain"), {"client_id": 9502})
+    report = await run_it()
+    assert mock_gorelo.requests == [] and not report.ok
+    assert all("the guard refused it" in manifest.record(kind, ident).outcome for kind, ident in (("client_location", LOCATION), ("client_domain", DOMAIN)))
+
+
+async def test_the_cleanup_guard_is_still_a_plain_cleanup_guard_with_no_area(manifest, mock_gorelo, make_settings, monkeypatch):
+    populate_areas(manifest)
+    route_areas(mock_gorelo)
+    made = []
+
+    class Spy(LiveGuard):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            made.append((kwargs, self))
+
+    monkeypatch.setattr(cleanup, "LiveGuard", Spy)
+    await cleanup.run_cleanup(manifest, settings=make_settings(destructive=True), transport=mock_gorelo.transport, pace=0, echo=lambda line: None)
+    kwargs, guard = made[0]
+    assert kwargs == {"cleanup": True, "base_url": DEFAULT_BASE_URL} and guard.allow_areas == frozenset() and not guard.tripped
+
+
+def test_the_cleanup_docstring_names_the_records_of_the_1_5_0_areas():
+    text = " ".join(cleanup.__doc__.split())
+    for said in (
+        "delete_asset_type, delete_client_location, delete_client_domain and delete_product_charge",
+        "a contract cannot be deleted through the API and the guard refuses the DELETE",
+        "the cleanup guard allows exactly the body {\"StatusId\": 3}",
+        "alert          not a create: an EXISTING alert of the test client",
+        "the Drafts of the invoice_update area and the Draft that approve_invoice approves",
+    ):
+        assert " ".join(said.split()) in text, said
