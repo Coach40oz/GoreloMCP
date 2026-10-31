@@ -5,7 +5,7 @@ WHAT
   documents. GORELO_TOOLSETS chooses which are registered (a comma list, or all, which includes
   documents). The default is core, tickets, time, billing, uptime. projects, forms and documents
   are off. An unknown name stops the start with an error that lists the valid ones. With the
-  defaults the server registers 63 tools; with all toolsets 101 (more with the gated tools,
+  defaults the server registers 98 tools; with all toolsets 143 (158 with the gated tools,
   see 03).
 
 WHY

@@ -36,8 +36,9 @@ def flat(text):
 
 
 async def all_tools(server_factory):
-    """{name: the tool as a client lists it}, every toolset on and delete tools enabled."""
-    server = server_factory(toolsets=frozenset(TOOLSETS), destructive=True)
+    """{name: the tool as a client lists it}, every toolset on and delete tools enabled. The held tools (create_contract and
+    update_contract are not registered on a real server) are included through a view of the registry, so their texts are checked too."""
+    server = server_factory(registry=REGISTRY.with_held(), toolsets=frozenset(TOOLSETS), destructive=True)
     return {tool.name: tool for tool in await list_tools(server)}
 
 

@@ -3269,7 +3269,7 @@ def test_the_table_of_real_destructive_tools_is_complete():
 async def test_a_real_destructive_tool_refuses_text_and_numbers_for_confirm_and_sends_nothing(
     server_factory, mock_gorelo, name
 ):
-    server = server_factory(toolsets=frozenset(TOOLSETS), destructive=True)
+    server = server_factory(registry=REGISTRY.with_held(), toolsets=frozenset(TOOLSETS), destructive=True)  # create_contract and update_contract are held back
     async with Client(server) as session:
         for confirm in ("true", "True", "yes", "on", "1", 1, 0, 1.0, None, "false", [True]):
             text = await call_tool_error(session, name, {**REAL_DESTRUCTIVE_ARGUMENTS[name], "confirm": confirm})
@@ -3281,7 +3281,7 @@ async def test_a_real_destructive_tool_refuses_text_and_numbers_for_confirm_and_
 async def test_a_real_destructive_tool_still_refuses_a_missing_or_false_confirm_with_its_own_message(
     server_factory, mock_gorelo, name
 ):
-    server = server_factory(toolsets=frozenset(TOOLSETS), destructive=True)
+    server = server_factory(registry=REGISTRY.with_held(), toolsets=frozenset(TOOLSETS), destructive=True)
     async with Client(server) as session:
         for extra in ({}, {"confirm": False}):
             text = await call_tool_error(session, name, {**REAL_DESTRUCTIVE_ARGUMENTS[name], **extra})

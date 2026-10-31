@@ -1,6 +1,6 @@
 # Gated tools: what is blocked and how to turn it on
 
-Some tools can delete data, void an invoice, push an invoice to your accounting system, change a billing contract or make a
+Some tools can delete data, void an invoice, push an invoice to your accounting system or make a
 document readable outside Gorelo. This server ships with those tools switched off. This page lists them, says what each one
 does, and shows how to switch on the ones you want.
 
@@ -16,15 +16,13 @@ A gated tool has to pass three locks before it does anything:
 
 Your Gorelo API key must also have the matching scope (a delete needs the delete scope of that area), or Gorelo answers 403.
 
-## The gated tools (17)
+## The gated tools (15)
 
 | Toolset | Tool | What it does | Can it be undone? |
 |---|---|---|---|
 | `billing` | `approve_invoice` | Approves a Draft or Submitted invoice. Gorelo pushes it to your connected accounting system at once. | No. It can only be voided (`delete_invoice`). |
 | `billing` | `create_approved_invoice` | Creates an invoice that is already Approved, so it is pushed to your accounting system at once; it may email the addresses you give it. | No. It can only be voided. |
 | `billing` | `delete_invoice` | Deletes a Draft invoice, or voids an Approved one (it stays listed as Void). | No. |
-| `billing` | `create_contract` | Creates a billing contract. A Block Hours line raises a Draft invoice at once; `auto_approve_and_send` makes Gorelo approve and email the recurring invoices on its own. | Archive it with `update_contract`; this server cannot delete contracts. |
-| `billing` | `update_contract` | Changes a contract, removes service lines or line items, archives or restores it. | Partly: archive and restore are reversible, removed lines are not. |
 | `billing` | `delete_item` | Deletes a catalog item. | No. |
 | `billing` | `delete_product_charge` | Removes a product charged to a ticket or task. | Charge it again with `create_product_charge`. |
 | `core` | `delete_asset_type` | Deletes a custom asset type (Gorelo's own types cannot be deleted). | No. |
@@ -39,6 +37,15 @@ Your Gorelo API key must also have the matching scope (a delete needs the delete
 | `documents` | `remove_document_related_item` | Removes a link between a document and another record (neither record is deleted). | Link them again with `add_document_related_items`. |
 
 [tool-catalog.md](tool-catalog.md) has the full text of every tool.
+
+## Held back
+
+`create_contract` and `update_contract` (create and change a billing contract) are held back since 1.5.1. Gorelo has not
+released contract writes yet: as of 2026-10-31 it answers every contract create with HTTP 500 (code 070501). Until it does,
+those two tools are not registered under any setting, not with `GORELO_ENABLE_DESTRUCTIVE=1` and not when a list names
+them. A list that names them is not an error: the server drops the names and logs one warning line before the ready line,
+`gorelo-mcp held tools ignored: create_contract, update_contract (held back until Gorelo releases them)`, then starts as
+usual. `list_contracts` and `get_contract` are not affected.
 
 ## Never available
 
@@ -98,5 +105,5 @@ of the list. Then restart as above.
   Whether a void in Gorelo also voids the accounting copy has varied between tests, so the tool texts tell Claude to warn you
   that the copy may stay open. After a void, check your accounting system.
 - **Shared documents.** A public link works for anyone who has it until you unshare the document.
-- **Contracts (known issue).** As of 2026-10-31, Gorelo answers every contract create with HTTP 500 (code 070501), so
-  `create_contract` fails until Gorelo fixes it. `update_contract` has not been tried against a live contract yet.
+- **Contracts (held back).** `create_contract` and `update_contract` cannot be switched on in 1.5.1 (see "Held back"
+  above): Gorelo has not released contract writes yet.

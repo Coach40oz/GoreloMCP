@@ -271,7 +271,8 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                line item that were sent with an Id only kept their values (Quantity, UnitPrice, Description, DiscountPercent, Tax,
                BillableStatus), then archive it (update_contract status=archived, StatusId 3). A contract CANNOT be deleted through the API
                (the guard refuses the DELETE): the archived contract is a KNOWN RESIDUE, like an archived document. SKIPPED unless
-               --with-contracts is given
+               --with-contracts is given, and SKIPPED whatever the flags say while create_contract and update_contract are held back
+               (tools._common.HELD_TOOLS, since 1.5.1: Gorelo has not released contract writes), with the reason in the summary
     comment_edits
                an MCPTEST project of the test client (as in the projects area: the Project scope, a project type and the Everyone group),
                a section and a task, a Private project comment and a Private task comment, update_project_comment and update_task_comment
@@ -1024,6 +1025,15 @@ class OptIn:
     def skip_reason(self) -> str:
         return f"not live-tested by default: {self.what}"
 
+    @property
+    def held_tools(self) -> list[str]:
+        """The tools of this area that the server holds back (tools._common.HELD_TOOLS): none is registered, so the area cannot run."""
+        return sorted(name for name in self.tools if REGISTRY.is_held(name))
+
+    @property
+    def held_reason(self) -> str:
+        return f"{' and '.join(self.held_tools)} held back until Gorelo releases contract writes: the server does not register them, so nothing was created"
+
 
 OPT_INS: tuple[OptIn, ...] = (
     OptIn(
@@ -1131,7 +1141,7 @@ def tools_for(
     if not with_invoices:
         tools = tools - INVOICE_TOOLS
     for key in opt_in:
-        tools = tools | OPT_IN_BY_KEY[key].tools
+        tools = tools | {name for name in OPT_IN_BY_KEY[key].tools if not REGISTRY.is_held(name)}  # a held tool is not callable
     return tools
 
 
@@ -3523,6 +3533,8 @@ def opt_in(m: Matrix, key: str) -> OptIn:
     are not even callable) with the reason otherwise. Every one of these areas needs the TEST CLIENT Active, like every write run (the
     check of run_matrix, before a manifest is made); none of them changes the status of a client."""
     area = OPT_IN_BY_KEY[key]
+    if area.held_tools:  # while the area's tools are held back it is skipped, whether or not its flag was given
+        raise Skipped(area.held_reason)
     if key not in m.opt_in:
         raise Skipped(area.skip_reason)
     return area

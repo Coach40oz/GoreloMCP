@@ -2,6 +2,24 @@
 
 All notable changes to this project are listed here, newest first, in the plain style of Keep a Changelog.
 
+## 1.5.1 (2026-10-31)
+
+Holds back the two contract write tools until Gorelo releases contract writes (every `POST /v1/contracts` answers HTTP 500,
+code 070501). The server goes from 160 to 158 tools: 143 regular and 15 gated.
+
+### Changed
+
+- `create_contract` and `update_contract` are held back: they are not registered under any setting, not with
+  `GORELO_ENABLE_DESTRUCTIVE=1` and not when a list names them. Their code is unchanged and comes back when the hold is lifted.
+- A held name in the `GORELO_ENABLE_DESTRUCTIVE` list is ignored with a warning, not an error: the start logs one line,
+  `gorelo-mcp held tools ignored: create_contract, update_contract (held back until Gorelo releases them)`, before the ready
+  line. The error that lists the valid gated tool names no longer lists the two.
+- `list_contracts` and `get_contract` are unchanged.
+- The live test harness skips its `contracts` area while the two tools are held, and its cleanup leaves a contract it cannot
+  archive as a leftover for the Gorelo app.
+- `docs/GATED-TOOLS.md` (15 gated tools, a "Held back" section), `docs/tool-catalog.md`, the README, `docs/INSTALL.md` and
+  `docs/TROUBLESHOOTING.md` carry the new counts.
+
 ## 1.5.0 (2026-10-31)
 
 Follows Gorelo's new API description of 2026-10-29 (contract 6c30770dffc0): 169 operations, up from 125 (44 added, none removed,

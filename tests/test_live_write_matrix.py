@@ -54,6 +54,7 @@ from scripts.live import _env, cleanup, write_matrix
 from scripts.live.guard import _CREATES, GuardViolation, LiveGuard
 from scripts.live.manifest import Manifest, Record
 from spec import load_spec_index
+from tools import _common
 from tools._common import format_gorelo_error
 
 pytestmark = pytest.mark.anyio
@@ -80,6 +81,14 @@ CONTACT_FIELDS = (
 def _never_read_the_real_env(monkeypatch, tmp_path):
     """Whatever a test does, the service's .env is not the file that gets opened."""
     monkeypatch.setattr(_env, "ENV_FILE", tmp_path / "no-such-dir" / ".env")
+
+
+@pytest.fixture(autouse=True)
+def _contract_writes_released(monkeypatch):
+    """create_contract and update_contract are held back (tools._common.HELD_TOOLS, since 1.5.1). These tests exercise the code of the
+    contracts area and of the cleanup of a contract as they will run once Gorelo releases contract writes, so the set is emptied here;
+    a test of the held state sets it again (`monkeypatch.setattr(_common, "HELD_TOOLS", frozenset({...}))`)."""
+    monkeypatch.setattr(_common, "HELD_TOOLS", frozenset())
 
 
 def now_text() -> str:

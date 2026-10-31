@@ -11,12 +11,13 @@ uv run --frozen python scripts/gen_tool_catalog.py
 
 `tests/test_tool_catalog.py` fails when the committed file differs from a fresh generation.
 
-The registry holds 160 tools in 8 toolsets. A server started with the default settings (toolsets core, tickets, time, billing, uptime; GORELO_ENABLE_DESTRUCTIVE off, so no gated tool: no delete or void tool, no `remove_document_related_item`, no `create_approved_invoice`, no `approve_invoice`, no `create_contract`, no `update_contract` and no `share_document`) registers 98 of them.
+The registry holds 158 tools in 8 toolsets. A server started with the default settings (toolsets core, tickets, time, billing, uptime; GORELO_ENABLE_DESTRUCTIVE off, so no gated tool: no delete or void tool, no `remove_document_related_item`, no `create_approved_invoice`, no `approve_invoice` and no `share_document`) registers 98 of them.
 
 How to read it:
 
 - Toolsets are chosen with `GORELO_TOOLSETS` (a comma list, or `all`). Default: core, tickets, time, billing, uptime.
-- Kind `read` changes nothing in Gorelo. `write` creates or changes data. `write (overwrites data)` also replaces or clears data that already exists (the MCP destructiveHint is set). `destructive` tools are the delete and void tools, `remove_document_related_item` (it removes the link between a document and another record), `create_approved_invoice` (it creates an invoice that is Approved at once, so Gorelo pushes it to the connected accounting system and may email its recipients), `approve_invoice` (it approves an existing invoice, which Gorelo pushes to the connected accounting system at once), `create_contract` and `update_contract` (they write a billing contract, which can make Gorelo approve and send recurring invoices on its own) and `share_document` (it turns on a document's public link or publishes it to the client portal, so anyone who has the link can read it outside Gorelo): each is registered only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name (1 registers all of them, a comma list of tool names registers just those), and every call also needs `confirm=true`.
+- Kind `read` changes nothing in Gorelo. `write` creates or changes data. `write (overwrites data)` also replaces or clears data that already exists (the MCP destructiveHint is set). `destructive` tools are the delete and void tools, `remove_document_related_item` (it removes the link between a document and another record), `create_approved_invoice` (it creates an invoice that is Approved at once, so Gorelo pushes it to the connected accounting system and may email its recipients), `approve_invoice` (it approves an existing invoice, which Gorelo pushes to the connected accounting system at once) and `share_document` (it turns on a document's public link or publishes it to the client portal, so anyone who has the link can read it outside Gorelo): each is registered only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name (1 registers all of them, a comma list of tool names registers just those), and every call also needs `confirm=true`.
+- Held back: `create_contract`, `update_contract` (they write a billing contract) exist in the code but no setting registers them, not even GORELO_ENABLE_DESTRUCTIVE=1 or a list that names them, until Gorelo releases contract writes. They are not in this catalog; `list_contracts` and `get_contract` are.
 - Ops are the Gorelo operations (`METHOD /v1/path`) the tool may call. Any other operation is refused before any HTTP request.
 - Required params are the parameters a call must supply. Every other parameter is optional.
 - What it does is the first sentence of the tool description; the full text is what claude.ai reads.
@@ -28,12 +29,12 @@ How to read it:
 | core | yes | 52 | 34 | 15 | 3 |
 | tickets | yes | 20 | 12 | 7 | 1 |
 | time | yes | 7 | 4 | 2 | 1 |
-| billing | yes | 26 | 12 | 7 | 7 |
+| billing | yes | 24 | 12 | 7 | 5 |
 | uptime | yes | 6 | 2 | 3 | 1 |
 | projects | no | 25 | 12 | 11 | 2 |
 | forms | no | 3 | 2 | 1 | 0 |
 | documents | no | 21 | 10 | 9 | 2 |
-| Total | | 160 | 88 | 55 | 17 |
+| Total | | 158 | 88 | 55 | 15 |
 
 ## core
 
@@ -143,7 +144,6 @@ In the default set.
 |---|---|---|---|---|
 | `approve_invoice` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `GET /v1/invoices/{invoiceId}`, `PATCH /v1/invoices/{invoiceId}` | `invoice_id` | Approve a Draft or Submitted invoice and return it read back. |
 | `create_approved_invoice` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `POST /v1/invoices`, `GET /v1/invoices/{invoiceId}`, `GET /v1/taxes` | `client_id`, `line_items` | Create an APPROVED invoice for a client and return it. |
-| `create_contract` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `POST /v1/contracts`, `GET /v1/contracts/{contractId}` | `name`, `client_id`, `service_lines` | Create a billing contract with its service lines and return it as get_contract shows it. |
 | `create_invoice` | write | `POST /v1/invoices`, `GET /v1/invoices/{invoiceId}`, `GET /v1/taxes` | `client_id`, `line_items` | Create a DRAFT invoice for a client from catalog items and return it with its lines and totals. |
 | `create_item` | write | `POST /v1/items`, `GET /v1/items/{itemId}` | `type`, `name` | Create a product or a bundle and return it. |
 | `create_product_charge` | write | `POST /v1/product-charges`, `GET /v1/product-charges/{productChargeId}` | `item_id`, `quantity` | Charge a catalog product or bundle to ONE ticket or ONE project task and return the created charge. |
@@ -163,7 +163,6 @@ In the default set.
 | `list_payments` | read | `GET /v1/payments` | none | List payments received from clients, newest first, one page at a time. |
 | `list_product_charges` | read | `GET /v1/product-charges` | none | List products charged to tickets and project tasks, one page at a time; every filter given must match. |
 | `list_taxes` | read | `GET /v1/taxes` | none | List tax rates (unpaged); resolves tax_id. |
-| `update_contract` | destructive (only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name) | `GET /v1/contracts/{contractId}`, `PATCH /v1/contracts/{contractId}` | `contract_id` | Change a contract and return it as get_contract shows it. |
 | `update_invoice` | write (overwrites data) | `GET /v1/invoices/{invoiceId}`, `PATCH /v1/invoices/{invoiceId}`, `GET /v1/taxes` | `invoice_id` | Change a Draft or Submitted invoice and return it read back. |
 | `update_item` | write (overwrites data) | `PATCH /v1/items/{itemId}`, `GET /v1/items/{itemId}` | `item_id` | Change fields of a catalog item (partial update) and return it. |
 | `update_product_charge` | write (overwrites data) | `PATCH /v1/product-charges/{productChargeId}` | `product_charge_id` | Change a product charge and return the updated charge. |

@@ -88,7 +88,9 @@ The records of the 1.5.0 areas (contract 6c30770dffc0), each recorded in the man
                    exists, like a document. The area archives it (StatusId 3) and records the outcome (CONTRACT_RESIDUE_TAIL). For a contract a
                    STOPPED run left active the cleanup reads it (get_contract), archives it with update_contract status=archived (the cleanup
                    guard allows exactly the body {"StatusId": 3}), checks Status.Id 3 in the answer and records the same outcome; it is
-                   reported apart as known undeletable (neither cleaned nor a leftover, never alone a failure). A 404 is "already gone"
+                   reported apart as known undeletable (neither cleaned nor a leftover, never alone a failure). A 404 is "already gone".
+                   While update_contract is held back (tools._common.HELD_TOOLS, since 1.5.1) the cleanup does not call it: an Active
+                   contract is a LEFTOVER that says to archive it in the Gorelo app (get_contract still reads it first)
     alert          not a create: an EXISTING alert of the test client that the alert_status area dismissed (the record is written BEFORE the
                    first change). The cleanup reads it (get_alert); New needs nothing, a Dismissed one is restored with set_alert_status
                    (the cleanup guard allows StatusId 1 for a recorded alert only) and the answer must list it in UpdatedIds; a Ticketed or
@@ -159,6 +161,7 @@ from scripts.live import guard as live_guard
 from scripts.site_config import SITE, SiteConfigError, site
 from server import build_server
 from settings import Settings
+from tools._common import REGISTRY
 
 MAX_REOPEN_ATTEMPTS = 3
 PACE_SECONDS = 1.0
@@ -584,6 +587,13 @@ class _Cleaner:
             return
         if raw_id == CONTRACT_ARCHIVED:
             self._note_contract(ident, "already archived")
+            return
+        if REGISTRY.is_held("update_contract"):  # held back (1.5.1): the server has no such tool, so the contract is left for the Gorelo app
+            self.manifest.cleanup_failed(
+                "contract",
+                ident,
+                self._safe(f"left over: contract {ident} is not archived, update_contract is held back until Gorelo releases contract writes; archive it in the Gorelo app"),
+            )
             return
         archived = await self._tool("update_contract", {"contract_id": ident, "status": "archived", "confirm": True})
         answered = archived.data.get("Status") if archived.ok and isinstance(archived.data, dict) else None

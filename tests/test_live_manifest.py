@@ -22,6 +22,7 @@ from scripts.live import manifest as manifest_module
 from scripts.live.guard import GuardViolation, LiveGuard
 from scripts.live.manifest import ID_TYPES, KINDS, Manifest, Record, normalize_id
 from settings import DEFAULT_BASE_URL, TOOLSETS
+from tools import _common
 
 pytestmark = pytest.mark.anyio
 
@@ -34,6 +35,14 @@ APP_ENV_FILE = _env.ENV_FILE  # the real constant, read before any fixture repla
 def _never_read_the_real_env(monkeypatch, tmp_path):
     """Whatever a test does, the service's .env is not the file that gets opened."""
     monkeypatch.setattr(_env, "ENV_FILE", tmp_path / "no-such-dir" / ".env")
+
+
+@pytest.fixture(autouse=True)
+def _contract_writes_released(monkeypatch):
+    """create_contract and update_contract are held back (tools._common.HELD_TOOLS, since 1.5.1). The cleanup tests below run the
+    archive of a contract as it will work once Gorelo releases contract writes, so the set is emptied; the tests of the held state
+    set it again."""
+    monkeypatch.setattr(_common, "HELD_TOOLS", frozenset())
 
 
 @pytest.fixture
@@ -2996,6 +3005,29 @@ async def test_a_contract_that_cannot_be_archived_is_a_leftover_that_says_so(man
     report = await run_it()
     assert not report.ok and report.undeletable == []
     assert said in manifest.record("contract", CONTRACT_ID).outcome and not manifest.record("contract", CONTRACT_ID).cleaned
+
+
+async def test_while_update_contract_is_held_back_an_active_contract_is_a_leftover_for_the_gorelo_app_and_nothing_is_written(
+    manifest, mock_gorelo, run_it, monkeypatch
+):
+    monkeypatch.setattr(_common, "HELD_TOOLS", frozenset({"create_contract", "update_contract"}))
+    manifest.created("contract", CONTRACT_ID, manifest.label("contract"), {"client_id": 9501})
+    route_areas(mock_gorelo)
+    report = await run_it()  # does not crash: the contract is read, not archived
+    assert sent(mock_gorelo) == [("GET", f"/v1/contracts/{CONTRACT_ID}")]
+    record = manifest.record("contract", CONTRACT_ID)
+    assert not report.ok and report.undeletable == [] and not record.cleaned
+    assert "update_contract is held back until Gorelo releases contract writes; archive it in the Gorelo app" in record.outcome
+    assert [r.id for r in report.leftovers] == [CONTRACT_ID]
+    # an archived one needs no write, so it stays a known residue, and one that is gone is cleaned, held or not
+    manifest.created("contract", 4502, manifest.label("archived"), {"client_id": 9501})
+    mock_gorelo.on("GET", "/v1/contracts/4502", envelope({**contract_row(3), "Id": 4502}))
+    manifest.created("contract", 4503, manifest.label("gone"), {"client_id": 9501})
+    mock_gorelo.on("GET", "/v1/contracts/4503", error_envelope(404, [("070404", "contract not found")]))
+    await run_it()
+    assert manifest.record("contract", 4502).outcome == cleanup.contract_residue("already archived")
+    assert manifest.record("contract", 4503).outcome == "already gone (HTTP 404)"
+    assert not any(request.method == "PATCH" for request in mock_gorelo.requests)
 
 
 async def test_an_alert_that_is_new_or_gone_needs_no_restore_and_a_ticketed_one_is_a_leftover(manifest, mock_gorelo, run_it):

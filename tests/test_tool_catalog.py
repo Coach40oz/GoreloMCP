@@ -34,6 +34,8 @@ import gen_tool_catalog as gen  # noqa: E402
 
 EM_DASH, EN_DASH = chr(0x2014), chr(0x2013)
 MARK = "only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name"
+# The tools a server can register: the held ones (create_contract and update_contract, tools._common.HELD_TOOLS) are not in the catalog.
+SPECS = [spec for spec in REGISTRY.specs if not REGISTRY.is_held(spec.name)]
 
 
 def parse_catalog(text):
@@ -112,16 +114,16 @@ def test_the_catalog_is_plain_ascii_dash_free_text_with_one_final_newline():
 
 def test_every_registered_tool_is_listed_once_in_its_own_toolset():
     sections, _ = parse_catalog(CATALOG.read_text(encoding="utf-8"))
-    assert list(sections) == [name for name in TOOLSETS if any(s.toolset == name for s in REGISTRY.specs)]
+    assert list(sections) == [name for name in TOOLSETS if any(s.toolset == name for s in SPECS)]
     listed = [(toolset, name) for toolset, rows in sections.items() for name in rows]
-    assert len(listed) == len(set(listed)) == len(REGISTRY.specs)
-    assert sorted(listed) == sorted((spec.toolset, spec.name) for spec in REGISTRY.specs)
+    assert len(listed) == len(set(listed)) == len(SPECS)
+    assert sorted(listed) == sorted((spec.toolset, spec.name) for spec in SPECS)
     assert len({name for _, name in listed}) == len(listed), "a tool name appears in two toolsets"
 
 
 def test_every_row_has_the_tools_kind_ops_and_required_params():
     sections, _ = parse_catalog(CATALOG.read_text(encoding="utf-8"))
-    for spec in REGISTRY.specs:
+    for spec in SPECS:
         row = sections[spec.toolset][spec.name]
         assert row["kind"].split(" ")[0] == spec.kind, spec.name
         assert row["ops"] == list(spec.ops), spec.name
@@ -131,7 +133,7 @@ def test_every_row_has_the_tools_kind_ops_and_required_params():
 
 def test_overwriting_writes_are_marked_and_plain_writes_are_not():
     sections, _ = parse_catalog(CATALOG.read_text(encoding="utf-8"))
-    for spec in REGISTRY.specs:
+    for spec in SPECS:
         kind = sections[spec.toolset][spec.name]["kind"]
         if spec.kind == "write":
             assert kind == ("write (overwrites data)" if spec.destructive_hint else "write"), spec.name
@@ -141,7 +143,7 @@ def test_overwriting_writes_are_marked_and_plain_writes_are_not():
 
 def test_destructive_tools_say_when_they_exist_and_no_other_tool_does():
     sections, _ = parse_catalog(CATALOG.read_text(encoding="utf-8"))
-    destructive = {spec.name for spec in REGISTRY.specs if spec.kind == "destructive"}
+    destructive = {spec.name for spec in SPECS if spec.kind == "destructive"}
     assert destructive, "the registry has delete tools"
     for rows in sections.values():
         for name, row in rows.items():
@@ -156,7 +158,7 @@ def test_the_intro_says_what_destructive_means_for_every_gated_tool_that_is_not_
     # it to the connected accounting system and may email its recipients) instead of deleting anything, so "destructive
     # tools delete or void records" was no longer true. The fresh generation is checked: it is what the file will say.
     bullet = next(line for line in gen.build_catalog().splitlines() if line.startswith("- Kind `read`"))
-    gated = [spec.name for spec in REGISTRY.specs if spec.kind == "destructive"]
+    gated = [spec.name for spec in SPECS if spec.kind == "destructive"]
     assert "create_approved_invoice" in gated
     for name in (name for name in gated if not name.startswith("delete_")):
         assert f"`{name}`" in bullet, name
@@ -170,7 +172,7 @@ def test_the_intro_sentence_about_the_default_server_names_the_flag_and_what_it_
     # also registers create_approved_invoice (it approves an invoice and pushes it to accounting). The sentence names
     # the flag and the kinds of tool it gates. The fresh generation is checked: it is what the file will say.
     sentence = next(line for line in gen.build_catalog().splitlines() if line.startswith("The registry holds"))
-    gated = {spec.name for spec in REGISTRY.specs if spec.kind == "destructive"}
+    gated = {spec.name for spec in SPECS if spec.kind == "destructive"}
     assert "deletes off" not in sentence
     assert "GORELO_ENABLE_DESTRUCTIVE off, so no gated tool" in sentence
     assert "no delete or void tool" in sentence
@@ -187,7 +189,7 @@ def test_the_summary_table_counts_what_the_registry_holds():
     text = CATALOG.read_text(encoding="utf-8")
     _, summary = parse_catalog(text)
     for name in TOOLSETS:
-        specs = [s for s in REGISTRY.specs if s.toolset == name]
+        specs = [s for s in SPECS if s.toolset == name]
         expected = [
             "yes" if name in DEFAULT_TOOLSETS else "no",
             str(len(specs)),
@@ -196,18 +198,28 @@ def test_the_summary_table_counts_what_the_registry_holds():
         assert summary[name] == expected, name
     total = [
         "",
-        str(len(REGISTRY.specs)),
-        *(str(sum(1 for s in REGISTRY.specs if s.kind == kind)) for kind in ("read", "write", "destructive")),
+        str(len(SPECS)),
+        *(str(sum(1 for s in SPECS if s.kind == kind)) for kind in ("read", "write", "destructive")),
     ]
     assert summary["Total"] == total
     default_registered = len(REGISTRY.select(DEFAULT_TOOLSETS, False))
-    assert f"The registry holds {len(REGISTRY.specs)} tools in {len(TOOLSETS)} toolsets." in text
+    assert f"The registry holds {len(SPECS)} tools in {len(TOOLSETS)} toolsets." in text
     assert f"registers {default_registered} of them." in text
+
+
+def test_the_held_tools_are_named_as_held_back_and_listed_nowhere_else():
+    text = CATALOG.read_text(encoding="utf-8")
+    bullet = next(line for line in text.splitlines() if line.startswith("- Held back: "))
+    assert "`create_contract`, `update_contract`" in bullet and "no setting registers them" in bullet
+    assert "`list_contracts` and `get_contract` are" in bullet
+    sections, _ = parse_catalog(text)
+    assert not {name for rows in sections.values() for name in rows} & _common.HELD_TOOLS
+    assert "`create_contract`" not in gen.GATED_OFF and "`update_contract`" not in gen.GATED_OFF
 
 
 def test_the_first_sentence_is_what_the_model_is_shown():
     sections, _ = parse_catalog(CATALOG.read_text(encoding="utf-8"))
-    for spec in REGISTRY.specs:
+    for spec in SPECS:
         described = Tool.from_function(spec.fn).description
         listed = sections[spec.toolset][spec.name]["summary"].replace("\\|", "|")
         assert listed == gen.first_sentence(described), spec.name

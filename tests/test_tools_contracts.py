@@ -25,9 +25,13 @@ from fastmcp.exceptions import ToolError
 import tools  # noqa: F401  (importing the package registers every tool)
 from gorelo_client import FORBIDDEN_OPS, is_forbidden_op
 from tools import _common, contracts
-from tools._common import MAX_ID, REGISTRY
+from tools._common import HELD_TOOLS, MAX_ID, REGISTRY
 
 pytestmark = pytest.mark.anyio
+
+# create_contract and update_contract are held back (tools._common.HELD_TOOLS: Gorelo has not released contract writes), so no real
+# server registers them. These tests keep exercising their code through a view of the registry that does not hold them back.
+WITH_HELD = REGISTRY.with_held()
 
 EM_DASH, EN_DASH = chr(0x2014), chr(0x2013)
 DESCRIPTION_MAX, PARAM_DESCRIPTION_MAX = 900, 220  # CONTRIBUTING.md: never more than these
@@ -146,8 +150,8 @@ def rejected(tool, status, code, detail):
 
 @pytest.fixture
 def server(server_factory):
-    """Every billing tool, the two gated ones included (the gate itself is tested through server_factory)."""
-    return server_factory(destructive=True)
+    """Every billing tool, the two held gated ones included (the gate itself is tested through server_factory)."""
+    return server_factory(registry=WITH_HELD, destructive=True)
 
 
 def module_specs():
@@ -224,18 +228,25 @@ def test_the_declared_ops_exist_and_the_query_names_are_the_spec_ones(spec_index
 
 async def test_the_read_tools_need_no_flag_and_the_two_writes_are_gated(server_factory):
     for destructive in (False, True):
-        names = {t.name for t in await list_tools(server_factory(toolsets={"billing"}, destructive=destructive))}
+        names = {t.name for t in await list_tools(server_factory(registry=WITH_HELD, toolsets={"billing"}, destructive=destructive))}
         assert set(EXPECTED_READS) <= names
         assert set(EXPECTED_GATED) <= names if destructive else not names & set(EXPECTED_GATED)
         assert not [name for name in names if name.startswith("delete_contract")]
-    names = {t.name for t in await list_tools(server_factory(toolsets={"core", "tickets", "time"}, destructive=True))}
+    names = {t.name for t in await list_tools(server_factory(registry=WITH_HELD, toolsets={"core", "tickets", "time"}, destructive=True))}
     assert not names & set(EXPECTED_TOOLS)
+
+
+async def test_a_real_server_holds_the_two_writes_back_under_every_setting(server_factory):
+    assert HELD_TOOLS == set(EXPECTED_GATED)
+    for destructive, named in ((False, None), (True, None), (True, frozenset(EXPECTED_GATED)), (True, frozenset({"create_contract"}))):
+        names = {t.name for t in await list_tools(server_factory(toolsets={"billing"}, destructive=destructive, destructive_tools=named))}
+        assert set(EXPECTED_READS) <= names and not names & set(EXPECTED_GATED), (destructive, named)
 
 
 async def test_a_gated_list_can_enable_one_of_the_two_without_the_other(server_factory):
     names = {
         t.name
-        for t in await list_tools(server_factory(toolsets={"billing"}, destructive=True, destructive_tools=frozenset({"create_contract"})))
+        for t in await list_tools(server_factory(registry=WITH_HELD, toolsets={"billing"}, destructive=True, destructive_tools=frozenset({"create_contract"})))
     }
     assert "create_contract" in names and "update_contract" not in names
 
@@ -253,7 +264,7 @@ def schema_descriptions(node, where):
 
 
 async def test_schemas_annotations_and_descriptions(server_factory):
-    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
+    listed = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}
     for name in EXPECTED_TOOLS:
         tool = listed[name]
         for param, entry_schema in tool.inputSchema["properties"].items():
@@ -565,7 +576,7 @@ async def test_list_contracts_accepts_every_sort_the_spec_names(server, mock_gor
 
 
 async def test_the_sort_enums_have_the_member_order_the_other_list_tools_pin(server_factory):
-    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
+    listed = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}
     properties = listed["list_contracts"].inputSchema["properties"]
 
     def enum_of(schema):
@@ -1369,7 +1380,7 @@ async def test_create_contract_compares_names_after_trimming(server, mock_gorelo
 
 
 async def test_create_contract_has_no_status_and_no_delete_option(server_factory):
-    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
+    listed = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}
     properties = set(listed["create_contract"].inputSchema["properties"])
     assert not properties & {"status", "status_id", "contract_id", "clear_fields", "id"}
     assert listed["create_contract"].inputSchema["required"] == ["name", "client_id", "service_lines"]
@@ -1499,7 +1510,7 @@ async def test_status_takes_exactly_active_or_archived(server, mock_gorelo, bad)
 
 
 async def test_the_client_cannot_be_changed_so_there_is_no_client_parameter(server, mock_gorelo, server_factory):
-    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
+    listed = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}
     assert "client_id" not in listed["update_contract"].inputSchema["properties"]
     text = await call_tool_error(server, "update_contract", update_args(client_id=9101, name="x"))
     assert "client_id" in text
@@ -2304,7 +2315,7 @@ def test_the_operation_texts_say_what_the_tool_texts_promise():
 
 
 async def test_the_tool_texts_carry_the_side_effects_in_words(server_factory):
-    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
+    listed = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}
     said = {name: " ".join(listed[name].description.split()) for name in EXPECTED_GATED}
     for name, text in said.items():
         assert "Ask the user first; needs confirm=true." in text, name
@@ -2418,7 +2429,7 @@ async def test_a_call_without_auto_approve_does_not_mention_email(server, mock_g
 
 
 async def test_both_tool_texts_and_the_parameter_text_say_email(server_factory):
-    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
+    listed = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}
     for name in EXPECTED_GATED:
         assert "it emails each to the client and approval pushes them to the accounting system" in " ".join(listed[name].description.split())
         assert "emails it to the client" in listed[name].inputSchema["properties"]["auto_approve_and_send"]["description"]
@@ -2454,7 +2465,7 @@ async def test_the_next_page_repeats_the_same_calendar_dates(server, mock_gorelo
 
 
 async def test_the_parameter_texts_say_yyyy_mm_dd(server_factory):
-    properties = {t.name: t for t in await list_tools(server_factory(destructive=True))}["list_contracts"].inputSchema["properties"]
+    properties = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}["list_contracts"].inputSchema["properties"]
     assert properties["end_date_since"]["description"].startswith("YYYY-MM-DD: ends on or after that day")
     assert properties["end_date_before"]["description"].startswith("YYYY-MM-DD: ends strictly before that day")
 

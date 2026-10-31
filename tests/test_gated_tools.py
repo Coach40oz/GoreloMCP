@@ -17,9 +17,9 @@ from conftest import call_tool, call_tool_error, envelope, list_tools
 from fastmcp import Context
 from pydantic import Field
 
-from server import build_instructions, build_server, resolve_gated_tools
+from server import build_instructions, build_server, held_names_listed, resolve_gated_tools, warn_held_tools
 from settings import TOOLSETS, Settings, SettingsError
-from tools._common import REGISTRY, Registry, StrictBool, client_of, require_confirm, server_info_of
+from tools._common import HELD_TOOLS, REGISTRY, Registry, StrictBool, client_of, require_confirm, server_info_of
 
 pytestmark = pytest.mark.anyio
 
@@ -31,7 +31,8 @@ FIVE_GATED = (
     "remove_document_related_item,delete_time_entry"
 )
 FIVE_GATED_TOOLS = frozenset(FIVE_GATED.split(","))
-REAL_GATED = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive")
+# The gated tools a server can register: the held ones (create_contract and update_contract) are declared but never registered.
+REAL_GATED = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive" and spec.name not in HELD_TOOLS)
 
 
 def demo_registry() -> Registry:
@@ -293,7 +294,7 @@ def test_the_server_instructions_do_not_depend_on_which_gated_tools_are_register
         for names, destructive in ((None, False), (None, True), ({"delete_time"}, True))
     }
     assert texts == {build_instructions(ALL)}
-    assert "6. Delete, void, approved-invoice and contract-write tools exist only when the operator has enabled them" in texts.pop()
+    assert "6. Delete, void and approved-invoice tools exist only when the operator has enabled them" in texts.pop()
 
 
 # --------------------------------------------------------------------------
@@ -306,9 +307,11 @@ def test_the_real_registry_has_the_gated_tools_the_five_list_is_made_of():
     assert set(REAL_GATED) - FIVE_GATED_TOOLS == {
         "create_approved_invoice", "delete_item", "delete_project_comment", "delete_project_task", "share_document",
         # 1.5.0
-        "approve_invoice", "create_contract", "update_contract", "delete_asset_type", "delete_client_location",
-        "delete_client_domain", "delete_product_charge",
+        "approve_invoice", "delete_asset_type", "delete_client_location", "delete_client_domain", "delete_product_charge",
     }
+    # the two contract writes are declared as gated tools and held back (1.5.1), so the real server never lists them
+    assert HELD_TOOLS == {"create_contract", "update_contract"}
+    assert {spec.name for spec in REGISTRY.specs if spec.kind == "destructive"} == set(REAL_GATED) | HELD_TOOLS
 
 
 async def test_a_list_of_five_gated_tools_registers_exactly_those(server_factory):
@@ -365,3 +368,74 @@ async def test_a_real_gated_tool_that_is_listed_still_refuses_without_confirm_an
     assert mock_gorelo.requests == []
     text = await call_tool_error(server, "delete_uptime_check", {"check_id": "x", "confirm": True})
     assert "unknown tool" in text.lower()
+
+
+# --------------------------------------------------------------------------
+# Held tools: create_contract and update_contract are never registered, and listing them is not an error
+# --------------------------------------------------------------------------
+
+LISTED_WITH_HELD = "create_contract,delete_invoice,update_contract"
+
+
+def held_settings(value: str, toolsets: str = "all") -> Settings:
+    return Settings.from_env({"GORELO_API_KEY": "k", "GORELO_TOOLSETS": toolsets, "GORELO_ENABLE_DESTRUCTIVE": value}, require_http=False)
+
+
+async def test_held_names_in_the_list_are_dropped_and_the_rest_of_the_list_is_honored(server_factory):
+    settings = held_settings(LISTED_WITH_HELD)
+    assert resolve_gated_tools(settings) == ["delete_invoice"]
+    assert held_names_listed(settings) == ["create_contract", "update_contract"]
+    names = {tool.name for tool in await list_tools(server_factory(settings=settings))}
+    assert not names & HELD_TOOLS and "delete_invoice" in names and {"list_contracts", "get_contract"} <= names
+    # a list that holds only held names registers no gated tool at all, and the toolset of a held tool does not matter
+    only = held_settings("create_contract, update_contract", toolsets="core")
+    assert resolve_gated_tools(only) == [] and held_names_listed(only) == ["create_contract", "update_contract"]
+    assert not {tool.name for tool in await list_tools(server_factory(settings=only))} & HELD_TOOLS
+
+
+def test_every_production_style_list_with_all_the_gated_names_starts_cleanly():
+    names = ",".join(sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive"))
+    settings = held_settings(names)
+    assert resolve_gated_tools(settings) == REAL_GATED
+    assert held_names_listed(settings) == sorted(HELD_TOOLS)
+
+
+def test_a_word_registers_no_held_tool_and_says_nothing(caplog):
+    caplog.set_level(logging.INFO, logger="gorelo-mcp")
+    for value in ("1", "0", "", "delete_invoice"):
+        settings = held_settings(value)
+        assert held_names_listed(settings) == [] and warn_held_tools(settings) == []
+        assert not set(resolve_gated_tools(settings)) & HELD_TOOLS
+    assert [r for r in caplog.records if "held" in r.getMessage()] == []
+
+
+def test_the_warning_is_one_line_naming_the_held_names_the_list_holds(caplog):
+    caplog.set_level(logging.INFO, logger="gorelo-mcp")
+    assert warn_held_tools(held_settings(LISTED_WITH_HELD)) == ["create_contract", "update_contract"]
+    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+        ("WARNING", "gorelo-mcp held tools ignored: create_contract, update_contract (held back until Gorelo releases them)")
+    ]
+    caplog.clear()
+    warn_held_tools(held_settings("update_contract,delete_invoice"))
+    assert [r.getMessage() for r in caplog.records] == [
+        "gorelo-mcp held tools ignored: update_contract (held back until Gorelo releases them)"
+    ]
+
+
+def test_an_error_about_another_name_does_not_list_a_held_tool_as_valid():
+    with pytest.raises(SettingsError) as info:
+        resolve_gated_tools(held_settings("create_contract,nope"))
+    message = str(info.value)
+    assert "'nope' (no tool has this name)" in message and "'create_contract'" not in message
+    assert "delete_invoice" in message and "create_contract" not in message.split("Gated tools of the enabled toolsets")[1]
+    assert "update_contract" not in message
+
+
+def test_emptying_the_held_set_brings_the_two_tools_back(monkeypatch):
+    import tools._common as common
+
+    monkeypatch.setattr(common, "HELD_TOOLS", frozenset())
+    settings = held_settings(LISTED_WITH_HELD)
+    assert resolve_gated_tools(settings) == ["create_contract", "delete_invoice", "update_contract"]
+    assert held_names_listed(settings) == []
+    assert {"create_contract", "update_contract"} <= {spec.name for spec in REGISTRY.select(settings.toolsets, True)}

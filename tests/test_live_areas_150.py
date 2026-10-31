@@ -25,6 +25,7 @@ from test_live_write_matrix import (  # noqa: F401  (fixtures and helpers of the
     SOURCE_NAMES,
     TEST_CLIENT,
     FakeGorelo,
+    _contract_writes_released,
     _never_read_the_real_env,
     area_ops,
     invoice_guid,
@@ -35,6 +36,7 @@ from test_live_write_matrix import (  # noqa: F401  (fixtures and helpers of the
 
 from scripts.live import cleanup, write_matrix
 from scripts.live.manifest import Manifest
+from tools import _common
 
 pytestmark = pytest.mark.anyio
 
@@ -713,6 +715,28 @@ async def test_each_area_is_skipped_without_its_flag_even_when_selected_and_send
     found = results(report)[key]
     assert found.status == "skipped" and found.requests == 0 and found.detail == write_matrix.OPT_IN_BY_KEY[key].skip_reason
     assert found.detail.startswith("not live-tested by default: ") and report.ok and fake.mock.requests == []
+
+
+@pytest.mark.parametrize("flag", [True, False])
+async def test_the_contracts_area_is_skipped_with_a_reason_while_its_tools_are_held_back_and_nothing_is_sent(run, monkeypatch, flag):
+    monkeypatch.setattr(_common, "HELD_TOOLS", frozenset({"create_contract", "update_contract"}))
+    fake = Fake150()
+    report = await run(fake, areas=["contracts"], with_contracts=flag)  # not a setup error: the held tools are left out of what the run needs
+    found = results(report)["contracts"]
+    assert found.status == "skipped" and found.requests == 0 and report.ok and fake.mock.requests == [] and fake.contracts == {}
+    assert found.detail == write_matrix.OPT_IN_BY_KEY["contracts"].held_reason
+    assert found.detail.startswith("create_contract and update_contract held back until Gorelo releases contract writes: ")
+    assert write_matrix.OPT_IN_BY_KEY["contracts"].held_tools == ["create_contract", "update_contract"]
+    assert not write_matrix.tools_for(False, opt_in=["contracts"]) & {"create_contract", "update_contract"}
+    assert {"list_items", "get_contract"} <= write_matrix.tools_for(False, opt_in=["contracts"])
+
+
+async def test_the_other_areas_do_not_notice_the_held_tools(run, monkeypatch):
+    monkeypatch.setattr(_common, "HELD_TOOLS", frozenset({"create_contract", "update_contract"}))
+    assert [area.key for area in write_matrix.OPT_INS if area.held_tools] == ["contracts"]
+    fake = Fake150()
+    report = await run(fake, areas=["asset_types"], with_asset_types=True)
+    assert results(report)["asset_types"].status == "pass" and report.ok and fake.leftovers() == []
 
 
 @pytest.mark.parametrize("key", NEW_AREAS)

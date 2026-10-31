@@ -166,11 +166,29 @@ class ToolSpec:
     destructive_hint: bool = False
 
 
+# Tools that are declared but never registered on a server, whatever GORELO_ENABLE_DESTRUCTIVE says: held back until
+# Gorelo releases contract writes (every POST /v1/contracts answers HTTP 500, code 070501). Emptying the set brings them back.
+HELD_TOOLS: frozenset[str] = frozenset({"create_contract", "update_contract"})
+
+
 class Registry:
     """The set of declared tools. REGISTRY is the real one; tests build their own."""
 
     def __init__(self) -> None:
         self._specs: dict[str, ToolSpec] = {}
+        self.include_held = False  # True only on the view that with_held() returns
+
+    def with_held(self) -> Registry:
+        """A view of the same tools that does not hold HELD_TOOLS back. Tests use it to reach the code that is held back;
+        no server does."""
+        view = Registry()
+        view._specs = self._specs
+        view.include_held = True
+        return view
+
+    def is_held(self, name: str) -> bool:
+        """True when `name` is in HELD_TOOLS and this registry holds it back (every registry but a with_held() view)."""
+        return name in HELD_TOOLS and not self.include_held
 
     @property
     def specs(self) -> list[ToolSpec]:
@@ -183,13 +201,16 @@ class Registry:
         """The tools to register on a server: in one of `toolsets`, and kind != destructive unless `destructive`
         is true. When `destructive` is true, `destructive_tools` None keeps every gated tool of those toolsets
         and a collection of names keeps exactly the gated tools it names (a name that is not a gated tool of
-        those toolsets keeps nothing: server.resolve_gated_tools is what refuses such a name)."""
+        those toolsets keeps nothing: server.resolve_gated_tools is what refuses such a name). A tool in
+        HELD_TOOLS is never returned, whatever the other arguments are (a with_held() view of the registry, which
+        only tests use, returns it)."""
         wanted = set(toolsets)
         only = None if destructive_tools is None else set(destructive_tools)
         return [
             spec
             for spec in self._specs.values()
             if spec.toolset in wanted
+            and not self.is_held(spec.name)
             and (spec.kind != "destructive" or (destructive and (only is None or spec.name in only)))
         ]
 

@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from oauth_guard import GateError
 from oauth_store import StateFileError
 from personal_auth import PersonalAuthProvider
-from server import build_server, install_log_value_filter, resolve_gated_tools
+from server import build_server, install_log_value_filter, resolve_gated_tools, warn_held_tools
 from settings import Settings, SettingsError
 
 # The directory this file lives in. In production that is /opt/gorelo-mcp/app, which is also the
@@ -50,6 +50,7 @@ def main() -> None:
     extra = ",".join(settings.extra_redirect_domains) or "none"  # host names only, never a secret
     logger.info("gorelo-mcp settings: api_host=%s extra_redirect_domains=%s", settings.api_host, extra)
     logger.info("gorelo-mcp gated tools: %s", ",".join(gated) or "none")  # names only; the ready line below keeps its shape
+    warn_held_tools(settings)  # a held tool named in GORELO_ENABLE_DESTRUCTIVE is dropped with one warning, not an error
     try:
         auth = PersonalAuthProvider(
             base_url=settings.public_base_url,

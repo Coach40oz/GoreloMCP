@@ -24,7 +24,7 @@ from conftest import list_tools
 import tools  # noqa: F401  (registers every tool module)
 from gorelo_client import FORBIDDEN_OPS, is_forbidden_op, is_side_effect_get
 from settings import DEFAULT_TOOLSETS, TOOLSETS
-from tools._common import REGISTRY
+from tools._common import HELD_TOOLS, REGISTRY
 
 EXPECTED = {
     "core": {
@@ -77,7 +77,7 @@ EXPECTED = {
         },
         "gated": {
             "delete_invoice", "delete_item", "create_approved_invoice",
-            "approve_invoice", "delete_product_charge", "create_contract", "update_contract",  # 1.5.0
+            "approve_invoice", "delete_product_charge",  # 1.5.0
         },
     },
     "uptime": {
@@ -116,6 +116,10 @@ EXPECTED = {
         "gated": {"share_document", "remove_document_related_item"},
     },
 }
+
+# Declared in tools/contracts.py and held back by tools._common.HELD_TOOLS (Gorelo has not released contract writes): in the
+# registry's specs, never on a server, so they are in no group of EXPECTED.
+HELD_EXPECTED = {"create_contract", "update_contract"}
 
 LEGACY_NAMES = {
     "create_ticket", "list_tickets", "search_tickets", "get_ticket", "list_ticket_statuses",
@@ -251,15 +255,18 @@ def _specs_by_name():
 
 
 def test_registry_matches_the_configured_surface_exactly():
-    specs = _specs_by_name()
+    declared = _specs_by_name()
+    assert HELD_TOOLS == HELD_EXPECTED <= set(declared)
+    specs = {name: spec for name, spec in declared.items() if name not in HELD_TOOLS}
     for toolset, groups in EXPECTED.items():
         got_regular = {n for n, s in specs.items() if s.toolset == toolset and s.kind != "destructive"}
         got_gated = {n for n, s in specs.items() if s.toolset == toolset and s.kind == "destructive"}
         assert got_regular == groups["regular"], (toolset, got_regular ^ groups["regular"])
         assert got_gated == groups["gated"], (toolset, got_gated ^ groups["gated"])
-    assert len(specs) == 160  # 92 tools in 1.2.0; 1.3.0 added get_custom_asset, list_deletions and the 17 document tools; 1.4.0 eight reads; 1.5.0 41 tools
+    assert len(specs) == 158  # 92 tools in 1.2.0; 1.3.0 added get_custom_asset, list_deletions and the 17 document tools; 1.4.0 eight reads; 1.5.0 41 tools, of which 1.5.1 holds back two
     regular = {n for n, s in specs.items() if s.kind != "destructive"}
-    assert (len(regular), len(specs) - len(regular)) == (143, 17)  # (109, 10) until 1.5.0, which added 34 regular and 7 gated tools
+    assert (len(regular), len(specs) - len(regular)) == (143, 15)  # (109, 10) until 1.5.0, which added 34 regular and 7 gated tools; 1.5.1 holds back two of the gated ones
+    assert len(declared) == 160 and {declared[n].kind for n in HELD_TOOLS} == {"destructive"}  # the code of the held tools stays
 
 
 def test_all_24_legacy_tool_names_still_exist():
@@ -333,7 +340,7 @@ def test_each_operation_the_2026_10_29_spec_added_is_declared_by_exactly_the_too
                 continue
             assert specs[name].kind != "read", (op, name)
     # the gated tools of the contract: the three deletes of asset types, locations and domains and of product charges, the invoice
-    # approval and the two contract writes (a contract bills the client from its start date on)
+    # approval and the two contract writes (a contract bills the client from its start date on; 1.5.1 holds the two writes back)
     gated = {name for names in NEW_OPS_OF_THE_2026_10_29_CONTRACT.values() for name in names if specs[name].kind == "destructive"}
     assert gated == {
         "delete_asset_type", "delete_client_location", "delete_client_domain", "delete_product_charge",
@@ -384,6 +391,20 @@ def test_each_operation_the_2026_10_17_spec_added_is_declared_by_exactly_the_too
     assert not is_side_effect_get("GET /v1/documents/{documentId}/pdf") and specs["export_document_pdf"].kind == "read"
     assert specs["list_deletions"].toolset == "core" and specs["list_deletions"].kind == "read"
     assert not any(is_forbidden_op(op) for op in added)
+
+
+@pytest.mark.anyio
+async def test_held_tools_are_registered_under_no_setting(server_factory):
+    everything = frozenset(TOOLSETS)
+    for destructive_tools in (None, frozenset(HELD_TOOLS), frozenset({*HELD_TOOLS, "delete_invoice"})):
+        for toolsets in (everything, frozenset({"billing"})):
+            names = {t.name for t in await list_tools(server_factory(toolsets=toolsets, destructive=True, destructive_tools=destructive_tools))}
+            assert not names & HELD_TOOLS, (toolsets, destructive_tools)
+            assert {"list_contracts", "get_contract"} <= names  # the reads stay
+    assert not {t.name for t in await list_tools(server_factory(toolsets=everything, destructive=False))} & HELD_TOOLS
+    # only the view that tests use registers them
+    names = {t.name for t in await list_tools(server_factory(registry=REGISTRY.with_held(), toolsets=everything, destructive=True))}
+    assert HELD_TOOLS <= names and len(names) == 160
 
 
 @pytest.mark.anyio

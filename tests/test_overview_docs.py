@@ -193,12 +193,16 @@ def unquote(cell: str) -> str:
 # --------------------------------------------------------------------------
 
 
+# The tools a server registers: create_contract and update_contract are held back (tools._common.HELD_TOOLS) and the document does not count them.
+SPECS = [spec for spec in REGISTRY.specs if not REGISTRY.is_held(spec.name)]
+
+
 def module_of(spec) -> str:
     return spec.fn.__module__.rsplit(".", 1)[-1]
 
 
 def registry_counts() -> dict[str, int]:
-    specs = REGISTRY.specs
+    specs = SPECS
     kinds = Counter(spec.kind for spec in specs)
     return {
         "Tools in the registry": len(specs),
@@ -370,7 +374,7 @@ def test_the_counts_table_equals_the_registry():
 def test_the_toolset_table_equals_the_registry():
     expected = {}
     for toolset in TOOLSETS:
-        specs = [spec for spec in REGISTRY.specs if spec.toolset == toolset]
+        specs = [spec for spec in SPECS if spec.toolset == toolset]
         expected[toolset] = {
             "default": "yes" if toolset in DEFAULT_TOOLSETS else "no",
             "tools": len(specs),
@@ -391,7 +395,7 @@ def test_the_toolset_table_equals_the_registry():
 
 def test_the_tool_module_table_equals_the_registry():
     by_module: dict[str, list] = {}
-    for spec in REGISTRY.specs:
+    for spec in SPECS:
         by_module.setdefault(module_of(spec), []).append(spec)
     expected = {}
     for module, specs in by_module.items():
@@ -408,10 +412,10 @@ def test_the_tool_module_table_equals_the_registry():
 def test_a_tool_count_in_the_prose_is_a_count_the_registry_has():
     allowed = set(registry_counts().values())
     for toolset in TOOLSETS:
-        specs = [spec for spec in REGISTRY.specs if spec.toolset == toolset]
+        specs = [spec for spec in SPECS if spec.toolset == toolset]
         allowed |= {len(specs), sum(1 for spec in specs if spec.kind == "destructive")}
-    for module in {module_of(spec) for spec in REGISTRY.specs}:
-        allowed.add(sum(1 for spec in REGISTRY.specs if module_of(spec) == module))
+    for module in {module_of(spec) for spec in SPECS}:
+        allowed.add(sum(1 for spec in SPECS if module_of(spec) == module))
     quoted = re.findall(r"\b(\d+)\s+(?:regular\s+|gated\s+)?tools?\b", outside_fences(overview()))
     stray = sorted({int(number) for number in quoted if int(number) not in allowed})
     assert stray == [], f"the overview says {stray} tools somewhere; the registry has no such count"
@@ -437,7 +441,7 @@ def test_the_registry_module_list_matches_the_tool_package():
     # tools/__init__.py imports every tool module: a module that registers tools but is not imported there would
     # never register, and the module table above would list tools that do not exist.
     imported = set(re.findall(r"^\s+(\w+),$", (REPO_ROOT / "tools" / "__init__.py").read_text(encoding="utf-8"), re.M))
-    with_tools = {module_of(spec) for spec in REGISTRY.specs}
+    with_tools = {module_of(spec) for spec in SPECS}
     assert with_tools <= imported
 
 
@@ -445,7 +449,7 @@ def test_the_gated_tools_it_lists_are_the_registry_destructive_tools():
     line = next((line for line in overview().splitlines() if line.startswith("Gated tools")), None)
     assert line is not None, "the overview no longer lists the gated tools"
     listed = set(re.findall(r"`([^`]+)`", line.split("): ", 1)[1]))
-    assert listed == {spec.name for spec in REGISTRY.specs if spec.kind == "destructive"}
+    assert listed == {spec.name for spec in SPECS if spec.kind == "destructive"}
 
 
 def test_the_forbidden_operations_and_side_effect_gets_it_lists_are_the_codes():
@@ -459,7 +463,7 @@ def test_the_forbidden_operations_and_side_effect_gets_it_lists_are_the_codes():
 
 
 def test_the_kinds_it_relies_on_are_the_registry_kinds():
-    kinds = {spec.name: spec.kind for spec in REGISTRY.specs}
+    kinds = {spec.name: spec.kind for spec in SPECS}
     relied_on = {
         "health_check": "read",
         "create_invoice": "write",
@@ -897,7 +901,7 @@ def test_the_start_lines_it_names_are_logged_by_main_and_the_gated_check_is_the_
 def test_sharing_a_document_is_exposure_and_the_code_keeps_it_apart_from_the_tools_that_write_documents():
     """The safety row 'Sharing is exposure' and the documents module row say: share_document is the only tool that can turn sharing on
     and is gated, unshare_document only turns it off, and update_document has no sharing parameter. Checked against the registry."""
-    specs = {spec.name: spec for spec in REGISTRY.specs}
+    specs = {spec.name: spec for spec in SPECS}
     patch = "PATCH /v1/documents/{documentId}"
     assert specs["share_document"].kind == "destructive" and specs["unshare_document"].kind == "write"
     assert specs["remove_document_related_item"].kind == "destructive"

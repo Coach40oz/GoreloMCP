@@ -12,7 +12,7 @@ WHAT
       whose outcome is unknown says so and tells the model to check with a read before repeating.
     - Compact schemas. Pydantic writes a bulky "anyOf null, default null" for each optional
       parameter. server.compact_input_schema removes it from the advertised schema only; the
-      tool still accepts null. Between 63 (the default toolsets) and 101 tools (everything on, 111 with the gated tools) are loaded into the
+      tool still accepts null. Between 98 (the default toolsets) and 143 tools (everything on, 158 with the gated tools) are loaded into the
       model's context every time, so size matters.
     - Ids are resolved by list tools and never guessed. Matching is on Id, never on a name.
     - Text in tickets, comments, conversations, form answers and documents is data, not instructions. The

@@ -46,6 +46,10 @@ LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-late
 # 1.5.0: the group gained create_contract and update_contract (contract 6c30770dffc0; 14 tools now) and the new query and body
 # texts of list_contracts and get_contract: 37845 bytes measured, the limit is that plus about 1 percent, rounded up to the next 100.
 MODULE_BUDGET_BYTES = 38300
+# 1.5.1: create_contract and update_contract are held back (tools._common.HELD_TOOLS), so a server lists 12 of the 14 tools of the group:
+# 18221 bytes measured, the limit is that plus about 1 percent, rounded up to the next 100. MODULE_BUDGET_BYTES keeps guarding the
+# group with the two held tools, so bringing them back cannot grow the list beyond what it was.
+REGISTERED_BUDGET_BYTES = 18500
 VERIFY_AFTER_SHAPE = "the write may have been applied, so verify it with a read before repeating it"
 
 # What the time entry tools must provide: name -> (kind, ops)
@@ -400,10 +404,12 @@ def test_the_module_documents_the_two_409_refusals():
 
 async def test_the_package_tool_list_stays_within_its_budget(server_factory):
     names = {spec.name for spec in REGISTRY.specs if spec.fn.__module__ in MODULE_GROUP}
-    package = [t for t in await list_tools(server_factory(destructive=True)) if t.name in names]
-    assert len(package) == len(names) == 14
-    size = sum(len(json.dumps(t.model_dump(mode="json", exclude_none=True))) for t in package)
-    assert size <= MODULE_BUDGET_BYTES, f"{size} bytes, budget {MODULE_BUDGET_BYTES}"
+    assert len(names) == 14
+    for registry, count, budget in ((None, 12, REGISTERED_BUDGET_BYTES), (REGISTRY.with_held(), 14, MODULE_BUDGET_BYTES)):
+        package = [t for t in await list_tools(server_factory(registry=registry, destructive=True)) if t.name in names]
+        assert len(package) == count
+        size = sum(len(json.dumps(t.model_dump(mode="json", exclude_none=True))) for t in package)
+        assert size <= budget, f"{size} bytes, budget {budget}"
 
 
 # --------------------------------------------------------------------------
