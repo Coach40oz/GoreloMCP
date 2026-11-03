@@ -2,7 +2,8 @@
 
 WHAT
   The server runs with as little power as it can. The reference setup is in deploy/ and docs/INSTALL.md.
-    - No open ports. The server binds 127.0.0.1 only. A tunnel makes the outbound connection to
+    - No open ports. The server binds 127.0.0.1 by default. MCP_BIND_HOST can select a different
+      interface; that interface needs network access restricted to trusted hosts. A tunnel makes the outbound connection to
       the edge, so the host needs no inbound rule at all; a default-drop inbound firewall is
       advised. The internet can reach only /mcp and the OAuth pages, through the tunnel.
     - Root-owned, read-only code. The application directory belongs to root; the service user

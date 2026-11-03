@@ -605,3 +605,26 @@ def test_main_py_and_this_file_hold_no_em_or_en_dash():
     for path in (REPO_ROOT / "main.py", Path(__file__)):
         text = path.read_text(encoding="utf-8")
         assert EM_DASH not in text and EN_DASH not in text, path.name
+
+
+@pytest.mark.parametrize("host", ["192.0.2.10", "::1", " 192.0.2.10 ", "", "   "])
+def test_bind_host_is_read_at_startup_with_blank_falling_back_to_loopback(launch, monkeypatch, host):
+    monkeypatch.setenv("MCP_BIND_HOST", host)
+    launch.main()
+    assert launch.served == [{"transport": "http", "host": host.strip() or "127.0.0.1", "port": 8765}]
+
+
+@pytest.mark.parametrize("process_host", [None, "127.0.0.2"])
+def test_bind_host_loads_from_dotenv_without_overriding_process_environment(launch, monkeypatch, tmp_path, process_host):
+    from dotenv import load_dotenv
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("MCP_BIND_HOST=192.0.2.10\n", encoding="utf-8")
+    # Register cleanup even when dotenv introduces a previously absent variable.
+    monkeypatch.setenv("MCP_BIND_HOST", "")
+    monkeypatch.delenv("MCP_BIND_HOST")
+    if process_host is not None:
+        monkeypatch.setenv("MCP_BIND_HOST", process_host)
+    monkeypatch.setattr(main_module, "load_dotenv", lambda: load_dotenv(env_file))
+    launch.main()
+    assert launch.served == [{"transport": "http", "host": process_host or "192.0.2.10", "port": 8765}]

@@ -16,7 +16,8 @@ look at it; this is a small project, so there is no guaranteed response time.
 
 ## Threat model in short
 
-What the internet can reach. The server listens only on 127.0.0.1. The only public path is the
+What the internet can reach. The server listens on 127.0.0.1 by default. MCP_BIND_HOST can select another interface;
+restrict access to trusted hosts when using a non-loopback address. The only public path is the
 tunnel you set up, and through it an attacker can reach `/mcp` and the OAuth pages (`/authorize`,
 `/token`, `/register`, `/revoke` and the OAuth metadata). Nothing else is exposed. `/mcp` needs a
 valid access token.

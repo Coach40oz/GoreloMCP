@@ -2,7 +2,7 @@
 
 Thin on purpose: install the log filter (server.LogValueFilter: it trims the records of rejected calls and of errors
 with a log summary), read settings, build the OAuth provider (redirect allowlist from the settings), build the server,
-serve HTTP on 127.0.0.1:8765. Importing this module has no side effects
+serve HTTP on 127.0.0.1:8765 by default (MCP_BIND_HOST can select another interface). Importing this module has no side effects
 (no .env read, no logging setup, no directories); everything happens inside main().
 
 The service refuses to start (one error line, exit status 1, nothing served) when its settings are
@@ -59,7 +59,7 @@ def main() -> None:
             state_dir=str(APP_DIR / ".oauth-state"),
         )
         # The gate also checks its routes when the HTTP app is built, which happens inside run().
-        build_server(settings, auth=auth).run(transport="http", host=HOST, port=PORT)
+        build_server(settings, auth=auth).run(transport="http", host=os.environ.get("MCP_BIND_HOST", "").strip() or HOST, port=PORT)
     except (StateFileError, GateError) as exc:
         logger.error("%s; refusing to start", exc)
         sys.exit(1)
