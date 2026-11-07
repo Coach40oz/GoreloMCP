@@ -19,6 +19,7 @@ from settings import (
     SettingsError,
     parse_base_url,
     parse_extra_redirect_domains,
+    parse_public_base_url,
 )
 from tools._common import REGISTRY
 
@@ -94,6 +95,57 @@ def test_only_the_missing_variable_is_named():
     assert "MCP_AUTH_PASSWORD" in str(info.value)
     assert "GORELO_API_KEY" not in str(info.value)
     assert "PUBLIC_BASE_URL" not in str(info.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["https://mcp.example.test", "https://mcp.example.test/", "https://mcp.example.test:8443", "HTTPS://Mcp.Example.test", "https://203.0.113.5"],
+)
+def test_a_usable_public_base_url_is_accepted_as_written(value):
+    assert Settings.from_env(env(PUBLIC_BASE_URL=value)).public_base_url == value
+    assert parse_public_base_url(value) == value
+
+
+@pytest.mark.parametrize(
+    "value, fragment",
+    [
+        ("http://mcp.example.test", "must start with https://"),
+        ("mcp.example.test", "must start with https://"),
+        ("ftp://mcp.example.test", "must start with https://"),
+        ("https://mcp.example.test/mcp", "must not end in /mcp"),
+        ("https://mcp.example.test/mcp/", "must not end in /mcp"),
+        ("https://mcp.example.test/MCP", "must not end in /mcp"),
+        ("https://mcp.example.test/base/mcp", "must not end in /mcp"),
+        ("https://mcp.example.test/base", "must not contain a path"),
+        ("https://user:pw@mcp.example.test", "must not contain a user name or password"),
+        ("https://mcp.example.test?x=1", "must not contain a query string"),
+        ("https://mcp.example.test/#frag", "must not contain a fragment"),
+        ("https://", "must name a host"),
+        ("https://mcp.example.test:notaport", "is not a valid address"),
+        ("https://mcp example.test", "must be one address"),
+    ],
+)
+def test_a_public_base_url_that_would_break_the_sign_in_is_refused_with_one_clear_error(value, fragment):
+    with pytest.raises(SettingsError) as info:
+        Settings.from_env(env(PUBLIC_BASE_URL=value))
+    message = str(info.value)
+    assert message.startswith("PUBLIC_BASE_URL ") and fragment in message
+    assert "pw" not in message.replace("PUBLIC_BASE_URL", "")  # the value (it may hold a password) is not echoed
+
+
+def test_a_bad_public_base_url_is_reported_together_with_the_other_problems():
+    with pytest.raises(SettingsError) as info:
+        Settings.from_env({"GORELO_API_KEY": "k", "PUBLIC_BASE_URL": "https://x.test/mcp", "MCP_AUTH_PASSWORD": "p", "GORELO_TOOLSETS": "nope"})
+    assert "PUBLIC_BASE_URL must not end in /mcp" in str(info.value) and "nope" in str(info.value)
+
+
+def test_the_public_base_url_is_not_checked_when_the_http_server_is_not_needed():
+    # the live harness never serves HTTP, so its .env may hold any value
+    assert Settings.from_env({"GORELO_API_KEY": "k", "PUBLIC_BASE_URL": "http://x.test/mcp"}, require_http=False).public_base_url == "http://x.test/mcp"
+
+
+def test_parse_public_base_url_returns_none_for_nothing():
+    assert parse_public_base_url(None) is None and parse_public_base_url("  ") is None
 
 
 def test_http_variables_are_optional_without_require_http():

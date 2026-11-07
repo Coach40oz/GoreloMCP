@@ -26,12 +26,19 @@ What each command does:
   read), `check` still prints the file facts and the lock line and the problems they show, because stat needs only search
   permission on the directory: a file owned by another user than its directory is the one the owner repair of
   docs/TROUBLESHOOTING.md is for, and without these lines it could not be told from a damaged file. They are followed by an `error:` line with the type
-  and one fixed sentence, and by `result: problems` (exit status 1). Writes nothing, creates nothing.
+  and one fixed sentence, and by `result: problems` (exit status 1). The state file and `.lock` are looked at with lstat: a
+  symbolic link (or any file that is not a regular one) is a problem with no repair hint, because chown and chmod without
+  -h would follow it and change its target. A `.lock` that the service could not open (owned by another user than the
+  directory, more than one link, not readable and writable for this user, or `lock: unknown`) is a problem too. Writes
+  nothing, creates nothing.
 * inventory: one line per client and per token. Writes nothing.
 * purge --stale: removes what is stale and nothing else. A token pair (a refresh token with the access tokens paired with
-  it) is stale when none of its access tokens is still valid AND its refresh token has not been issued within the last
-  STALE_AFTER_SECONDS (30 days, taken from the family metadata the store keeps; an old file gets an estimate), or the
-  refresh token itself has expired. An access token with no refresh token goes after the week the store keeps expired
+  it) is stale when none of its access tokens is still valid AND the newest of the refresh token's issue time and the end
+  of its last access token is more than STALE_AFTER_SECONDS (30 days) ago (the issue time comes from the family metadata
+  the store keeps; an old file gets an estimate), or the refresh token itself has expired. A session that signed in 30 days
+  ago and never refreshed is therefore not stale until 30 days after its access token ended, also after the store has dropped
+  that token (a week after it expired): with no access token left, its end is taken as the issue time plus the lifetime of
+  the kind of token the family metadata names (30 days for a sign-in, 1 hour for a refresh). An access token with no refresh token goes after the week the store keeps expired
   tokens. A client that holds no token is stale when it was registered more than NEW_CLIENT_GRACE_SECONDS ago (24 hours)
   or lost its last token in this purge. A live pair is never removed, and neither is anything of a client named with
   `--keep-client` (the first 8 characters of its id, as `inventory` shows them). `--plan` shows what `--apply` would
@@ -82,6 +89,7 @@ import os
 import pwd
 import re
 import shlex
+import stat
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -102,6 +110,18 @@ DEFAULT_STATE_DIR = REPO_ROOT / ".oauth-state"
 
 # purge --stale: a pair with no valid access token whose refresh token was issued longer ago than this is stale.
 STALE_AFTER_SECONDS = 30 * 24 * 60 * 60
+# purge --stale: how long the access token of a pair lived, by the origin the family metadata records. The store drops an
+# access token that expired more than a week ago (oauth_store.EXPIRED_TOKEN_RETENTION_SECONDS) while the refresh token stays,
+# so for a pair with no access token left the end of the last one is issue time + this lifetime. These are the lifetimes of
+# personal_auth.DEFAULT_ACCESS_TOKEN_EXPIRY and DEFAULT_REFRESH_ACCESS_TOKEN_EXPIRY (a test pins both). A token that was
+# already in a version 1 file ("legacy") may be either kind: the longer one is taken, which can only keep a pair longer.
+SIGN_IN_ACCESS_SECONDS = 30 * 24 * 60 * 60
+REFRESH_ACCESS_SECONDS = 60 * 60
+ACCESS_SECONDS_BY_ORIGIN = {
+    oauth_store.ORIGIN_CODE: SIGN_IN_ACCESS_SECONDS,
+    oauth_store.ORIGIN_REFRESH: REFRESH_ACCESS_SECONDS,
+    oauth_store.ORIGIN_LEGACY: SIGN_IN_ACCESS_SECONDS,
+}
 # purge --stale: a client that holds no token is left alone for this long after it registered (a sign-in in progress).
 NEW_CLIENT_GRACE_SECONDS = 24 * 60 * 60
 # expire-access: the access tokens it marks expire this many seconds before "now".
@@ -372,12 +392,20 @@ def mode_repair_command(state_dir: Path) -> str:
 
 
 def file_facts(state_dir: Path) -> tuple[str, list[Problem]]:
-    """("mode=0600 owner=gorelo-mcp dir_owner=gorelo-mcp", problems) for the state file; ("", []) when there is none."""
+    """("mode=0600 owner=gorelo-mcp dir_owner=gorelo-mcp", problems) for the state file; ("", []) when there is none.
+    The file is looked at with lstat: a symbolic link (or anything but a regular file) is reported as that and with no repair
+    hint, because chown and chmod without -h would follow the link and change its target."""
     try:
-        info = (state_dir / oauth_store.STATE_FILE_NAME).stat()
+        info = (state_dir / oauth_store.STATE_FILE_NAME).lstat()
         parent = state_dir.stat()
     except OSError:
         return "", []
+    if not stat.S_ISREG(info.st_mode):
+        kind = "a symbolic link" if stat.S_ISLNK(info.st_mode) else "not a regular file"
+        return (
+            f"type={'symlink' if stat.S_ISLNK(info.st_mode) else 'other'} dir_owner={_owner(parent.st_uid)}",
+            [Problem(f"the state file is {kind}; do not chown or chmod it (that would change its target), look at it and have it removed while the service is stopped")],
+        )
     problems: list[Problem] = []
     if info.st_mode & 0o077:
         problems.append(
@@ -394,12 +422,32 @@ def file_facts(state_dir: Path) -> tuple[str, list[Problem]]:
     return f"mode={mode:04o} owner={_owner(info.st_uid)} dir_owner={_owner(parent.st_uid)}", problems
 
 
+def lock_problems(state_dir: Path) -> list[Problem]:
+    """What would stop the service from opening `.lock` (it opens it read-write, without following a link): a lock file that is
+    not a plain file with one link, one owned by another user than the directory, or one this user cannot open for reading
+    and writing. An absent lock is fine (the service makes it)."""
+    path = state_dir / oauth_store.LOCK_FILE_NAME
+    try:
+        info = path.lstat()
+        parent = state_dir.stat()
+    except OSError:
+        return []
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return [Problem("the lock file is a symbolic link, has more than one link or is not a regular file; the service refuses it. Do not chown or chmod it; look at it and have it removed while the service is stopped")]
+    problems: list[Problem] = []
+    if info.st_uid != parent.st_uid:
+        problems.append(Problem("the lock file is owned by another user than its directory (the service may not be able to open it)"))
+    if not os.access(path, os.R_OK | os.W_OK):
+        problems.append(Problem("this user cannot open the lock file for reading and writing, so the service could not start if it runs as this user"))
+    return problems
+
+
 def lock_status(state_dir: Path) -> str:
     """held (another process holds the state lock: the service is up), free, absent (no lock file: the service has not
     started with this release) or unknown. Creates nothing; a shared lock is taken for an instant to ask."""
     path = state_dir / oauth_store.LOCK_FILE_NAME
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NOCTTY | os.O_NONBLOCK)
     except FileNotFoundError:
         return "absent"
     except OSError:
@@ -474,20 +522,34 @@ def plan_stale(state: oauth_store.OAuthState, now: float, keep: Sequence[str] = 
         if any(usable(state.access_tokens[token].expires_at, now) for token in accesses):
             continue  # a live pair
         issued = issued_at(state, refresh)
+        expiries = [state.access_tokens[token].expires_at for token in accesses if state.access_tokens[token].expires_at]
+        real_expiries = list(expiries)
         if usable(record.expires_at, now):
-            if issued is None or now - issued <= STALE_AFTER_SECONDS:
-                continue  # it can still be used, and its client was active lately (or no one can tell when)
-            why = f"no valid access token and issued {int((now - issued) // 86400)} days ago"
+            if issued is None:
+                continue  # it can still be used, and no one can tell when it was issued
+            # A sign-in token lives as long as STALE_AFTER_SECONDS and a client that never refreshes keeps using it until it
+            # ends, so the age of the refresh token alone would call a session stale the moment its access token expires.
+            # The clock starts at the newest sign of life: the issue time or the end of the last access token.
+            # With no access token left (the store drops one a week after it expired) its end is issue time + its lifetime.
+            estimated = not expiries
+            if estimated:
+                origin = state.refresh_meta[refresh].get("origin")
+                expiries = [issued + ACCESS_SECONDS_BY_ORIGIN.get(origin, SIGN_IN_ACCESS_SECONDS)]
+            newest = max([issued, *expiries])
+            if now - newest <= STALE_AFTER_SECONDS:
+                continue  # it can still be used, and its client was active lately
+            why = f"no valid access token and nothing issued or valid for {int((now - newest) // 86400)} days"
+            if estimated:
+                why += " (its access token is gone; the end is taken as issue time plus the token lifetime)"
         else:
             why = "the refresh token itself has expired"
-        expiries = [state.access_tokens[token].expires_at for token in accesses if state.access_tokens[token].expires_at]
         plan.pairs.append(
             PairPlan(
                 refresh=refresh,
                 access=tuple(accesses),
                 client_id=record.client_id,
                 issued_at=issued,
-                last_access_expiry=max(expiries) if expiries else None,
+                last_access_expiry=max(real_expiries) if real_expiries else None,
                 why=why,
             )
         )
@@ -665,6 +727,10 @@ def cmd_check(ctx: Context) -> int:
         )
     # Run as the service user (as the docs say) this is a pre-flight of what the service needs: to write the lock file
     # and to replace the state file, it must be able to write to the directory.
+    problems.extend(lock_problems(ctx.state_dir))
+    lock = lock_status(ctx.state_dir)
+    if lock == "unknown" and not any("lock file" in problem.text for problem in problems):
+        problems.append(Problem("the lock file could not be examined (lock: unknown); the service may not be able to start"))
     writable = os.access(ctx.state_dir, os.W_OK | os.X_OK)
     if not writable:
         problems.append(
@@ -686,7 +752,7 @@ def cmd_check(ctx: Context) -> int:
             out.line("note: there is no state file; the service starts with an empty state")
     if facts:
         out.line(f"file: {facts}")
-    out.line(f"lock: {lock_status(ctx.state_dir)}")
+    out.line(f"lock: {lock}")
     for problem in problems:
         out.line(f"problem: {problem.text}")
         if problem.hint:
@@ -762,8 +828,8 @@ def cmd_inventory(ctx: Context) -> int:
 def _print_plan(ctx: Context, state: oauth_store.OAuthState, plan: StalePlan) -> None:
     out = ctx.out
     out.line(
-        "purge plan: a pair is stale when it has no valid access token and its refresh token was issued more than "
-        f"{STALE_AFTER_SECONDS // 86400} days ago (or has expired); a client with no token is stale after "
+        "purge plan: a pair is stale when it has no valid access token and neither it nor its refresh token was issued or "
+        f"valid within the last {STALE_AFTER_SECONDS // 86400} days (or the refresh token has expired); a client with no token is stale after "
         f"{NEW_CLIENT_GRACE_SECONDS // 3600} hours"
     )
     # a client's name and redirect hosts are text the client chose: masked, not fatal (see Guard.mask)

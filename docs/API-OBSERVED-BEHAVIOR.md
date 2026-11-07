@@ -10,7 +10,7 @@ How to read it. Each entry gives the date it was seen (UTC dates; the hour is mo
 recorded), what the published spec said at that time, what production did, and what this server
 does about it. Everything here was observed with live calls, except entries 5, 7, 17, 18, 20 and 28,
 which rest on the published description, its changelog or its text and say so, and the parts of entries
-23 to 26 that say they rest on the published text. Every write was made against a test client, and the
+23 to 26, 32 and 34 that say they rest on the published text or were not measured. Every write was made against a test client, and the
 reads of 2026-10-17 and 2026-10-24 were read-only requests. Production can change at any time, so
 treat this as a log, not a promise. The reasoning behind the design is in `docs/why/`, and the tools that result are in `docs/tool-catalog.md`.
 
@@ -43,8 +43,8 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
   keys (`data`, `nextCursor`) read zero rows from paged lists and failed on unpaged ones.
 - This server: the client was rewritten for the PascalCase envelope. It checks `IsSuccess`, not
   only the HTTP status, and raises a "shape" error for anything that is not an envelope, rather
-  than returning an empty list. The invoice PDF is the one raw (non-envelope) answer, and a
-  429 answer is a gateway JSON, not an envelope.
+  than returning an empty list. The invoice PDF and the document PDF are raw (non-envelope)
+  answers, and a 429 or 401 answer is a gateway JSON, not an envelope.
 
 ## 3. Page size above 200 is rejected although some spec text says "clamped" (2026-10-01)
 
@@ -118,8 +118,13 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
 - Spec said: approvers must be active contacts of the ticket's client (task approvals mentioned
   the tag).
 - Production did: a ticket approval also rejects a contact without a contact tag marked as
-  approver. The API cannot set that tag; it is set in the Gorelo app.
-- This server: `create_ticket_approval` says so in its text.
+  approver. The mark on a tag is set in the Gorelo app, and no read of the API shows which tag
+  carries it. Since the 2026-10-29 contract a contact can be given an existing tag through
+  `update_contact` (`tag_ids`); whether that alone makes the contact an eligible approver has not
+  been tried live.
+- This server: `create_ticket_approval` and `create_task_approval` say that the approver mark is
+  set in the Gorelo app (the model asks the user which tag it is) and that `update_contact` with
+  the complete tag list, including that tag, gives a contact the tag.
 
 ## 11. Lead and watcher cannot be the same technician in one request (2026-10-02)
 
@@ -135,7 +140,7 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
   invalid default region").
 - This server: validates `^[A-Z]{2}$` and never maps dial codes to regions.
 
-## 13. Approving an invoice pushes it to accounting, and a void does not follow (2026-10-04)
+## 13. Approving an invoice pushes it to accounting, and a void did not follow at once (2026-10-04)
 
 - Spec said: approving on create pushes the invoice to the connected accounting system at once.
   Nothing said what a void does there.
@@ -147,6 +152,12 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
 - This server: approved creation and delete/void are gated tools (`docs/why/03-forbidden-and-gated-operations.txt`); their texts
   say the user must void the accounting copy by hand; the harness never creates an Approved
   invoice unless explicitly asked.
+- Superseded in part: the contract of 2026-10-22 says a delete or void is sent to the accounting
+  system, and on 2026-10-31 a void through `delete_invoice` voided the Xero copy too. So the
+  2026-10-04 observation, a copy still open a few minutes after the void, may have been a delay,
+  and no rule is drawn from it. The tool texts now say that Gorelo's description says the void is
+  sent to the accounting system, that one void reached it and another was still open minutes
+  later, and tell the user to check the accounting system.
 
 ## 14. Alerts client filter matches through the device (2026-10-04)
 
@@ -160,7 +171,9 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
 
 - Spec said: descriptions and bodies are text/HTML.
 - Production did: text in angle brackets vanished from a ticket description.
-- This server: tool texts tell the model to write placeholders as `[an item]`, not `<an item>`.
+- This server: the texts of the document body tools tell the model to write placeholders as
+  `[an item]`, not `<an item>`, and the texts of `create_ticket` and of the comment tools say that
+  the text is HTML, so a literal `<` or `>` is written as `&lt;` or `&gt;`.
 
 ## 16. A location's BillingContactIds came back as the text "[]" (2026-10-04)
 
@@ -174,8 +187,9 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
   `Payments` list on the invoice detail, and made `ClientId` optional when creating a contact.
 - Seen: `POST /v1/payments` and `DELETE /v1/payments/{paymentId}` appeared in the published spec
   on 2026-10-07/08.
-- This server: it has no tool for payments (accounting data that reaches the connected system),
-  and its live guard refuses them. `create_contact` still requires `client_id`, although the
+- This server: it has no tool that records or deletes a payment (accounting data that reaches the
+  connected system), and its live guard refuses them; `list_payments` and `get_payment` read them
+  since the 2026-10-29 contract. `create_contact` still requires `client_id`, although the
   spec now makes `ClientId` optional.
 
 ## 18. The spec renders differently between fetches (2026-10-08)
@@ -225,17 +239,21 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
   Superseded in part on 2026-10-17: the new contract adds a read of one custom asset and says that
   a PATCH with a new `ClientId` moves the asset (entry 26; the move worked when it was first
   tried, on 2026-10-24).
-- This server: `create_custom_asset` and `update_custom_asset` read the result back through the
-  list. `update_custom_asset` needs the asset's current `client_id` and clears fields only through
-  `clear_fields`. Delete stays forbidden.
+- This server: `create_custom_asset` and `update_custom_asset` read the result back by id with
+  `get_custom_asset` (entry 26). `update_custom_asset` takes `client_id` only to move the asset and
+  clears fields only through `clear_fields`. Delete stays forbidden.
 
 ## 22. Smaller items
 
 - A null in a ticket PATCH counts as absent: a request with only `{"LeadAssigneeId": null}` is a 400
   ("must contain at least one field"), so nulls cannot clear ticket fields (2026-10-01).
-- A client's `AlternateName` could not be cleared by sending "" or null (2026-10-01).
+- A client's `AlternateName` could not be cleared by sending "" or null (2026-10-01). That probe ran on the
+  collection form `PATCH /v1/clients`, which has since been retired. Since 2026-10-22 the spec says that an
+  empty string clears it on `PATCH /v1/clients/{clientId}`, and `update_client` offers `clear_alternate_name`
+  for that; it has not been tried live on the path form, so its text says to check the result.
 - A ticket source `Id` of 7 appears on existing tickets with no name and is not in the spec's enum
-  (2026-10-01); the server returns 1 to 6 with labels and notes 7 as unnamed.
+  (2026-10-01). The contract of 2026-10-29 names it Messenger; `list_ticket_sources` reads Gorelo's list
+  (7 Messenger can be read and filtered on, but a write cannot set it).
 - Deleted ticket comments may still come back with their body (2026-10-01).
 - A deleted catalog item reads as a 404 afterwards (2026-10-04).
 - Gorelo answers HTTP 403, code 080203, when the API key lacks the scope that an area needs (for example `Project`,
@@ -263,6 +281,12 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
   linking a structured document or a password does.
 - This server: the `documents` toolset (off by default) follows the published text and checks
   every answer; its texts and `docs/OVERVIEW.md` say what is not proven.
+- Superseded in part on 2026-10-22: the later contract answers three of the questions above in its
+  text. An archive reaches every document below, at any depth. A restore brings back only the document
+  itself, at the top level, and the documents below stay archived. A move puts the document last among
+  its new siblings, and a document that is new counts as updated at its creation, so `updated_since` alone
+  finds it. None of this was tried live; the tool texts follow the later contract, and `move_document` also
+  refuses to hand shared content to another client (see `docs/OVERVIEW.md`).
 
 ## 24. Status filters: another id is a 400, and the defaults leave some records out (2026-10-17)
 
@@ -285,6 +309,8 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
   Client, 2 Contact, 3 Contract, 4 Ticket, 5 Item, 6 Invoice, 7 Custom asset, 8 Project, 9 Task.".
 - This server: `list_deletions` requires `type_ids` and passes a 403 for a type the key cannot read
   on, naming the parameter.
+- Superseded in part on 2026-10-22: the later contract adds type 10, Agent asset, and `list_deletions`
+  accepts it. The `TypeIds` 10 answer above is from before that contract.
 
 ## 26. One custom asset, and moving it (2026-10-17)
 
@@ -397,3 +423,32 @@ the live test harness (`docs/why/07-live-test-harness.txt`) is run after any Gor
   524,026 characters was saved and read back whole; a body of about two million characters is a 400
   "Body can be at most 900,000 characters.".
 - This server: checks the title length before sending; for the body it passes Gorelo's refusal on.
+
+## 34. Deleting a contact leaves every list at once, and a repeat answers 200 again (2026-10-31)
+
+- Spec said: `DELETE /v1/contacts/{contactId}` answers `{Id}` (`DeleteContactResult`) and may answer 409. The
+  published text says the contact "is marked inactive, not removed" and "disappears from every list", that its
+  ticket and conversation history stays, and that a 409 means the contact is the primary or a secondary contact of a
+  ticket that is not closed.
+- Production did: on a throwaway contact the DELETE answered 200 with only that `Id`. A read of the contact answered 404 (code
+  070202) afterwards and the client's contact list no longer held it, which is what "disappears from every list" predicts;
+  whether Gorelo hard-deletes the contact or only marks it inactive was not distinguished. A second DELETE of the
+  same id also answered 200 with the same `Id`, so the answer cannot tell "deleted now" from "already gone". The 409 was not
+  measured and rests on the published text.
+- This server: `delete_contact` (gated, always `confirm=true`) reads the contact first, so an id that does not exist is a clear
+  not-found error, then deletes, requires the answer's `Id` to equal `contact_id`, and returns what the read showed with
+  `deleted: true`. A 409 is explained as a contact that is still the primary or a secondary contact of an open ticket:
+  reassign it on those tickets or close them.
+
+## 35. Contract writes answered HTTP 500 (2026-10-30 to 2026-10-31)
+
+- Spec said: `POST /v1/contracts` creates a contract from a name, client and service lines, and answers 400 for a
+  body that is not valid.
+- Production did: on 2026-10-30 and 2026-10-31 every create answered HTTP 500, code 070501 "An unexpected error
+  occurred", including bodies the spec says must give a 400. Nothing was tried between then and 2026-11-03,
+  when a create with dates, a create without dates, a read of the result and an archive all worked as published. The start date
+  that Gorelo chose for a contract created without one was the day before the UTC date at 04:48 UTC; the spec says
+  Gorelo uses today in the service provider's time zone.
+- This server: `create_contract` and `update_contract` (gated) were held back, registered under no setting, in 1.5.1 and
+  1.5.2, and are registered again in 1.6.0. `create_contract` sends no start date when you leave it out, and its text says
+  Gorelo sets today in your account's time zone.

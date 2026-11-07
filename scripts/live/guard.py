@@ -36,9 +36,11 @@ Anything the guard cannot parse or inspect is blocked.
 
 Allowlist (write mode). "Run-created" means the id is in the manifest of this run:
 
-    GET        every GET operation of the spec except GET /invoices/{invoiceId}/pdf (it records an export event on the
-               invoice): that one is never allowed in read mode and in write mode only for a run-created Draft invoice
-    DELETE     never under /assets/ (deleting an agent uninstalls the RMM agent), never contracts,
+    GET        every GET operation of the spec except GET /api-keys (a credential list; refused in both modes) and
+               GET /invoices/{invoiceId}/pdf (it records an export event on the invoice): that one is never allowed in read
+               mode and in write mode only for a run-created Draft invoice
+    DELETE     never under /assets/ except DELETE /assets/types/{assetTypeId} of an asset type this run created (asset_types area, and the
+               cleanup of one); never an agent asset (deleting one uninstalls the RMM agent) or a custom asset; never contracts,
                never a client that is the test client or the second client, and never the operator contact (even if a manifest wrongly lists them);
                otherwise only a run-created record of the matching kind (parents in the path too); with
                cleanup=True also the listed leftovers (the leftover clients and contact); an invoice only when
@@ -72,7 +74,8 @@ Allowlist (write mode). "Run-created" means the id is in the manifest of this ru
     PATCH, DELETE /time-entries/{timeEntryId}, /items/{itemId}, /uptime/{uptimeId}   run-created record
     POST /items, /uptime, /projects    ClientId is the test client
     POST, PATCH /uptime           Target.Url, if present, is a http(s) URL on the probe domain or a subdomain; Target.Ip
-                                  is not allowed (a check probes its target every minute)
+                                  is not allowed (a check probes its target every minute); Target holds only the exact keys Url
+                                  and Port (a key that differs from them only by case, "ip" or "URL", is refused too)
     PATCH /items, /uptime, /projects   ClientId, if present, is the test client
     /projects/{projectId}/...     run-created project, and the run-created section, task or comment of the path;
                                   project comments only Private (no ConversationId); task comments Private, or a
@@ -120,8 +123,9 @@ Allowlist (write mode). "Run-created" means the id is in the manifest of this ru
                                   described under "The documents" below); the GETs of a document, its PDF, its versions and its
                                   related items are plain reads
     PATCH /alerts, PATCH /alerts/{alertId}   only with the alert_status area: AlertIds (1 to 100) or the path id are EXISTING alerts the
-                                  manifest recorded (kind alert, written before the first change) as alerts of the test client;
-                                  StatusId exactly 1 (New) or 2 (Dismissed), never 3 (Ticketed), no TicketId; a cleanup restores (1) only
+                                  manifest recorded (kind alert, written before the first change) as alerts of the test client (the one
+                                  place where a run changes a record it did not create, and then the alert is recorded first and
+                                  restored); StatusId exactly 1 (New) or 2 (Dismissed), never 3 (Ticketed), no TicketId; a cleanup restores (1) only
     POST /assets/types, PATCH /assets/types/{assetTypeId}   only with asset_types; Name starts with the run id; PATCH: a run-created type
     DELETE /assets/types/{assetTypeId}   a run-created asset type
     POST /clients/{clientId}/locations, PATCH /clients/{clientId}/locations/{locationId}   only with client_locations; the path client is the
@@ -156,7 +160,8 @@ when the answer has none; for the approved invoice 5, and 5 when the answer has 
 by the cleanup's label search, the status the search found (any of 1, 3, 4 and 5, or None when the row has no readable
 one), or 4 once the harness voided it. The PDF rule refuses any invoice whose details do not hold the integer 1, and the
 DELETE rule any invoice whose details do not hold the integer 1 (or the integer 5 with allow_approved_invoice). A
-Draft that somebody else approved afterwards is caught by the harness, not by the guard: the write matrix and the
+Draft that somebody else approved afterwards is caught by the harness, not by the guard (and the guard does not check the TaxId of a
+Draft line at all: a Draft is deleted, so only the Approved invoice carries a tax rule): the write matrix and the
 cleanup read the invoice back and send a DELETE only for a Draft (or, with the option, for an invoice recorded as
 Approved that still reads as Approved).
 
@@ -168,7 +173,8 @@ null or empty); Reference is the label of an open manifest intent of kind "invoi
 that is the only such open intent; LineItems holds exactly one line, whose Quantity is above 0 and whose UnitPrice is given
 explicitly and is above 0 (a line that falls back to the item's own price could total 0, and an Approved invoice whose
 total is exactly 0 is created as Paid, which Gorelo neither deletes nor voids), with no DiscountPercent key and
-BillableStatusId absent or exactly 1, and with a TaxId that is a JSON integer equal to the `tax_id` the run recorded in the details
+BillableStatusId absent or exactly 1, with no key outside the exact spellings ItemId, Quantity, UnitPrice, TaxId, Description,
+BillableStatusId, UnitCost and CoaCode (so "discountPercent" or "billableStatusId" cannot slip past the two rules by case), and with a TaxId that is a JSON integer equal to the `tax_id` the run recorded in the details
 of that same open intent, which must also hold `tax_percentage` exactly 0 (the run picks the one tax-exempt rate of list_taxes at run
 time and records it before the write; Gorelo's 2026-10-29 create text says a null TaxId applies the item's own tax, so null, an omitted
 TaxId and any other number are refused: the harness limits the one Approved invoice to $1 with no tax);
@@ -340,6 +346,11 @@ CONTRACT_CHANGE_KEYS = frozenset({"Name", "ClientId", "StatusId", "ServiceLines"
 CONTRACT_LINE_KEYS = frozenset({"Id", "Name", "LaborTermsId", "PerHourDetails", "LineItems"})
 CONTRACT_PER_HOUR_KEYS = frozenset({"RateTypeId"})
 CONTRACT_ITEM_KEYS = frozenset({"Id", "ItemId", "Quantity", "UnitPrice", "Description", "BillableStatusId"})
+# The exact keys of an uptime Target and of the one Approved invoice's line (an allowlist, matched case-sensitively on purpose: Gorelo
+# binds names case-insensitively, so "ip" or "discountPercent" would reach the field a rule means to keep out; "Ip" is in the set only so
+# the rule can name it, it is refused when it holds a value). DiscountPercent is the spec's name for a line field and is not in the line set.
+UPTIME_TARGET_KEYS = frozenset({"Ip", "Port", "Url"})
+APPROVED_LINE_KEYS = frozenset({"ItemId", "Quantity", "UnitPrice", "TaxId", "Description", "BillableStatusId", "UnitCost", "CoaCode"})
 DOCUMENT_ACTIVE, DOCUMENT_ARCHIVED = 1, 2  # Document StatusId: the run archives what it creates, and restores one document
 # The opt-in areas of release 1.5.0 (contract 6c30770dffc0): `allow_areas` names the ones a run enabled (write_matrix --with-<area>), and a rule
 # of this table is closed without its area (a cleanup guard never has one; it deletes run-created records and undoes, see the module docstring).
@@ -353,7 +364,7 @@ OPT_IN_AREAS: tuple[str, ...] = (
     "contracts",  # POST and PATCH /contracts: an MCPTEST Hourly contract of the test client
 )
 ALERT_NEW, ALERT_DISMISSED = 1, 2  # Alert StatusId (3, Ticketed, is final and links a ticket: never)
-CONTRACT_ACTIVE, CONTRACT_ARCHIVED = 1, 3  # Contract StatusId: the run archives its contract (a contract cannot be deleted)
+CONTRACT_ACTIVE, CONTRACT_ARCHIVED = 1, 3  # Contract StatusId: the run archives its contract (this guard never lets a contract be deleted)
 CONTRACT_LABOR_TERMS = (1, 2, 4, 5)  # Unlimited, Hourly, No Labor Terms, Limited; 3 Block Hours raises an invoice and is never allowed
 CHARGE_NO_CHARGE = 2  # product charge BillableStatusId 2 No charge: the only status the harness writes (1 Billable could be invoiced)
 DOMAIN_TLD = ".example"  # the reserved TLD of RFC 2606: a domain under it can route no inbound email
@@ -443,9 +454,10 @@ def _is_side_effect_get(op_key: str) -> bool:
 
 
 def _is_custom_asset_write(method: str, segments: tuple[str, ...]) -> bool:
-    """True for the only two writes under /assets/ that are not refused outright: POST /assets/custom and PATCH
-    /assets/custom/{id} (the rules of LiveGuard decide whether the run may send them). DELETE under /assets/ and every
-    write to agents stay refused before any rule is read."""
+    """True for the only two custom asset writes that are not refused outright: POST /assets/custom and PATCH
+    /assets/custom/{id} (the rules of LiveGuard decide whether the run may send them). DELETE of a custom asset and every
+    write to agents stay refused before any rule is read; the asset type writes are _is_asset_type_write (its DELETE
+    included, for a run-created type)."""
     lowered = tuple(segment.lower() for segment in segments)
     if lowered[:2] != ("assets", "custom"):
         return False
@@ -558,7 +570,8 @@ _CREATES: dict[str, str] = {
 # restore changes which version of a run-created document is current; neither makes a record the harness has to find again, so
 # neither needs an intent (the rule table test names them, like the submission links).
 
-# Clients and contacts are never deleted by tools: the run's own, and with cleanup=True the listed leftovers.
+# The harness deletes a client or a contact with the raw request, never through a tool (delete_contact, gated since 1.5.2, is not
+# used by any live area): the run's own, and with cleanup=True the listed leftovers.
 _SPECIAL_DELETES: dict[str, str] = {
     "DELETE /v1/clients/{clientId}": "run-created client (never the test client or the second client); with cleanup=True also the listed leftover clients",
     "DELETE /v1/contacts/{contactId}": "run-created contact (never the operator contact); with cleanup=True also the listed leftover contact",
@@ -737,7 +750,7 @@ def _build_routes(spec: SpecIndex) -> dict[str, list[_Route]]:
 
 def _decoded_forms(text: str) -> set[str]:
     """The text and what it becomes when HTML entities and percent escapes are decoded, up to three rounds in
-    any order, so an address written as bob&#64;example.com or bob%2540example.com is still found."""
+    any order, so an address whose @ is written as an HTML entity or a percent escape is still found."""
     forms = {text}
     frontier = [text]
     for _ in range(3):
@@ -958,7 +971,11 @@ class LiveGuard:
         self.allowed_hosts = frozenset(host.lower() for host in hosts)
         self.probe_domains = frozenset(domain.lower() for domain in probe_domains)
         self.require_intents = require_intents
-        self._routes = _build_routes(spec if spec is not None else load_spec_index())
+        index = spec if spec is not None else load_spec_index()
+        self._routes = _build_routes(index)
+        # every field name of every schema of the spec, to catch a nested key that is one of them in another case
+        self._field_names = frozenset(name for schema in index.schemas.values() for name in (schema.get("fields") or {}))
+        self._field_folds = frozenset(name.casefold() for name in self._field_names)
         self._ticket_contacts: dict[str, set[int]] = {}
         self._approved_creates = 0  # Approved invoices this guard allowed (allow_approved_invoice permits one)
         self.violations: list[str] = []
@@ -1186,8 +1203,31 @@ class LiveGuard:
             getattr(self, handler)(req)
         elif special:
             self._delete_client_or_contact(req, route)
+        if req.body is not None:  # last, so a rule's own message comes first; this is the backstop for every nested object
+            self._check_nested_spelling(req, req.body)
 
     # -- emails ------------------------------------------------------------
+
+    def _check_nested_spelling(self, req: _Req, body: dict[str, Any]) -> None:
+        """Gorelo binds names case-insensitively, so a key inside a nested object that is a spec field name in another case ("ip",
+        "discountPercent", "TAXID") reaches the field a rule is written for, while a rule that looks for the exact name misses it.
+        Top-level keys are checked against the spec's exact spelling already. Every nested object key that only differs by case from
+        a field name of the spec is refused (fail closed); a key that matches no field name at all is Gorelo's to ignore."""
+        stack: list[tuple[Any, str, int]] = [(value, _name(key), 1) for key, value in body.items()]
+        while stack:
+            node, where, depth = stack.pop()
+            if depth > _MAX_DEPTH:
+                raise req.block("the JSON body is nested too deeply to inspect")
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key not in self._field_names and key.casefold() in self._field_folds:
+                        raise req.block(
+                            f"{where}.{_name(key)} is a spec field name in another spelling: names must be written exactly as the "
+                            "spec has them, because Gorelo matches them case-insensitively and the guard's rules look for the exact name"
+                        )
+                    stack.append((value, f"{where}.{_name(key)}", depth + 1))
+            elif isinstance(node, list):
+                stack.extend((value, f"{where}[{index}]", depth + 1) for index, value in enumerate(node))
 
     def _check_text(self, req: _Req, where: str, text: str) -> None:
         """Block text that holds an email address that is not allowed (also when HTML or percent encoded)."""
@@ -2045,10 +2085,17 @@ class LiveGuard:
                 "item's own price, or bills nothing, could bring the total to exactly 0, which Gorelo records as Paid, "
                 "and a Paid invoice can be neither deleted nor voided"
             )
-        if "DiscountPercent" in line:
+        if any(key.casefold() == "discountpercent" for key in line):
             raise req.block(
-                "LineItems[0].DiscountPercent must be absent from an Approved invoice: a discount could bring the "
+                "LineItems[0].DiscountPercent must be absent from an Approved invoice (in any spelling): a discount could bring the "
                 "total to 0"
+            )
+        extra = sorted(set(line) - APPROVED_LINE_KEYS)
+        if extra:
+            raise req.block(
+                f"LineItems[0] may not carry {_name(extra[0])}: an Approved invoice line holds only "
+                + ", ".join(sorted(APPROVED_LINE_KEYS))
+                + " (exactly these spellings)"
             )
         if "BillableStatusId" in line and not _is_status(line["BillableStatusId"], 1):
             raise req.block(
@@ -2163,6 +2210,12 @@ class LiveGuard:
             return
         if not isinstance(target, dict):
             raise req.block("Target must be an object")
+        extra = sorted(set(target) - UPTIME_TARGET_KEYS)
+        if extra:
+            raise req.block(
+                f"Target.{_name(extra[0])} is not allowed: Target holds only Url and Port (exactly these spellings; Gorelo matches names "
+                "case-insensitively, so \"ip\" would set the Ip)"
+            )
         if target.get("Ip") not in (None, ""):
             raise req.block("Target.Ip is not allowed: a check may only probe a URL on " + ", ".join(sorted(self.probe_domains)))
         url = target.get("Url")
@@ -2608,7 +2661,7 @@ class LiveGuard:
     def _patch_contract(self, req: _Req) -> None:
         assert req.body is not None
         body = req.body
-        if self.cleanup:  # the one thing a cleanup does to a contract: archive what a stopped run left (it cannot be deleted)
+        if self.cleanup:  # the one thing a cleanup does to a contract: archive what a stopped run left (the DELETE is never sent)
             if set(body) != {"StatusId"} or not _is_status(body["StatusId"], CONTRACT_ARCHIVED):
                 raise req.block("a cleanup only archives a contract (the body {\"StatusId\": 3}); it changes nothing else")
             return

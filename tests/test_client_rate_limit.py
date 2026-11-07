@@ -859,7 +859,7 @@ WRITE_PATHS = {
         pytest.param(lambda: gateway_page(502), id="502"),
         pytest.param(lambda: gateway_page(503), id="503"),
         pytest.param(lambda: gateway_page(504), id="504"),
-        pytest.param(lambda: httpx.ConnectError("refused"), id="connect-error"),
+        pytest.param(lambda: httpx.ReadError("reset"), id="connection-lost-after-it-was-made"),
     ],
 )
 async def test_a_write_is_never_sent_twice_after_a_gateway_failure(vt, gateway, new_client, write, failure):
@@ -872,13 +872,28 @@ async def test_a_write_is_never_sent_twice_after_a_gateway_failure(vt, gateway, 
     assert len(gateway.arrivals) == 1 and vt.delays == []
 
 
+@pytest.mark.parametrize("write", sorted(WRITES))
+async def test_a_write_is_never_sent_twice_after_a_refused_connection_but_nothing_was_sent(vt, gateway, new_client, write):
+    # httpx.ConnectError: the connection was never made. Same single arrival as above (the client does not repeat a write by
+    # itself), but the error says nothing reached Gorelo, like the one that makes a read safe to send again.
+    method = "POST" if write == "multipart" else write
+    gateway.on(method, WRITE_PATHS[write], lambda: httpx.ConnectError("refused"), ok({"Id": 1}))
+    async with new_client() as client:
+        with pytest.raises(GoreloAPIError) as info:
+            await vt.run(WRITES[write](client))
+    err = info.value
+    assert (err.kind, err.write_unconfirmed) == ("transport", False)
+    assert "could not be established (ConnectError); nothing was sent, so repeating it is safe" in str(err)
+    assert len(gateway.arrivals) == 1 and vt.delays == []
+
+
 @pytest.mark.parametrize(
     "failure",
     [
         pytest.param(lambda: gateway_page(502), id="502"),
         pytest.param(lambda: gateway_page(503), id="503"),
         pytest.param(lambda: gateway_page(504), id="504"),
-        pytest.param(lambda: httpx.ConnectError("refused"), id="connect-error"),
+        pytest.param(lambda: httpx.ReadError("reset"), id="connection-lost-after-it-was-made"),
     ],
 )
 async def test_the_invoice_pdf_export_is_never_sent_twice_after_a_gateway_failure(vt, gateway, new_client, failure):
@@ -889,6 +904,16 @@ async def test_the_invoice_pdf_export_is_never_sent_twice_after_a_gateway_failur
         with pytest.raises(GoreloAPIError) as info:
             await vt.run(client.get_binary(PDF_OP, path_params={"invoiceId": uid(1)}, max_bytes=1000, tool="export_invoice_pdf"))
     assert info.value.write_unconfirmed is True and EXPORT_NOTE in str(info.value)
+    assert len(gateway.arrivals) == 1 and vt.delays == []
+
+
+async def test_the_invoice_pdf_export_is_never_sent_twice_after_a_refused_connection_but_nothing_was_recorded(vt, gateway, new_client):
+    pdf = httpx.Response(200, content=b"%PDF", headers={"content-type": "application/pdf"})
+    gateway.on("GET", f"/v1/invoices/{uid(1)}/pdf", lambda: httpx.ConnectError("refused"), pdf)
+    async with new_client() as client:
+        with pytest.raises(GoreloAPIError) as info:
+            await vt.run(client.get_binary(PDF_OP, path_params={"invoiceId": uid(1)}, max_bytes=1000, tool="export_invoice_pdf"))
+    assert info.value.write_unconfirmed is False and EXPORT_NOTE not in str(info.value)
     assert len(gateway.arrivals) == 1 and vt.delays == []
 
 
@@ -1055,6 +1080,130 @@ async def test_parallel_tools_never_meet_a_429_through_the_bucket(vt, spec_index
         await parallel_tools(client, vt)
     assert strict.limited == 0 and strict.served == 24
     assert vt.now - vt.start < 21.0  # five at once, then one a second: the 24th goes out at 19 s and is answered at 19.2 s
+
+
+class SlowFirstGorelo(StrictGorelo):
+    """StrictGorelo whose first `slow` requests take `slow_for` seconds to answer: Gorelo degraded, all slots taken."""
+
+    def __init__(self, vt, slow=4, slow_for=20.0):
+        super().__init__(vt)
+        self.slow = slow
+        self.slow_for = slow_for
+
+    async def __call__(self, request):
+        self.latency = self.slow_for if len(self.arrivals) < self.slow else 0.2
+        return await super().__call__(request)
+
+
+async def read_while_the_slots_are_taken(vt, spec_index):
+    """4 slow reads hold the four slots; 12 more tool calls arrive meanwhile and queue for a slot."""
+    strict = SlowFirstGorelo(vt)
+    client = GoreloClient(
+        TEST_API_KEY, spec=spec_index, transport=httpx.MockTransport(strict), sleep=vt.sleep, clock=vt.clock
+    )
+    async with client:
+
+        async def late(number):
+            await vt.elapse(1.0)
+            await get_client_record(client, 100 + number)
+
+        await vt.run(*(get_client_record(client, number) for number in range(1, 5)), *(late(n) for n in range(12)))
+    return strict
+
+
+async def test_tokens_taken_while_waiting_for_a_slot_do_not_leave_as_a_burst_past_the_limit(vt, spec_index):
+    strict = await read_while_the_slots_are_taken(vt, spec_index)
+    assert strict.limited == 0 and strict.served == 16
+    freed = [when - vt.start for when, _, _ in strict.arrivals[4:] if when - vt.start >= 20.0]
+    assert len(freed) >= 8  # most of the queue was still waiting when the slow reads ended at 20 s
+    assert len([when for when in freed if when < 20.5]) <= 5  # never more than the burst at once
+    assert strict.peak <= 4
+
+
+async def test_without_the_send_ledger_the_same_queue_does_draw_429s(vt, spec_index, monkeypatch):
+    # the control of the test above: the client as it was, which only waited out a back-off after it got its slot
+    async def old_wait(self):
+        await self.wait_unblocked()
+
+    monkeypatch.setattr(gorelo_client._TokenBucket, "pace_send", old_wait)
+    strict = await read_while_the_slots_are_taken(vt, spec_index)
+    assert strict.limited > 0
+
+
+async def test_pace_send_lets_the_burst_out_at_once_and_then_one_per_interval(vt):
+    bucket = gorelo_client._TokenBucket(1.0, 5, vt.clock, vt.sleep)
+    sent = []
+
+    async def send():
+        await bucket.pace_send()
+        sent.append(vt.now - vt.start)
+
+    await vt.run(*(send() for _ in range(9)))
+    assert sent == [0, 0, 0, 0, 0, 1, 2, 3, 4]
+
+
+async def test_pace_send_is_independent_of_the_tokens_that_were_granted_earlier(vt):
+    # twelve requests took their tokens one second apart while they waited; they reach the send point together
+    bucket = gorelo_client._TokenBucket(1.0, 5, vt.clock, vt.sleep)
+    for _ in range(5):
+        await vt.run(bucket.take())
+    vt.now = vt.start + 20.0
+    sent = []
+
+    async def send():
+        await bucket.pace_send()
+        sent.append(vt.now - vt.start)
+
+    await vt.run(*(send() for _ in range(12)))
+    assert sent[:5] == [20.0] * 5 and sent[5:] == [21.0 + n for n in range(7)]
+
+
+async def test_a_429_empties_the_send_ledger_too(vt):
+    bucket = gorelo_client._TokenBucket(1.0, 5, vt.clock, vt.sleep)
+    bucket.back_off(6.0)
+    sent = []
+
+    async def send():
+        await bucket.pace_send()
+        sent.append(vt.now - vt.start)
+
+    await vt.run(*(send() for _ in range(7)))
+    # the ledger was emptied when the 429 came and has refilled to the burst by the end of the back-off: five, not more
+    assert sent[:5] == [6.0] * 5 and sent[5:] == [7.0, 8.0]
+
+
+async def test_pace_send_never_leaves_inside_a_back_off_not_even_by_the_slack(vt):
+    # the slack (50 ms) belongs to the send ledger only: a send 30 ms before the end of a 429 back-off must wait for it
+    bucket = gorelo_client._TokenBucket(1.0, 5, vt.clock, vt.sleep)
+    bucket.back_off(1.0)
+    vt.now = vt.start + 0.97
+    await vt.run(bucket.pace_send())
+    assert vt.now - vt.start == pytest.approx(1.0)
+
+
+async def test_pace_send_still_uses_the_slack_on_the_send_ledger(vt):
+    # the control: with no back-off a send up to 50 ms before its ledger time goes out at once
+    bucket = gorelo_client._TokenBucket(1.0, 1, vt.clock, vt.sleep)
+    await vt.run(bucket.pace_send())
+    vt.now = vt.start + 0.97
+    await vt.run(bucket.pace_send())
+    assert vt.now - vt.start == pytest.approx(0.97)
+
+
+async def test_a_cancelled_waiter_of_pace_send_records_no_send(vt):
+    bucket = gorelo_client._TokenBucket(1.0, 5, vt.clock, vt.sleep)
+    for _ in range(5):
+        await vt.run(bucket.pace_send())
+    waiter = asyncio.ensure_future(bucket.pace_send())
+
+    async def give_up():
+        await vt.elapse(0.5)
+        waiter.cancel()
+
+    await vt.run(waiter, give_up())
+    assert waiter.cancelled()
+    await vt.run(bucket.pace_send())
+    assert vt.now - vt.start == 1.0  # one interval after the fifth send: the cancelled waiter used no slot of the ledger
 
 
 async def test_the_same_tools_do_meet_429s_without_a_bucket(vt, spec_index):

@@ -58,8 +58,8 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                (confirm=true) again while Outcome is Reopened (at most 3 calls)
     items      create_item (product scoped to the test client), update_item, delete_item (confirm=true). SKIPPED unless
                --with-items is given (it creates, updates and deletes a catalog product on the test client), and also
-               skipped, with the same reason, when --only items is given without it: the three item tools cannot
-               even be called then. A live run passed it, and a deleted item answers GET /v1/items/{itemId}
+               skipped, with the same reason, when --only items is given without it: the three item tools stay closed then, unless an
+               opt-in area that lists some of them is enabled (invoice_update opens create_item and delete_item). A live run passed it, and a deleted item answers GET /v1/items/{itemId}
                with a 404 (code 070202)
     custom_assets
                list_custom_asset_hardware_types (the first row is used, no tenant id is hardcoded), the test client's default
@@ -259,7 +259,8 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                of the Draft. Then the TAX PROBE: list_taxes, the first rate with Percentage above 0 (none: the probe is skipped with a note) and
                the ONE Tax Exempt rate (Percentage 0, Name or Code "Tax Exempt"; none or several: skipped with a note, the tool would refuse
                no_tax), a temporary MCPTEST item taxed at the first rate (create_item with tax_id), the intent of a second Draft (records tax_id
-               of the exempt rate and tax_percentage 0 before the write, the guard allows no other TaxId on a Draft line), that Draft with one
+               of the exempt rate and tax_percentage 0 before the write; the guard does not check the TaxId of a Draft line, the area checks the
+               amounts afterwards), that Draft with one
                line of the item with no_tax=true (the tool looks up the Tax Exempt rate and sends its id as TaxId), a fresh get_invoice, and a
                NOTE that says which TaxId the tool used and which TaxId and tax amount Gorelo applied. The area FAILS unless the line shows
                TaxAmount 0 and the invoice TotalTax 0 (the Draft and the item are deleted first); the `warning` create_invoice added when it saw
@@ -269,10 +270,10 @@ Areas, in this order (--only takes a comma separated list and keeps this order; 
                and two line items billed as No charge; never a Block Hours line, never auto_approve_and_send true), update_contract (name and
                the quantity of line item A), add a second service line, remove it, check after each step that the service line and the
                line item that were sent with an Id only kept their values (Quantity, UnitPrice, Description, DiscountPercent, Tax,
-               BillableStatus), then archive it (update_contract status=archived, StatusId 3). A contract CANNOT be deleted through the API
-               (the guard refuses the DELETE): the archived contract is a KNOWN RESIDUE, like an archived document. SKIPPED unless
-               --with-contracts is given, and SKIPPED whatever the flags say while create_contract and update_contract are held back
-               (tools._common.HELD_TOOLS, since 1.5.1: Gorelo has not released contract writes), with the reason in the summary
+               BillableStatus), then archive it (update_contract status=archived, StatusId 3). This harness and server never delete a contract
+               (the API has the DELETE; FORBIDDEN_OPS and the guard refuse it): the archived contract is a KNOWN RESIDUE, like an archived document. SKIPPED unless
+               --with-contracts is given, and SKIPPED whatever the flags say while one of its tools is in tools._common.HELD_TOOLS
+               (empty since 1.5.3; create_contract and update_contract were held back in 1.5.1 and 1.5.2), with the reason in the summary
     comment_edits
                an MCPTEST project of the test client (as in the projects area: the Project scope, a project type and the Everyone group),
                a section and a task, a Private project comment and a Private task comment, update_project_comment and update_task_comment
@@ -455,8 +456,11 @@ Live requests per area (method and spec path, in the order they are sent; the te
         GET /v1/documents/{documentId}/related-items  # list_document_related_items
         DELETE /v1/documents/{documentId}/related-items/{relatedItemId}  # remove_document_related_item
         GET /v1/documents/{documentId}/related-items  # the link is gone
+        GET /v1/documents/{documentId}  # move_document under the copy reads the document first
+        GET /v1/documents/{documentId}  # and the new parent (the two clients are compared)
         PATCH /v1/documents/{documentId}  # move_document under the copy
         GET /v1/documents/{documentId}  # the copy lists it as a child
+        GET /v1/documents/{documentId}  # move_document back to the top level reads the document first (same client: no sharing scan)
         PATCH /v1/documents/{documentId}  # move_document back to the top level of the test client
         GET /v1/documents/{documentId}  # the copy has no child any more
         PATCH /v1/documents/{documentId}  # unshare_document: the public link and the portal off
@@ -485,7 +489,7 @@ Live requests per area (method and spec path, in the order they are sent; the te
         PATCH /v1/alerts  # set_alert_status dismissed
         GET /v1/alerts/{alertId}  # Dismissed, DismissedOn set
         PATCH /v1/alerts  # set_alert_status new
-        GET /v1/alerts/{alertId}  # New, DismissedOn null
+        GET /v1/alerts/{alertId}  # New, DismissedOn null (then one more GET per alert the dismissal moved that the restore did not name)
     asset_types (--with-asset-types):
         POST /v1/assets/types  # create_asset_type (only with --with-asset-types)
         GET /v1/assets/types  # create_asset_type reads the type back from the list
@@ -569,10 +573,10 @@ Live requests per area (method and spec path, in the order they are sent; the te
         DELETE /v1/items/{itemId}  # delete_item
     contracts (--with-contracts):
         GET /v1/items  # list_items (only with --with-contracts)
-        POST /v1/contracts  # create_contract: Hourly, one service line, one line item
+        POST /v1/contracts  # create_contract: Hourly, one service line, two line items (No charge)
         GET /v1/contracts/{contractId}  # its read-back
         GET /v1/contracts/{contractId}  # update_contract reads the contract first
-        PATCH /v1/contracts/{contractId}  # name and the quantity of the line item
+        PATCH /v1/contracts/{contractId}  # name and the quantity of line item A
         GET /v1/contracts/{contractId}
         GET /v1/contracts/{contractId}  # add a second service line
         PATCH /v1/contracts/{contractId}
@@ -760,16 +764,17 @@ can quote a name or a value), never the API key. The text of an update_client er
 without being sent (_env.without_quotes).
 
 Safety nets besides the guard: the matrix may call only the tools in MATRIX_TOOLS (no post_alert, no
-create_approved_invoice; the three item tools only with --with-items; the four custom asset tools only with
+create_approved_invoice; the three item tools only with --with-items (or create_item and delete_item with --with-invoice-update); the four custom asset tools only with
 --with-custom-assets; the sixteen document tools (DOCUMENT_TOOLS, never share_document) only with --with-documents; list_items,
-list_invoices, get_invoice, create_invoice, export_invoice_pdf and delete_invoice only with --with-invoices). The move of the
+list_invoices, get_invoice, create_invoice, export_invoice_pdf and delete_invoice only with --with-invoices; but --with-invoice-update also opens
+list_items, create_invoice, get_invoice and delete_invoice, and --with-product-charges and --with-contracts open list_items). The move of the
 custom asset needs no tool of its own: the guard of the run gets allow_custom_asset_move only with --with-asset-move, and refuses a
 PATCH that names the second client unless the manifest announced it. The custom_properties area needs no tool of
 its own (get_client and update_client are in MATRIX_TOOLS); what stops update_client from changing the test client in any
 other run is the guard: it refuses every PATCH of the test client unless it is built with allow_custom_properties
 (--with-custom-properties) and the body is one recorded custom field (a field whose record is cleaned takes the null only). With --with-approved-invoice the run
 may call ONLY APPROVED_INVOICE_TOOLS (create_approved_invoice, approve_invoice, create_invoice, get_invoice, list_invoices,
-delete_invoice, list_items, list_taxes, list_contacts, list_client_locations; eight of the ten per run) and its guard is built with allow_approved_invoice; create_approved_invoice is
+delete_invoice, list_items, list_taxes, list_contacts, list_client_locations; eight of the ten per run, or nine with --approve-via-update) and its guard is built with allow_approved_invoice; create_approved_invoice is
 named nowhere else in this module. That run also switches off the 429 retries of its Gorelo client around the create call
 alone (no_429_retries, put back right after it), because the guard allows the create once and a retried POST would count as
 a second one; the client is looked up before the first request (gorelo_client_behind), or the run does not start. The
@@ -1032,7 +1037,7 @@ class OptIn:
 
     @property
     def held_reason(self) -> str:
-        return f"{' and '.join(self.held_tools)} held back until Gorelo releases contract writes: the server does not register them, so nothing was created"
+        return f"{' and '.join(self.held_tools)} held back: the server does not register them, so nothing was created"
 
 
 OPT_INS: tuple[OptIn, ...] = (
@@ -1090,8 +1095,8 @@ OPT_INS: tuple[OptIn, ...] = (
     ),
     OptIn(
         "contracts",
-        "creates an MCPTEST Hourly contract on the test client, changes it and archives it; a contract CANNOT be deleted through the "
-        "API, so it stays in Gorelo, archived, until removed in the Gorelo app",
+        "creates an MCPTEST Hourly contract on the test client, changes it and archives it; this harness and server never delete a "
+        "contract, so it stays in Gorelo, archived, until removed in the Gorelo app",
         frozenset({"list_items", "get_contract", "create_contract", "update_contract"}),
         "contracts",
     ),
@@ -1121,10 +1126,10 @@ def tools_for(
     opt_in: Iterable[str] = (),
     approve_via_update: bool = False,
 ) -> frozenset[str]:
-    """The tools a run may call: with --with-approved-invoice exactly APPROVED_INVOICE_TOOLS, less create_approved_invoice (and, without
-    --approve-via-update, create_invoice and approve_invoice too) or, with --approve-via-update, less create_approved_invoice only
-    (that run has no other area); otherwise MATRIX_TOOLS, without the three item tools unless --with-items was given, without the
-    six invoice tools unless --with-invoices was given, with the four custom asset tools only when --with-custom-assets was given
+    """The tools a run may call: with --with-approved-invoice APPROVED_INVOICE_TOOLS less create_invoice and approve_invoice (8 tools:
+    create_approved_invoice and the seven of APPROVED_RUN_COMMON) or, with --approve-via-update, less create_approved_invoice only
+    (9 tools: create_invoice, approve_invoice and the seven; that run has no other area); otherwise MATRIX_TOOLS, without the three item tools unless --with-items was given, without the
+    six invoice tools unless --with-invoices was given (the tools of an enabled opt-in area are added below whatever these two say), with the four custom asset tools only when --with-custom-assets was given
     (the move needs no tool of its own: update_custom_asset and list_client_locations do it), with the sixteen document tools only when
     --with-documents was given and with the tools of each opt-in area of 1.5.0 (OPT_INS) that was enabled."""
     if with_approved_invoice:
@@ -2421,7 +2426,8 @@ async def move_custom_asset_out_and_back(m: Matrix, asset_id: str, home_location
 
     The manifest details of the asset name the second client BEFORE the move is sent (the guard insists on it), and the record's
     residue text says the asset MAY be there until Gorelo answers the move, so a crash then leaves that text true; once the answer
-    comes the record names the client. The way back is tried whatever the way out did: from the second client it brings the asset
+    comes the record names the client. A 4xx on a READ after the move was answered (get_custom_asset) is not "the asset never left": the
+    record then says "unknown" and the way back is sent. The way back is tried whatever the way out did: from the second client it brings the asset
     home, from the test client the tool sees no move and re-sends the client the asset has. The details go back to the test client
     when Gorelo answers the way back. A way back that is refused or never sent leaves them at the second client (the way out was
     clean); an unknown outcome, a way out that was not clean, or a request the guard refused leaves them at "unknown", so the
@@ -2436,12 +2442,12 @@ async def move_custom_asset_out_and_back(m: Matrix, asset_id: str, home_location
     record_custom_asset_client(m, asset_id, SITE.second_client, answer_pending=True)  # announced BEFORE the move is sent
     m.note(f"custom asset {asset_id}: moving to client {SITE.second_client} (location {target}) and back; recorded in the manifest first")
     trouble: ToolFailed | CheckFailed | None = None
+    moved = False  # set the moment Gorelo answers the move: from then on a failed read must never be taken for "it never left"
     try:
         try:
-            out = full(
-                await m.tool("update_custom_asset", custom_asset_id=asset_id, client_id=SITE.second_client, location_id=target),
-                "update_custom_asset (move)",
-            )
+            answer = await m.tool("update_custom_asset", custom_asset_id=asset_id, client_id=SITE.second_client, location_id=target)
+            moved = True
+            out = full(answer, "update_custom_asset (move)")
             record_custom_asset_client(m, asset_id, SITE.second_client)  # answered: the record names the second client
             expect("update_custom_asset (move) Id", str(out.get("Id", "")).lower(), asset_id.lower())
             expect("update_custom_asset (move) ClientId", out.get("ClientId"), SITE.second_client)
@@ -2452,7 +2458,7 @@ async def move_custom_asset_out_and_back(m: Matrix, asset_id: str, home_location
             expect("get_custom_asset ClientId after the move", seen.get("ClientId"), SITE.second_client)
         except (ToolFailed, CheckFailed) as exc:
             trouble = exc
-        if isinstance(trouble, ToolFailed) and trouble.sent and trouble.rejected:  # Gorelo answered 4xx: the asset never left
+        if isinstance(trouble, ToolFailed) and trouble.sent and trouble.rejected and not moved:  # Gorelo refused the move itself: it never left
             record_custom_asset_client(m, asset_id, SITE.test_client)
             raise trouble
         if trouble is not None:  # moved, or not known to have moved: whatever it is, ask Gorelo to bring it home
@@ -3601,7 +3607,8 @@ async def area_alert_status(m: Matrix) -> None:
     with it) with it: dismissing moves every New alert of the stack and restoring to New moves every Dismissed one back. So the area reads
     EVERY Dismissed alert of the test client (all pages) and uses an alert only when none of them shares its Type and subject ids
     (alert_stack_key; the Title is not compared): restoring would move such an alert back to New, which the run did not dismiss. After the
-    restore, an id in its UpdatedIds that the dismissal did not name FAILS the area, naming the ids as a leftover for the user.
+    restore, an id in its UpdatedIds that the dismissal did not name FAILS the area, naming the ids as a leftover for the user; so does an
+    id the dismissal moved that the restore did not name and that still reads Dismissed (get_alert), and then the record is NOT marked cleaned.
     The alert is recorded in the manifest (kind alert, details client_id and status_before 1, then dismissed_ids: the ids the dismissal
     moved) BEFORE the first change: the guard allows only a recorded alert of the test client and the cleanup restores one a stopped run
     left dismissed, only within the run's window and only for the ids recorded. Skipped, with a note, when no alert of the test client is New."""
@@ -3640,6 +3647,22 @@ async def area_alert_status(m: Matrix) -> None:
     back = await m.tool("get_alert", alert_id=alert_id)
     expect("get_alert Status.Id after the restore", status_id_of(back), ALERT_NEW)
     check(back.get("DismissedOn") is None, "get_alert after the restore: DismissedOn is still set")
+    # Gorelo's stack rule is what this area checks live: the restore must move back every alert the dismissal moved. An id that the
+    # restore did not name is read; one that still reads Dismissed fails the area BEFORE the record is marked cleaned (the cleanup then
+    # sees the record as still open and names such an alert as a leftover for the user)
+    moved_back = {str(item).lower() for item in restored.get("UpdatedIds", [])}
+    missing = [item for item in moved if item.lower() not in moved_back]
+    stranded = []
+    for other in missing:
+        reading = await m.tool("get_alert", alert_id=other)
+        if status_id_of(reading) == ALERT_DISMISSED:
+            stranded.append(other)
+    if stranded:
+        raise CheckFailed(
+            f"set_alert_status new moved back {len(moved_back)} alert(s) but the dismissal had moved {count}: {len(stranded)} alert(s) of the stack "
+            f"still read Dismissed ({', '.join(stranded)}). LEFT DISMISSED FOR THE USER, who has to restore them to New in the Gorelo app; the "
+            "record of the alert stays open"
+        )
     m.mark_cleaned("alert", alert_id, "restored to New by the write matrix (set_alert_status)")
     known = {item.lower() for item in moved}
     extra = [str(item) for item in restored.get("UpdatedIds", []) if str(item).lower() not in known]
@@ -4045,7 +4068,7 @@ async def tax_probe(m: Matrix, today: Any) -> None:
     made = await m.create(
         "invoice",
         label,
-        # the exempt rate and its Percentage 0 are recorded BEFORE the write (the approved invoice's pattern): the guard allows no other TaxId
+        # the exempt rate and its Percentage 0 are recorded BEFORE the write (the approved invoice's pattern); the guard checks no TaxId of a Draft line, the area checks the amounts afterwards
         {"client_id": SITE.test_client, "status_id": INVOICE_DRAFT, "tax_id": exempt_id, "tax_percentage": 0},
         "create_invoice",
         {
@@ -4100,8 +4123,8 @@ async def tax_probe(m: Matrix, today: Any) -> None:
 async def area_contracts(m: Matrix) -> None:
     """An MCPTEST Hourly contract (labor terms 2) on the test client: one service line with two line items (No charge), update its name and
     one line item, add a second service line then remove it, check that the entries sent with an Id only kept their values, then archive it
-    (status 3). A contract CANNOT be deleted through the API (the guard refuses the DELETE): the archived contract is a known residue, like an
-    archived document. Never a Block Hours line (it raises an invoice) and never auto_approve_and_send true."""
+    (status 3). This harness and server never delete a contract (the API has the DELETE; FORBIDDEN_OPS and the guard refuse it): the archived contract
+    is a known residue, like an archived document. Never a Block Hours line (it raises an invoice) and never auto_approve_and_send true."""
     opt_in(m, "contracts")
     found = await m.tool("list_items", type="product", status="active", page_size=CATALOG_PAGE)
     item_id = billable_item(found.get("items"))
@@ -4207,7 +4230,7 @@ async def area_contracts(m: Matrix) -> None:
     archived = await m.tool("update_contract", contract_id=contract, status="archived", confirm=True)
     expect("update_contract Status.Id (Archived)", dig(archived, "Status", "Id"), CONTRACT_ARCHIVED)
     m.manifest.cleanup_failed("contract", contract, contract_residue("archived by the write matrix (update_contract)"))
-    m.note(f"contract {contract} archived: it cannot be deleted through the API, so it stays in Gorelo until removed in the Gorelo app")
+    m.note(f"contract {contract} archived: this harness and server never delete a contract (DELETE /v1/contracts/{{contractId}} is forbidden), so it stays in Gorelo until removed in the Gorelo app")
 
 
 async def area_comment_edits(m: Matrix) -> None:
@@ -4530,7 +4553,7 @@ class MatrixReport:
                 f"reminder: {len(self.documents)} document(s) of this run stay in Gorelo {DOCUMENT_RESIDUE_TAIL}; the cleanup lines above "
                 f"say which are archived: search the Documents area of Gorelo for {self.run_id}"
             )
-        if self.contracts:  # a contract cannot be deleted through the API either: archived, it stays in Gorelo
+        if self.contracts:  # a contract is never deleted by this harness either: archived, it stays in Gorelo
             lines.append(
                 f"reminder: {len(self.contracts)} contract(s) of this run stay in Gorelo {CONTRACT_RESIDUE_TAIL}; the cleanup lines above "
                 f"say which are archived: search the Contracts of Gorelo for {self.run_id}"
@@ -4629,9 +4652,10 @@ async def run_matrix(
     areas        area names for --only (None: every area); --skip-email is skip_email.
     leftovers    also delete the leftovers listed in site.local.toml [leftovers] (run_cleanup(leftovers=True)).
     with_items   run the items area (--with-items). Without it the area is skipped with ITEMS_SKIP_REASON, also when
-                 it was selected with areas=["items"], and the three item tools cannot be called.
+                 it was selected with areas=["items"], and the item tools stay closed unless an opt-in area that lists them is enabled
+                 (invoice_update: create_item, delete_item).
     with_custom_assets run the custom_assets area (--with-custom-assets). Without it the area is skipped with
-                 CUSTOM_ASSETS_SKIP_REASON, also when it was selected with areas=["custom_assets"], and the three custom asset
+                 CUSTOM_ASSETS_SKIP_REASON, also when it was selected with areas=["custom_assets"], and the four custom asset
                  tools cannot be called. This harness never deletes the asset it creates (the spec's soft DELETE is not used): the
                  cleanup reports it as a known residue and the summary tells the operator to remove it in the Gorelo app. Not allowed beside
                  with_approved_invoice (that run takes no other flag).
@@ -4659,7 +4683,8 @@ async def run_matrix(
     A run needs the TEST CLIENT Active: right after the check of the client names run_matrix raises guard.ClientNotActive (a
     SiteConfigError: "cannot start", exit status 2) when it is not, before a manifest is made or a request is sent.
     with_invoices run the invoices area (--with-invoices). Without it the area is skipped with INVOICES_SKIP_REASON,
-                 also when it was selected with areas=["invoices"], and the six invoice tools cannot be called.
+                 also when it was selected with areas=["invoices"], and the six invoice tools stay closed unless an opt-in area that lists them is enabled
+                 (invoice_update opens create_invoice, get_invoice, delete_invoice and list_items; product_charges and contracts open list_items).
     with_approved_invoice run the approved_invoice area (--with-approved-invoice), which approves one $1 invoice on
                  the test client and voids it. It must be the ONLY area selected (areas=["approved_invoice"]) and the only flag
                  (no with_items, with_invoices, leftovers or skip_email), else UsageError before anything is created; the

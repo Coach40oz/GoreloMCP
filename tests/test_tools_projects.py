@@ -2774,7 +2774,7 @@ async def test_create_project_comment_a_failed_reread_returns_the_warning_and_ne
 
 
 async def test_create_project_comment_a_timeout_says_the_comment_may_or_may_not_exist_and_is_not_retried(server, mock_gorelo):
-    mock_gorelo.on("POST", f"/v1/projects/{PROJECT}/comments", httpx.ConnectError("refused"))
+    mock_gorelo.on("POST", f"/v1/projects/{PROJECT}/comments", httpx.ReadError("reset"))  # made, then lost
     text = await call_tool_error(server, "create_project_comment", {"project_id": PROJECT, "body": "<p>Hi</p>", "conversation_type": "public"})
     assert text == (
         "Gorelo did not confirm create_project_comment (the connection failed). The change may or may not have been "
@@ -2904,7 +2904,7 @@ async def test_delete_project_comment_a_timeout_is_unconfirmed_and_not_retried(d
 @pytest.mark.parametrize("task", [False, True])
 async def test_delete_project_comment_after_a_connection_failure_says_repeating_is_safe(dserver, mock_gorelo, task):
     path, arguments = delete_target(task)
-    mock_gorelo.on("DELETE", path, httpx.ConnectError("refused"))
+    mock_gorelo.on("DELETE", path, httpx.ReadError("reset"))  # made, then lost
     text = await call_tool_error(dserver, "delete_project_comment", arguments)
     assert_delete_advice(text, "the connection failed")
     assert len(mock_gorelo.requests) == 1
@@ -3382,3 +3382,16 @@ def test_update_project_comment_texts_match_the_spec():
         assert fragment in doc, fragment
     fields = schema_fields("UpdateProjectCommentCommand")
     assert "Max 100" in fields["Attachments"] and "Cannot be cleared: a blank body is a 400" in fields["Body"]
+
+
+# A comment body is HTML: text in angle brackets is read as a tag and lost (the same sentence as create_ticket's description).
+ANGLE_BRACKET_TEXT = "Write a literal < or > as &lt; / &gt;: text in angle brackets is read as a tag and lost."
+
+
+async def test_the_project_comment_bodies_tell_the_model_to_escape_angle_brackets(dserver):
+    tools = {t.name: t for t in await list_tools(dserver)}
+    created = tools["create_project_comment"].inputSchema["properties"]["body"]["description"]
+    updated = tools["update_project_comment"].inputSchema["properties"]["body"]["description"]
+    assert created == "Comment body as HTML. " + ANGLE_BRACKET_TEXT
+    assert updated == "New comment body as HTML, not blank. It replaces the text; it cannot be cleared. " + ANGLE_BRACKET_TEXT
+    assert max(len(created), len(updated)) <= 220

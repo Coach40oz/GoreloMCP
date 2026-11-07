@@ -1,6 +1,6 @@
 # Gated tools: what is blocked and how to turn it on
 
-Some tools can delete data, void an invoice, push an invoice to your accounting system or make a
+Some tools can delete data, void an invoice, push an invoice to your accounting system, change a billing contract or make a
 document readable outside Gorelo. This server ships with those tools switched off. This page lists them, says what each one
 does, and shows how to switch on the ones you want.
 
@@ -16,16 +16,19 @@ A gated tool has to pass three locks before it does anything:
 
 Your Gorelo API key must also have the matching scope (a delete needs the delete scope of that area), or Gorelo answers 403.
 
-## The gated tools (15)
+## The gated tools (18)
 
 | Toolset | Tool | What it does | Can it be undone? |
 |---|---|---|---|
-| `billing` | `approve_invoice` | Approves a Draft or Submitted invoice. Gorelo pushes it to your connected accounting system at once. | No. It can only be voided (`delete_invoice`). |
-| `billing` | `create_approved_invoice` | Creates an invoice that is already Approved, so it is pushed to your accounting system at once; it may email the addresses you give it. | No. It can only be voided. |
-| `billing` | `delete_invoice` | Deletes a Draft invoice, or voids an Approved one (it stays listed as Void). | No. |
+| `billing` | `approve_invoice` | Approves a Draft or Submitted invoice. Gorelo pushes it to your connected accounting system at once, and may email the invoice to the client's contacts. | No. It can only be voided (`delete_invoice`), and a void may not reach the accounting system: check it there. |
+| `billing` | `create_approved_invoice` | Creates an invoice that is already Approved, so it is pushed to your accounting system at once; it emails the addresses you give it, and Gorelo may email the client's contacts too. | No. It can only be voided, and a void may not reach the accounting system: check it there. |
+| `billing` | `delete_invoice` | Deletes a Draft invoice, or voids an Approved one (it stays listed as Void). Gorelo says a void is sent to the accounting system too: check it there. | No. |
+| `billing` | `create_contract` | Creates a billing contract. A Block Hours line raises a Draft invoice at once; `auto_approve_and_send` makes Gorelo approve and email the recurring invoices on its own. | Archive it with `update_contract` when that tool is enabled, else in the Gorelo app; this server cannot delete contracts. |
+| `billing` | `update_contract` | Changes a contract, removes service lines or line items, archives or restores it. A new or converted Block Hours line raises a Draft invoice at once; `auto_approve_and_send=true` makes Gorelo approve and email the recurring invoices on its own and push them to your accounting system. | Partly: archive and restore are reversible, removed lines are not, and an approved invoice that was pushed to the accounting system cannot be taken back. |
 | `billing` | `delete_item` | Deletes a catalog item. | No. |
 | `billing` | `delete_product_charge` | Removes a product charged to a ticket or task. | Charge it again with `create_product_charge`. |
 | `core` | `delete_asset_type` | Deletes a custom asset type (Gorelo's own types cannot be deleted). | No. |
+| `core` | `delete_contact` | Deletes a contact. Gorelo marks it inactive and keeps its ticket history, and it leaves every list at once (Gorelo refuses a contact that is the primary or a secondary contact of a ticket that is not closed). | Not through this server. |
 | `core` | `delete_client_location` | Deactivates a client location (Gorelo refuses the default, billing or only location, and one still in use). | Not through this server. |
 | `core` | `delete_client_domain` | Deactivates a client's web domain, so inbound email from it is no longer matched to the client. | Add it again with `create_client_domain`. |
 | `tickets` | `delete_ticket_comment` | Deletes a private ticket comment (public ones are refused). | It can be recovered in the Gorelo app. |
@@ -38,19 +41,11 @@ Your Gorelo API key must also have the matching scope (a delete needs the delete
 
 [tool-catalog.md](tool-catalog.md) has the full text of every tool.
 
-## Held back
-
-`create_contract` and `update_contract` (create and change a billing contract) are held back since 1.5.1. Gorelo has not
-released contract writes yet: as of 2026-10-31 it answers every contract create with HTTP 500 (code 070501). Until it does,
-those two tools are not registered under any setting, not with `GORELO_ENABLE_DESTRUCTIVE=1` and not when a list names
-them. A list that names them is not an error: the server drops the names and logs one warning line before the ready line,
-`gorelo-mcp held tools ignored: create_contract, update_contract (held back until Gorelo releases them)`, then starts as
-usual. `list_contracts` and `get_contract` are not affected.
-
 ## Never available
 
-Whatever you set, this server never calls these operations: deleting a client, a contact, a ticket, an agent asset (that
-uninstalls the agent), a custom asset or a contract, and creating or revoking API keys. They are blocked in the code, and the
+Whatever you set, this server never calls these operations: deleting a client, a ticket, an agent asset (that
+uninstalls the agent), a custom asset or a contract, and creating or revoking API keys. (Deleting a contact is possible
+since 1.5.2, but only through the gated `delete_contact` above.) They are blocked in the code, and the
 tests check that no tool can reach them.
 
 ## Turn gated tools on
@@ -63,11 +58,12 @@ tests check that no tool can reach them.
 | `1` (or `true`, `yes`, `on`) | Every gated tool of the toolsets you enabled. |
 | A comma list of tool names | Only those tools. |
 
-A list is the safer choice: switch on only what you need. Examples:
+A list is the safer choice: switch on only what you need. A name must belong to a toolset that is on (`delete_project_comment`
+needs `projects` in `GORELO_TOOLSETS`, which the default set leaves out). Examples:
 
 ```bash
-# Let Claude clean up time entries and private comments only
-GORELO_ENABLE_DESTRUCTIVE=delete_time_entry,delete_ticket_comment,delete_project_comment
+# Let Claude clean up time entries and private ticket comments only
+GORELO_ENABLE_DESTRUCTIVE=delete_time_entry,delete_ticket_comment
 
 # Billing: approve and void invoices
 GORELO_ENABLE_DESTRUCTIVE=approve_invoice,delete_invoice
@@ -101,9 +97,19 @@ of the list. Then restart as above.
 ## Before you switch one on
 
 - **Try it on a test client first.** This server cannot undo a delete or a void.
-- **Invoices and your accounting system.** An Approved invoice reaches your accounting system as soon as it is approved.
-  Whether a void in Gorelo also voids the accounting copy has varied between tests, so the tool texts tell Claude to warn you
-  that the copy may stay open. After a void, check your accounting system.
+- **Invoices and your accounting system.** An Approved invoice reaches your accounting system as soon as it is approved, and
+  Gorelo may email it to the client's contacts on its own. Gorelo's description says a void is sent to the accounting
+  system too. A void has reached it in one test, and in another the copy was still open a few minutes later, so the tool
+  texts tell Claude to ask you to check the accounting system. After a void, check your accounting system.
 - **Shared documents.** A public link works for anyone who has it until you unshare the document.
-- **Contracts (held back).** `create_contract` and `update_contract` cannot be switched on in 1.5.1 (see "Held back"
-  above): Gorelo has not released contract writes yet.
+- **Deleting a contact.** `delete_contact` makes the contact leave every list at once (Gorelo marks it inactive and keeps its
+  ticket history), and this server cannot bring it back. Claude is told to name the contact and ask you before
+  it sets `confirm=true`. A 409 means the contact is still the primary or a secondary contact of a ticket that is not closed:
+  reassign it on those tickets or close them, then try again. Gorelo answers the same "deleted" for a contact that is already gone, so the tool reads the contact
+  first and reports what it deleted.
+- **Contracts.** Both tools were tried against Gorelo on 2026-11-03: a contract was created with and without dates, read back and
+  archived with `update_contract`. A contract cannot be deleted through this server, so archive one you no longer want
+  (with `update_contract` when it is enabled, else in the Gorelo app). If you leave out `start_date`, Gorelo sets today in
+  your account's time zone, which can differ from the UTC date by a day in either direction. A line item's `start_date`
+  defaults to that day, or to the contract's start if that is later. `auto_approve_and_send` makes Gorelo approve and
+  email the recurring invoices without asking again.

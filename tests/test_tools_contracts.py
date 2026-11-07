@@ -25,13 +25,9 @@ from fastmcp.exceptions import ToolError
 import tools  # noqa: F401  (importing the package registers every tool)
 from gorelo_client import FORBIDDEN_OPS, is_forbidden_op
 from tools import _common, contracts
-from tools._common import HELD_TOOLS, MAX_ID, REGISTRY
+from tools._common import MAX_ID, REGISTRY
 
 pytestmark = pytest.mark.anyio
-
-# create_contract and update_contract are held back (tools._common.HELD_TOOLS: Gorelo has not released contract writes), so no real
-# server registers them. These tests keep exercising their code through a view of the registry that does not hold them back.
-WITH_HELD = REGISTRY.with_held()
 
 EM_DASH, EN_DASH = chr(0x2014), chr(0x2013)
 DESCRIPTION_MAX, PARAM_DESCRIPTION_MAX = 900, 220  # CONTRIBUTING.md: never more than these
@@ -150,8 +146,8 @@ def rejected(tool, status, code, detail):
 
 @pytest.fixture
 def server(server_factory):
-    """Every billing tool, the two held gated ones included (the gate itself is tested through server_factory)."""
-    return server_factory(registry=WITH_HELD, destructive=True)
+    """Every billing tool, the two gated ones included (the gate itself is tested through server_factory)."""
+    return server_factory(destructive=True)
 
 
 def module_specs():
@@ -228,25 +224,30 @@ def test_the_declared_ops_exist_and_the_query_names_are_the_spec_ones(spec_index
 
 async def test_the_read_tools_need_no_flag_and_the_two_writes_are_gated(server_factory):
     for destructive in (False, True):
-        names = {t.name for t in await list_tools(server_factory(registry=WITH_HELD, toolsets={"billing"}, destructive=destructive))}
+        names = {t.name for t in await list_tools(server_factory(toolsets={"billing"}, destructive=destructive))}
         assert set(EXPECTED_READS) <= names
         assert set(EXPECTED_GATED) <= names if destructive else not names & set(EXPECTED_GATED)
         assert not [name for name in names if name.startswith("delete_contract")]
-    names = {t.name for t in await list_tools(server_factory(registry=WITH_HELD, toolsets={"core", "tickets", "time"}, destructive=True))}
+    names = {t.name for t in await list_tools(server_factory(toolsets={"core", "tickets", "time"}, destructive=True))}
     assert not names & set(EXPECTED_TOOLS)
 
 
-async def test_a_real_server_holds_the_two_writes_back_under_every_setting(server_factory):
-    assert HELD_TOOLS == set(EXPECTED_GATED)
-    for destructive, named in ((False, None), (True, None), (True, frozenset(EXPECTED_GATED)), (True, frozenset({"create_contract"}))):
+async def test_a_real_server_registers_the_two_writes_only_with_the_flag_and_holds_nothing_back(server_factory):
+    assert _common.HELD_TOOLS == frozenset()  # released in 1.5.3: the held set stays empty unless a tool has to be held back again
+    for destructive, named, expected in (
+        (False, None, set()),
+        (True, None, set(EXPECTED_GATED)),
+        (True, frozenset(EXPECTED_GATED), set(EXPECTED_GATED)),
+        (True, frozenset({"create_contract"}), {"create_contract"}),
+    ):
         names = {t.name for t in await list_tools(server_factory(toolsets={"billing"}, destructive=destructive, destructive_tools=named))}
-        assert set(EXPECTED_READS) <= names and not names & set(EXPECTED_GATED), (destructive, named)
+        assert set(EXPECTED_READS) <= names and names & set(EXPECTED_GATED) == expected, (destructive, named)
 
 
 async def test_a_gated_list_can_enable_one_of_the_two_without_the_other(server_factory):
     names = {
         t.name
-        for t in await list_tools(server_factory(registry=WITH_HELD, toolsets={"billing"}, destructive=True, destructive_tools=frozenset({"create_contract"})))
+        for t in await list_tools(server_factory(toolsets={"billing"}, destructive=True, destructive_tools=frozenset({"create_contract"})))
     }
     assert "create_contract" in names and "update_contract" not in names
 
@@ -264,7 +265,7 @@ def schema_descriptions(node, where):
 
 
 async def test_schemas_annotations_and_descriptions(server_factory):
-    listed = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}
+    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
     for name in EXPECTED_TOOLS:
         tool = listed[name]
         for param, entry_schema in tool.inputSchema["properties"].items():
@@ -576,7 +577,7 @@ async def test_list_contracts_accepts_every_sort_the_spec_names(server, mock_gor
 
 
 async def test_the_sort_enums_have_the_member_order_the_other_list_tools_pin(server_factory):
-    listed = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}
+    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
     properties = listed["list_contracts"].inputSchema["properties"]
 
     def enum_of(schema):
@@ -769,11 +770,41 @@ def create_args(**overrides):
     return {"name": "Managed Services", "client_id": 9101, "service_lines": [hourly_line()], "confirm": True, **overrides}
 
 
+def line_shape(terms):
+    """The keys ContractServiceLineDetailModel always carries (GET /v1/contracts/{contractId}), for a line with these labor terms.
+    Gorelo records the work types and roles of an Unlimited Hours line only ("empty for every other LaborTerms today"), so
+    WorkTypes and WorkRoles are [] here, and the one details object that matches the labor terms is filled."""
+    details = {
+        1: ("UnlimitedHoursDetails", {}),
+        2: ("PerHourDetails", {"RateType": {"Id": 1, "Name": "Use default labor rates"}, "HourlyRate": None}),
+        3: ("BlockHoursDetails", {"TemplateId": 0, "Balance": 10.0}),
+        5: ("LimitedHoursDetails", {"AllocatedHours": 5.0, "RateType": {"Id": 1, "Name": "Use default labor rates"}, "HourlyRate": None}),
+    }
+    shape = {
+        "AutoApproveTime": False,
+        "AutoInvoiceTime": False,
+        "IncludedTimeGoesTo": {"Id": 1, "Name": "Complete"} if terms in (1, 3, 5) else None,
+        "UnlimitedHoursDetails": None,
+        "PerHourDetails": None,
+        "BlockHoursDetails": None,
+        "LimitedHoursDetails": None,
+        "WorkTypes": [],
+        "WorkRoles": [],
+        "RecurringAmount": 0.0,
+        "RecurringCost": 0.0,
+        "CreatedOn": "2026-01-01T08:00:00Z",
+        "UpdatedOn": None,
+    }
+    if terms in details:
+        shape[details[terms][0]] = details[terms][1]
+    return shape
+
+
 def made(contract_id=55, name="Managed Services", client_id=9101, lines=(("Support", 2),), **overrides):
     """The contract as the read-back shows it after a create."""
     record = contract_detail(contract_id, Name=name, Client={"Id": client_id, "Name": "Example Co"}, **overrides)
     record["ServiceLines"] = [
-        {"Id": 900 + index, "Name": line, "LaborTerms": {"Id": terms, "Name": LABOR_NAMES[terms]}, "LineItems": []}
+        {"Id": 900 + index, "Name": line, "LaborTerms": {"Id": terms, "Name": LABOR_NAMES[terms]}, "LineItems": [], **line_shape(terms)}
         for index, (line, terms) in enumerate(lines)
     ]
     return record
@@ -785,7 +816,7 @@ def line_record(line_id, name, terms, items=(), **extra):
         "Name": name,
         "LaborTerms": {"Id": terms, "Name": LABOR_NAMES[terms]},
         "LineItems": [{"Id": number, "Name": f"Item {number}", "Quantity": 1.0, "UnitPrice": 10.0, "UnitCost": 4.0} for number in items],
-        **extra,
+        **{**line_shape(terms), **extra},
     }
 
 
@@ -844,6 +875,19 @@ async def test_create_contract_posts_the_command_and_reads_the_contract_back(ser
         "ServiceLines": [{"Name": "Support", "LaborTermsId": 2, "PerHourDetails": {}}],
     }
     assert result == made()
+
+
+async def test_the_start_date_text_names_gorelos_own_day_because_the_tool_sends_no_default(server_factory, server, mock_gorelo):
+    """Gorelo sets StartDate itself when the body has none, and it picks its own local day (live, 2026-11-03: 2026-11-02 while the UTC
+    date was already the 3rd), so the text must not promise the UTC day or the caller's day."""
+    mock_gorelo.on("POST", "/v1/contracts", envelope(made()))
+    mock_gorelo.on("GET", "/v1/contracts/55", envelope(made()))
+    await call_tool(server, "create_contract", create_args())
+    assert "StartDate" not in mock_gorelo.requests[0].json and "EndDate" not in mock_gorelo.requests[0].json
+    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
+    text = listed["create_contract"].inputSchema["properties"]["start_date"]["description"]
+    assert text == "YYYY-MM-DD. Default: today in Gorelo's time zone."
+    assert len(text) <= PARAM_DESCRIPTION_MAX
 
 
 async def test_create_contract_sends_every_field_in_its_gorelo_shape(server, mock_gorelo):
@@ -991,7 +1035,7 @@ async def test_create_contract_sends_every_field_in_its_gorelo_shape(server, moc
 async def test_create_contract_refuses_without_confirm_and_sends_nothing(server, mock_gorelo):
     text = await call_tool_error(server, "create_contract", create_args(confirm=False))
     assert text.startswith("confirm: refusing to create a contract for client 9101 with 1 service line without confirm=true.")
-    assert "contracts cannot be deleted through this server, only archived" in text
+    assert "contracts cannot be deleted through this server; a mistaken one is archived with update_contract when that tool is enabled, else in the Gorelo app." in text
     assert "Nothing has been sent to Gorelo." in text
     assert "Block Hours" not in text and "accounting system" not in text
     assert mock_gorelo.requests == []
@@ -1380,7 +1424,7 @@ async def test_create_contract_compares_names_after_trimming(server, mock_gorelo
 
 
 async def test_create_contract_has_no_status_and_no_delete_option(server_factory):
-    listed = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}
+    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
     properties = set(listed["create_contract"].inputSchema["properties"])
     assert not properties & {"status", "status_id", "contract_id", "clear_fields", "id"}
     assert listed["create_contract"].inputSchema["required"] == ["name", "client_id", "service_lines"]
@@ -1510,7 +1554,7 @@ async def test_status_takes_exactly_active_or_archived(server, mock_gorelo, bad)
 
 
 async def test_the_client_cannot_be_changed_so_there_is_no_client_parameter(server, mock_gorelo, server_factory):
-    listed = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}
+    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
     assert "client_id" not in listed["update_contract"].inputSchema["properties"]
     text = await call_tool_error(server, "update_contract", update_args(client_id=9101, name="x"))
     assert "client_id" in text
@@ -2315,7 +2359,7 @@ def test_the_operation_texts_say_what_the_tool_texts_promise():
 
 
 async def test_the_tool_texts_carry_the_side_effects_in_words(server_factory):
-    listed = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}
+    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
     said = {name: " ".join(listed[name].description.split()) for name in EXPECTED_GATED}
     for name, text in said.items():
         assert "Ask the user first; needs confirm=true." in text, name
@@ -2429,7 +2473,7 @@ async def test_a_call_without_auto_approve_does_not_mention_email(server, mock_g
 
 
 async def test_both_tool_texts_and_the_parameter_text_say_email(server_factory):
-    listed = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}
+    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
     for name in EXPECTED_GATED:
         assert "it emails each to the client and approval pushes them to the accounting system" in " ".join(listed[name].description.split())
         assert "emails it to the client" in listed[name].inputSchema["properties"]["auto_approve_and_send"]["description"]
@@ -2465,7 +2509,7 @@ async def test_the_next_page_repeats_the_same_calendar_dates(server, mock_gorelo
 
 
 async def test_the_parameter_texts_say_yyyy_mm_dd(server_factory):
-    properties = {t.name: t for t in await list_tools(server_factory(registry=WITH_HELD, destructive=True))}["list_contracts"].inputSchema["properties"]
+    properties = {t.name: t for t in await list_tools(server_factory(destructive=True))}["list_contracts"].inputSchema["properties"]
     assert properties["end_date_since"]["description"].startswith("YYYY-MM-DD: ends on or after that day")
     assert properties["end_date_before"]["description"].startswith("YYYY-MM-DD: ends strictly before that day")
 
@@ -2731,13 +2775,77 @@ async def test_a_new_line_item_and_a_new_service_line_must_show_what_was_sent(se
     )
 
 
-async def test_work_types_and_roles_that_were_sent_must_be_read_back(server, mock_gorelo):
-    before = three_lines()
-    line_of(before, 78).update(WorkTypes=[{"Id": 1, "Name": "A"}], WorkRoles=[])
+def with_work_lines(**overrides):
+    """three_lines plus an Unlimited Hours line 80 (the only kind whose read shows work types and roles) and a Limited Hours line 81."""
+    record = three_lines(**overrides)
+    record["ServiceLines"].append(line_record(80, "Everything", 1, WorkTypes=[{"Id": 1, "Name": "A"}], WorkRoles=[]))
+    record["ServiceLines"].append(line_record(81, "Capped", 5))
+    return record
+
+
+async def test_work_types_and_roles_that_were_sent_must_be_read_back_on_an_unlimited_hours_line(server, mock_gorelo):
+    before = with_work_lines()
     after = edited(before, lambda r: None)
     await expect_unconfirmed(
-        server, mock_gorelo, before, after, {"service_lines": [{"id": 78, "work_type_ids": [1, 2], "work_role_ids": [4]}]},
-        "service line 78: WorkTypes expected [1, 2], read [1]", "service line 78: WorkRoles expected [4], read []",
+        server, mock_gorelo, before, after, {"service_lines": [{"id": 80, "work_type_ids": [1, 2], "work_role_ids": [4]}]},
+        "service line 80: WorkTypes expected [1, 2], read [1]", "service line 80: WorkRoles expected [4], read []",
+    )
+
+
+async def test_work_types_and_roles_on_an_unlimited_hours_line_are_confirmed_when_the_read_shows_them(server, mock_gorelo):
+    before = with_work_lines()
+    after = edited(before, lambda r: line_of(r, 80).update(WorkTypes=[{"Id": 2, "Name": "B"}, {"Id": 1, "Name": "A"}], WorkRoles=[{"Id": 4, "Name": "R"}]))
+    serve_update(mock_gorelo, before, after)
+    result = await call_tool(server, "update_contract", update_args(service_lines=[{"id": 80, "work_type_ids": [1, 2], "work_role_ids": [4]}]))
+    assert result == after
+    assert [entry for entry in mock_gorelo.requests[1].json["ServiceLines"] if entry["Id"] == 80] == [
+        {"Id": 80, "WorkTypeIds": [1, 2], "WorkRoleIds": [4]}
+    ]
+
+
+@pytest.mark.parametrize("line_id", [77, 78, 81], ids=["block hours", "hourly", "limited hours"])
+async def test_work_types_and_roles_sent_for_a_line_that_is_not_unlimited_hours_are_not_a_false_unconfirmed(server, mock_gorelo, line_id):
+    """Gorelo's read model records work types and roles for an Unlimited Hours line only ('empty for every other LaborTerms
+    today'), so the read of a Hourly, Block or Limited Hours line shows [] after a PATCH that was applied."""
+    before = with_work_lines()
+    after = edited(before, lambda r: None)
+    assert line_of(after, line_id)["WorkTypes"] == [] and line_of(after, line_id)["WorkRoles"] == []
+    serve_update(mock_gorelo, before, after)
+    result = await call_tool(server, "update_contract", update_args(service_lines=[{"id": line_id, "work_type_ids": [1, 2], "work_role_ids": [4]}]))
+    assert result == after
+    sent = [entry for entry in mock_gorelo.requests[1].json["ServiceLines"] if entry["Id"] == line_id]
+    assert sent == [{"Id": line_id, "WorkTypeIds": [1, 2], "WorkRoleIds": [4]}]
+    assert len(mock_gorelo.calls("PATCH")) == 1
+
+
+@pytest.mark.parametrize("terms, details_key, details", [(2, "per_hour_details", {}), (3, "block_hours_details", {"template_id": 0, "balance": 10, "price": 500}), (5, "limited_hours_details", {"allocated_hours": 5})])
+async def test_converting_a_no_labor_terms_line_with_work_types_to_a_labor_term_that_reads_none_back_is_confirmed(
+    server, mock_gorelo, terms, details_key, details
+):
+    before = with_work_lines()
+    after = edited(before, lambda r: line_of(r, 79).update(**line_record(79, "Nothing", terms)))
+    serve_update(mock_gorelo, before, after)
+    entry = {"id": 79, "labor_terms_id": terms, details_key: details, "work_type_ids": [3], "work_role_ids": [4]}
+    await call_tool(server, "update_contract", update_args(service_lines=[entry]))
+    assert len(mock_gorelo.calls("PATCH")) == 1
+
+
+UNLIMITED_79 = {"id": 79, "labor_terms_id": 1, "unlimited_hours_details": {}, "work_type_ids": [3]}
+
+
+async def test_converting_a_no_labor_terms_line_to_unlimited_hours_confirms_the_work_types_it_sent(server, mock_gorelo):
+    before = with_work_lines()
+    after = edited(before, lambda r: line_of(r, 79).update(**line_record(79, "Nothing", 1, WorkTypes=[{"Id": 3, "Name": "C"}])))
+    serve_update(mock_gorelo, before, after)
+    await call_tool(server, "update_contract", update_args(service_lines=[UNLIMITED_79]))
+    assert len(mock_gorelo.calls("PATCH")) == 1
+
+
+async def test_converting_a_no_labor_terms_line_to_unlimited_hours_reports_work_types_the_read_does_not_show(server, mock_gorelo):
+    before = with_work_lines()
+    after = edited(before, lambda r: line_of(r, 79).update(**line_record(79, "Nothing", 1)))
+    await expect_unconfirmed(
+        server, mock_gorelo, before, after, {"service_lines": [UNLIMITED_79]}, "service line 79: WorkTypes expected [3], read []"
     )
 
 
@@ -2778,16 +2886,171 @@ async def test_the_unconfirmed_text_never_quotes_a_name_or_a_description(server,
 
 
 async def test_a_converted_line_may_take_gorelos_defaults_for_what_the_call_did_not_send(server, mock_gorelo):
-    # No Labor Terms -> Block Hours: where included time goes and the covered work types are filled in by Gorelo
+    # No Labor Terms -> Block Hours: where included time goes is filled in by Gorelo (the work types of a Block Hours line read [])
     before = three_lines()
     line_of(before, 79).update(IncludedTimeGoesTo=None, WorkTypes=[], WorkRoles=[], BlockHoursDetails=None)
     after = edited(
         before,
         lambda r: line_of(r, 79).update(
             LaborTerms={"Id": 3, "Name": "Block Hours"}, IncludedTimeGoesTo={"Id": 1, "Name": "Complete"},
-            WorkTypes=[{"Id": 1, "Name": "A"}, {"Id": 2, "Name": "B"}], BlockHoursDetails={"TemplateId": 0, "Balance": 10.0},
+            BlockHoursDetails={"TemplateId": 0, "Balance": 10.0},
         ),
     )
     serve_update(mock_gorelo, before, after)
     await call_tool(server, "update_contract", update_args(service_lines=[convert_79()]))
     assert len(mock_gorelo.calls("PATCH")) == 1
+
+
+# --------------------------------------------------------------------------
+# 1.6.0: the read-back never raises, repeated ids, and the texts
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "wire, shown",
+    [
+        ({"ContactIds": [5]}, {"Contacts": [{"Id": 5}, {"Name": "no id"}]}),
+        ({"ContactIds": [5]}, {"Contacts": [{"Id": 5}, None]}),
+        ({"ContactIds": [5]}, {"Contacts": [{"Id": None}, {"Id": 5}]}),
+        ({"LocationIds": [1, 2]}, {"LocationIds": [1, None]}),
+        ({"LocationIds": [1, 2]}, {"LocationIds": [1, "2"]}),
+        ({"LocationIds": [1, 2]}, {"LocationIds": [1, True]}),
+    ],
+)
+def test_update_problems_never_raises_on_a_row_without_a_usable_id(wire, shown):
+    problems = contracts._update_problems(shown, wire, None, [])
+    assert problems and all(isinstance(problem, str) for problem in problems)
+
+
+def test_update_problems_confirms_the_same_ids_in_any_order():
+    shown = {"Contacts": [{"Id": 6, "Name": "b"}, {"Id": 5, "Name": "a"}], "LocationIds": [2, 1]}
+    assert contracts._update_problems(shown, {"ContactIds": [5, 6], "LocationIds": [1, 2]}, None, []) == []
+
+
+@pytest.mark.parametrize(
+    "args, shown, fragment",
+    [
+        ({"contact_ids": [5]}, {"Contacts": [{"Id": 5}, {"Name": "no id"}]}, "Contacts are not the ones that were sent"),
+        (
+            {"is_for_all_locations": False, "location_ids": [4]},
+            {"IsForAllLocations": False, "LocationIds": [4, None]},
+            "LocationIds are not the ones that were sent",
+        ),
+    ],
+)
+async def test_a_read_back_row_without_an_id_is_an_unconfirmed_write_not_a_raw_error(server, mock_gorelo, args, shown, fragment):
+    after = three_lines(**shown)
+    mock_gorelo.on("PATCH", "/v1/contracts/9", envelope(after))
+    mock_gorelo.on("GET", "/v1/contracts/9", envelope(after))
+    text = await call_tool_error(server, "update_contract", update_args(**args))
+    assert text.startswith("Gorelo returned an unexpected response for update_contract")
+    assert fragment in text and "the write may have been applied" in text and "get_contract, contract 9" in text
+    assert "TypeError" not in text and len(mock_gorelo.calls("PATCH")) == 1
+
+
+async def test_an_unforeseen_error_while_checking_the_update_read_back_is_an_unconfirmed_write(server, mock_gorelo, monkeypatch):
+    def broken(*args, **kwargs):
+        raise TypeError("boom")
+
+    monkeypatch.setattr(contracts, "_update_problems", broken)
+    after = three_lines(Name="x")
+    mock_gorelo.on("PATCH", "/v1/contracts/9", envelope(after))
+    mock_gorelo.on("GET", "/v1/contracts/9", envelope(after))
+    text = await call_tool_error(server, "update_contract", update_args(name="x"))
+    assert text.startswith("Gorelo returned an unexpected response for update_contract")
+    assert "the read-back could not be checked (TypeError)" in text and "the write may have been applied" in text
+    assert "boom" not in text and len(mock_gorelo.calls("PATCH")) == 1
+
+
+async def test_an_unforeseen_error_while_checking_the_create_read_back_is_an_unconfirmed_write(server, mock_gorelo, monkeypatch):
+    def broken(*args, **kwargs):
+        raise KeyError("boom")
+
+    monkeypatch.setattr(contracts, "_create_problems", broken)
+    mock_gorelo.on("POST", "/v1/contracts", envelope(made()))
+    mock_gorelo.on("GET", "/v1/contracts/55", envelope(made()))
+    text = await call_tool_error(server, "create_contract", create_args())
+    assert text.startswith("Gorelo returned an unexpected response for create_contract")
+    assert "the read-back could not be checked (KeyError)" in text and "get_contract, contract 55" in text
+    assert len(mock_gorelo.calls("POST")) == 1
+
+
+@pytest.mark.parametrize(
+    "tool, args, fragment",
+    [
+        ("update_contract", {"contact_ids": [5, 5]}, "contact_ids[1]: the id appears more than once"),
+        ("update_contract", {"is_for_all_locations": False, "location_ids": [3, 3]}, "location_ids[1]: the id appears more than once"),
+        (
+            "update_contract",
+            {"service_lines": [{"id": 80, "work_type_ids": [1, 1]}]},
+            "service_lines[0].work_type_ids[1]: the id appears more than once",
+        ),
+        (
+            "update_contract",
+            {"service_lines": [{"id": 80, "work_role_ids": [4, 5, 4]}]},
+            "service_lines[0].work_role_ids[2]: the id appears more than once",
+        ),
+        (
+            "update_contract",
+            {"service_lines": [{"name": "New", "labor_terms_id": 1, "unlimited_hours_details": {}, "work_type_ids": [2, 2]}]},
+            "service_lines[0].work_type_ids[1]: the id appears more than once",
+        ),
+        ("create_contract", {"contact_ids": [5, 5]}, "contact_ids[1]: the id appears more than once"),
+        ("create_contract", {"is_for_all_locations": False, "location_ids": [3, 3]}, "location_ids[1]: the id appears more than once"),
+        (
+            "create_contract",
+            {"service_lines": [hourly_line(work_type_ids=[1, 1])]},
+            "service_lines[0].work_type_ids[1]: the id appears more than once",
+        ),
+        (
+            "create_contract",
+            {"service_lines": [hourly_line(work_role_ids=[7, 7])]},
+            "service_lines[0].work_role_ids[1]: the id appears more than once",
+        ),
+    ],
+)
+async def test_repeated_ids_in_the_sets_gorelo_keeps_are_refused_before_any_request(server, mock_gorelo, tool, args, fragment):
+    if tool == "update_contract":
+        mock_gorelo.on("GET", "/v1/contracts/9", envelope(with_work_lines()))
+        text = await call_tool_error(server, tool, update_args(**args))
+        assert not mock_gorelo.calls("PATCH")
+    else:
+        text = await call_tool_error(server, tool, create_args(**args))
+        assert mock_gorelo.requests == []
+    assert fragment in text
+
+
+async def test_ids_that_do_not_repeat_are_still_sent_as_given(server, mock_gorelo):
+    after = three_lines(Contacts=[{"Id": 6, "Name": "b"}, {"Id": 5, "Name": "a"}], IsForAllLocations=False, LocationIds=[2, 1])
+    mock_gorelo.on("PATCH", "/v1/contracts/9", envelope(after))
+    mock_gorelo.on("GET", "/v1/contracts/9", envelope(after))
+    await call_tool(server, "update_contract", update_args(contact_ids=[6, 5], is_for_all_locations=False, location_ids=[2, 1]))
+    assert mock_gorelo.requests[0].json == {"ContactIds": [6, 5], "IsForAllLocations": False, "LocationIds": [2, 1]}
+
+
+async def test_the_line_item_start_date_text_names_gorelos_day_and_the_contract_start(server_factory):
+    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
+    texts = list(schema_descriptions(listed["create_contract"].inputSchema, ()))
+    starts = {text for where, text in texts if "line_items" in where and where.endswith("start_date")}
+    assert starts == {"YYYY-MM-DD. Default: today in Gorelo's time zone, or the contract's start if later."}
+    assert all(len(text) <= PARAM_DESCRIPTION_MAX for text in starts)
+    update_text = listed["update_contract"].inputSchema["properties"]["start_date"]["description"]
+    assert update_text.endswith("Line items keep their own dates.") and len(update_text) <= PARAM_DESCRIPTION_MAX
+    work = [text for where, text in texts if where.endswith("work_type_ids")]
+    assert work and all("only on Unlimited Hours lines" in text and len(text) <= PARAM_DESCRIPTION_MAX for text in work)
+
+
+async def test_a_line_item_id_on_a_new_service_line_of_an_update_is_not_called_a_create(server, mock_gorelo):
+    entry = {"name": "X", "labor_terms_id": 4, "line_items": [{"id": 5, "quantity": 2}]}
+    text = await call_tool_error(server, "update_contract", update_args(service_lines=[entry]))
+    assert "service_lines[0].line_items[0].id: not accepted on a line item of a new service line (leave id out to add the item)" in text
+    assert "when the contract is created" not in text and mock_gorelo.requests == []
+
+
+async def test_the_create_texts_do_not_promise_update_contract_when_it_may_be_disabled(server_factory, server, mock_gorelo):
+    listed = {t.name: t for t in await list_tools(server_factory(destructive=True))}
+    text = " ".join(listed["create_contract"].description.split())
+    assert "update_contract archives it if enabled, else the Gorelo app does" in text
+    refusal = await call_tool_error(server, "create_contract", create_args(confirm=False))
+    assert "archived with update_contract when that tool is enabled, else in the Gorelo app" in refusal
+    assert "only archived with update_contract" not in refusal

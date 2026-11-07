@@ -272,7 +272,9 @@ async def test_integer_ids_are_typed_strictly_without_changing_what_the_schema_s
                                     "get_ticket_approval", "it WAS created, do not create it again",
                                     # live, 2026-10-02: ticket approvals need the approver tag too, not only task approvals
                                     "active contact of the ticket's client AND carry a contact tag marked as an approver",
-                                    "tags are set in the Gorelo UI (the API cannot set them)",
+                                    # contract 6c30770dffc0: update_contact(tag_ids) gives a contact a tag; the approver MARK is set in the Gorelo UI
+                                    "the mark is set in the Gorelo UI, so ask the user which tag",
+                                    "update_contact(tag_ids=<complete list + it>) adds it",
                                     "Gorelo rejects any other contact with a 400"]),
         ("get_ticket_approval", ["approval status lives", "Pending", "Approved", "Denied", "Denied as soon as anyone denies"]),
         # a delete emails nobody (say it), next to the private-only, soft-delete and ask-first rules
@@ -307,8 +309,7 @@ async def test_the_docstrings_state_what_the_documentation_requires(server_facto
         ("delete_ticket_comment", "comment_id", ["PRIVATE", "list_ticket_comments"]),
         ("delete_ticket_comment", "confirm", ["Must be true", "ask the user first"]),
         ("create_ticket_side_conversation", "attach_public_conversation", ["public comments", "check them first"]),
-        ("create_ticket_approval", "contact_ids", ["list_contacts", "Active", "approver tag", "Gorelo UI",
-                                                   "the API cannot set tags"]),
+        ("create_ticket_approval", "contact_ids", ["list_contacts", "Active", "approver tag"]),
         ("create_ticket_approval", "attach_public_conversation", ["public comments"]),
         ("get_ticket_approval", "approval_id", ["create_ticket_approval", "list_ticket_conversations"]),
     ],
@@ -1305,11 +1306,13 @@ async def test_create_approval_shows_gorelos_live_rejection_of_a_contact_without
     assert [r.method for r in mock_gorelo.requests] == ["POST"]  # nothing was created, nothing was re-read
 
 
-def test_the_module_says_the_approver_tag_rule_applies_to_ticket_approvals_and_cannot_be_set_through_the_api():
+def test_the_module_says_the_approver_tag_rule_applies_to_ticket_approvals_and_that_update_contact_can_give_the_tag():
     doc = " ".join(conversations.__doc__.split())
     assert "An approver must be an active contact of the ticket's client that carries a contact tag marked as an approver" in doc
     assert "Gorelo enforces it on ticket approvals as well as on task approvals" in doc
-    assert "The tags are set in the Gorelo UI: the API has no contact tag endpoint" in doc
+    assert "Which tag is an approver tag is marked in the Gorelo UI" in doc
+    assert "update_contact(tag_ids=[the complete list])" in doc
+    assert "has no contact tag endpoint" not in doc and "cannot set" not in doc
 
 
 async def test_create_approval_a_timeout_is_unconfirmed_and_is_not_retried(server, mock_gorelo):
@@ -1508,9 +1511,21 @@ async def test_delete_comment_a_timeout_is_unconfirmed_and_is_not_retried(destru
 
 
 async def test_delete_comment_after_a_connection_failure_says_repeating_is_safe(destructive_server, mock_gorelo):
-    mock_gorelo.on("DELETE", COMMENT_PATH, httpx.ConnectError("refused"))
+    # the connection was made and then lost (a read error), so the delete may have been applied
+    mock_gorelo.on("DELETE", COMMENT_PATH, httpx.ReadError("reset"))
     text = await call_tool_error(destructive_server, "delete_ticket_comment", DELETE_ARGS)
     assert_delete_advice(text, "the connection failed")
+    assert len(mock_gorelo.requests) == 1
+
+
+async def test_delete_comment_when_the_connection_was_never_made_says_nothing_was_sent(destructive_server, mock_gorelo):
+    # httpx.ConnectError: nothing reached Gorelo, so there is nothing to confirm (and no reason to avoid a read)
+    mock_gorelo.on("DELETE", COMMENT_PATH, httpx.ConnectError("refused"))
+    text = await call_tool_error(destructive_server, "delete_ticket_comment", DELETE_ARGS)
+    assert text == (
+        "Gorelo could not be reached for delete_ticket_comment (the connection was never established). "
+        "Nothing was sent, so repeating it is safe."
+    )
     assert len(mock_gorelo.requests) == 1
 
 
@@ -1735,3 +1750,14 @@ async def test_a_list_row_id_feeds_straight_into_the_comment_filter(server, mock
         {"ticket_id": TICKET, "conversation_types": ["side_conversation"], "conversation_id": side["Id"]},
     )
     assert mock_gorelo.last.query["ConversationId"] == "4821" and mock_gorelo.last.query["ConversationType"] == "3"
+
+
+# A comment body is HTML: text in angle brackets is read as a tag and lost (the same sentence as create_ticket's description).
+ANGLE_BRACKET_TEXT = "Write a literal < or > as &lt; / &gt;: text in angle brackets is read as a tag and lost."
+
+
+async def test_the_ticket_comment_body_tells_the_model_to_escape_angle_brackets(destructive_server):
+    tools = {t.name: t for t in await list_tools(destructive_server)}
+    body = tools["create_ticket_comment"].inputSchema["properties"]["body"]["description"]
+    assert body == "Comment body as HTML, not empty. " + ANGLE_BRACKET_TEXT
+    assert len(body) <= 220

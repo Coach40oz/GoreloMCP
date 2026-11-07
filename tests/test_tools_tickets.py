@@ -71,6 +71,40 @@ def server(server_factory):
     return server_factory()
 
 
+def sla_block(**over):
+    """A SlaModel as the list and detail endpoints return it since contract b0850edb962d: no policy resolved, nothing due."""
+    sla = {
+        "PolicyId": None,
+        "FirstResponse": {
+            "Status": {"Id": 1, "Name": "NotApplicable"},
+            "TargetBusinessMinutes": None,
+            "DueOn": None,
+            "AtRiskOn": None,
+            "RespondedOn": None,
+            "ElapsedBusinessMinutes": None,
+        },
+        "Resolution": {"Id": 1, "Name": "NotApplicable"},
+    }
+    sla.update(over)
+    return sla
+
+
+def sla_with_policy(n):
+    """A ticket with a resolved policy, a first response that was breached and a resolution still pending."""
+    return sla_block(
+        PolicyId=uid(n),
+        FirstResponse={
+            "Status": {"Id": 4, "Name": "Breached"},
+            "TargetBusinessMinutes": 60,
+            "DueOn": "2026-10-01T13:00:00Z",
+            "AtRiskOn": "2026-10-01T12:45:00Z",
+            "RespondedOn": "2026-10-01T14:10:00Z",
+            "ElapsedBusinessMinutes": 130.0,
+        },
+        Resolution={"Id": 2, "Name": "Pending"},
+    )
+
+
 def ticket_row(n, **over):
     """A TicketListItemModel as the list endpoint returns it (PascalCase, nulls present)."""
     row = {
@@ -100,7 +134,7 @@ def ticket_row(n, **over):
         "IsMerged": False,
         "MergedIntoTicketId": None,
         "MergedTicketIds": [],
-        "Sla": {"FirstResponse": {"ElapsedBusinessMinutes": None}},
+        "Sla": sla_block(),
         "LastUpdate": {"On": "2026-10-01T12:00:00Z", "Summary": "", "UpdateType": ""},
         "CreatedOn": "2026-10-01T12:00:00Z",
         "UpdatedOn": "2026-10-01T12:00:00Z",
@@ -213,6 +247,7 @@ EXPECTED_TOOLS = {
     "list_ticket_tags": ("read", ["GET /v1/tickets/tags"]),
     "list_ticket_priorities": ("read", ["GET /v1/tickets/priorities"]),
     "list_ticket_sources": ("read", ["GET /v1/tickets/sources"]),
+    "list_sla_policies": ("read", ["GET /v1/tickets/sla/policies"]),
 }
 
 EXPECTED_PARAMS = {
@@ -243,6 +278,7 @@ EXPECTED_PARAMS = {
     "list_ticket_tags": [],
     "list_ticket_priorities": [],
     "list_ticket_sources": [],
+    "list_sla_policies": [],
 }
 
 
@@ -409,6 +445,25 @@ def test_the_docstrings_carry_what_the_documentation_requires():
         "A technician cannot be lead (or assisting) and watcher at once.",
     ):
         assert fragment in doc["update_ticket"], fragment
+    # contract b0850edb962d: the Sla fields of a ticket, and the lookup that turns Sla.PolicyId into a name
+    for name in ("list_tickets", "get_ticket"):
+        for fragment in (
+            "Sla: PolicyId (list_sla_policies)",
+            "FirstResponse {Status, DueOn, AtRiskOn, RespondedOn, TargetBusinessMinutes}",
+            "Resolution",
+            "1 NotApplicable, 2 Pending, 3 Met, 4 Breached",
+        ):
+            assert fragment in doc[name], (name, fragment)
+    for fragment in (
+        "List the SLA policies (Id, Name, Order, Targets). Returns {items, count}.",
+        "turn a ticket's Sla.PolicyId (from get_ticket or list_tickets) into a policy name and its targets",
+        "Order is the position in the automatic matching, lower first",
+        "PriorityId (the ticket priority scale: 0 None, 1 Urgent, 2 High, 3 Normal, 4 Low)",
+        "TargetBusinessMinutes (null: no target, that priority gets no SLA tracking)",
+        "Is24x7",
+        "Policies are managed in the Gorelo app; this server cannot change them.",
+    ):
+        assert fragment in doc["list_sla_policies"], fragment
     assert "0 None, 1 Urgent, 2 High, 3 Normal, 4 Low" in doc["list_ticket_priorities"]
     assert "the same for every account" in doc["list_ticket_priorities"]
     assert "The same ids work for create, update, filters and reads" in doc["list_ticket_priorities"]
@@ -484,6 +539,9 @@ async def test_the_parameter_descriptions_carry_the_warnings_and_the_scales(serv
         assert "Complete new" in describe["update_ticket"][name] and "replaces" in describe["update_ticket"][name], name
     assert "except group_ids" in describe["update_ticket"]["clear_fields"]
     assert "0 None, 1 Urgent, 2 High, 3 Normal, 4 Low" in describe["create_ticket"]["priority_id"]
+    # the ticket body is HTML: text in angle brackets is read as a tag and lost, so the model is told to escape it
+    body = describe["create_ticket"]["description"]
+    assert body == "Ticket body as HTML. Write a literal < or > as &lt; / &gt;: text in angle brackets is read as a tag and lost."
     # the filters carry the same priority scale (it had shrunk to "0-4"): a wrong id filters the wrong tickets
     scale = "0 None, 1 Urgent, 2 High, 3 Normal, 4 Low"
     assert scale in describe["update_ticket"]["priority_id"]
@@ -608,6 +666,103 @@ def test_the_two_new_lookups_say_what_the_tool_texts_say():
     assert schema["enum"] == [1, 2, 3, 4, 5, 6]  # the write enum has no 7
     sort_text = " ".join(next(p for p in operation("get", "/v1/tickets")["parameters"] if p["name"] == "SourceIds")["description"].split())
     assert "1 Web, 2 Email, 3 Phone, 4 Chat, 5 Alert, 6 API, 7 Messenger" in sort_text and "up to 100" in sort_text
+
+
+# --------------------------------------------------------------------------
+# list_sla_policies: the unpaged policy list of contract b0850edb962d (2026-11-05)
+# --------------------------------------------------------------------------
+
+SLA_POLICIES_PATH = "/v1/tickets/sla/policies"
+
+
+def sla_policy_row(n, name, order, targets):
+    """A SlaPolicyListItemModel: Id, Name, Order and one SlaPolicyTargetModel per priority."""
+    return {"Id": uid(n), "Name": name, "Order": order, "Targets": targets}
+
+
+SLA_POLICIES = [
+    sla_policy_row(
+        50, "Business hours", 1,
+        [
+            {"PriorityId": 1, "TargetBusinessMinutes": 60, "Is24x7": True},
+            {"PriorityId": 2, "TargetBusinessMinutes": 240, "Is24x7": False},
+            {"PriorityId": 3, "TargetBusinessMinutes": 480, "Is24x7": False},
+            {"PriorityId": 4, "TargetBusinessMinutes": None, "Is24x7": False},
+        ],
+    ),
+    sla_policy_row(51, "No targets yet", 2, []),
+    sla_policy_row(52, "Premium", 3, [{"PriorityId": 0, "TargetBusinessMinutes": 30, "Is24x7": True}]),
+]
+
+
+async def test_list_sla_policies_is_one_get_with_no_query_and_returns_the_unpaged_list_unchanged(server, mock_gorelo):
+    mock_gorelo.on("GET", SLA_POLICIES_PATH, envelope(SLA_POLICIES))
+    result = await call_tool(server, "list_sla_policies")
+    assert result == {"items": SLA_POLICIES, "count": 3}
+    request = mock_gorelo.last
+    assert (request.method, request.path, request.query, request.json) == ("GET", SLA_POLICIES_PATH, {}, None)
+    assert len(mock_gorelo.requests) == 1  # never PageSize or Cursor on an unpaged op
+    # PascalCase passes through; a null target (no SLA for that priority) stays null and an empty Targets list stays empty
+    assert result["items"][0]["Targets"][3] == {"PriorityId": 4, "TargetBusinessMinutes": None, "Is24x7": False}
+    assert result["items"][1]["Targets"] == [] and "total_count" not in result and "has_more" not in result
+
+
+async def test_list_sla_policies_reports_an_empty_list_as_count_zero(server, mock_gorelo):
+    mock_gorelo.on("GET", SLA_POLICIES_PATH, envelope([]))
+    assert await call_tool(server, "list_sla_policies") == {"items": [], "count": 0}
+
+
+async def test_list_sla_policies_refuses_a_data_that_is_not_a_list(server, mock_gorelo):
+    mock_gorelo.on("GET", SLA_POLICIES_PATH, envelope({"Id": uid(50)}))
+    text = await call_tool_error(server, "list_sla_policies")
+    assert text.startswith("Gorelo returned an unexpected response for list_sla_policies:") and "expected Data to be a list" in text
+
+
+async def test_list_sla_policies_names_itself_in_a_gorelo_error(server, mock_gorelo):
+    mock_gorelo.on("GET", SLA_POLICIES_PATH, error_envelope(403, [("080203", "API key does not have 'Tickets' scope")], trace_id="00-t-1"))
+    text = await call_tool_error(server, "list_sla_policies")
+    assert text.startswith("Gorelo rejected list_sla_policies (HTTP 403, code 080203): the API key does not have the 'Tickets' scope")
+    assert text.endswith("[trace 00-t-1]")
+
+
+async def test_list_sla_policies_takes_no_parameters_and_refuses_one_before_any_http_call(server, mock_gorelo):
+    listed = {tool.name: tool for tool in await list_tools(server)}
+    assert listed["list_sla_policies"].inputSchema.get("properties", {}) == {}
+    await call_tool_error(server, "list_sla_policies", {"cursor": "abc"})
+    assert mock_gorelo.requests == []
+
+
+async def test_list_sla_policies_is_a_default_toolset_read_only_tool(server_factory):
+    default = {tool.name for tool in await list_tools(server_factory(toolsets={"tickets"}, destructive=False))}
+    assert "list_sla_policies" in default
+    tool = {t.name: t for t in await list_tools(server_factory(toolsets={"tickets"}))}["list_sla_policies"]
+    assert tool.annotations.readOnlyHint is True and tool.annotations.destructiveHint is False
+
+
+@needs_spec_text
+def test_the_sla_texts_say_what_the_spec_says():
+    spec = json.loads(LATEST_SPEC.read_text(encoding="utf-8"))
+    schemas = spec["components"]["schemas"]
+    summary = " ".join(operation("get", SLA_POLICIES_PATH)["summary"].split())
+    assert "for resolving a ticket's `sla.policyId` into a name and its per-priority targets. Read only." in summary
+    assert "parameters" not in operation("get", SLA_POLICIES_PATH)  # unpaged, no query: one plain GET
+    assert operation("get", SLA_POLICIES_PATH)["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/SlaPolicyListItemModelListBaseResponse"
+    }
+    # the fields the tool text names are the fields of the schemas
+    assert set(schemas["SlaPolicyListItemModel"]["properties"]) == {"Id", "Name", "Order", "Targets"}
+    assert set(schemas["SlaPolicyTargetModel"]["properties"]) == {"PriorityId", "TargetBusinessMinutes", "Is24x7"}
+    assert schemas["SlaPolicyTargetModel"]["properties"]["TargetBusinessMinutes"]["nullable"] is True
+    assert "same scale as a ticket's Priority.Id" in " ".join(schemas["SlaPolicyTargetModel"]["properties"]["PriorityId"]["description"].split())
+    assert "Lower evaluates first" in schemas["SlaPolicyListItemModel"]["properties"]["Order"]["description"]
+    assert "managed in the app" in " ".join(schemas["SlaPolicyListItemModel"]["description"].split())
+    # the Sla fields the ticket texts name
+    assert set(schemas["SlaModel"]["properties"]) == {"PolicyId", "FirstResponse", "Resolution"}
+    assert {"Status", "DueOn", "AtRiskOn", "RespondedOn", "TargetBusinessMinutes"} <= set(schemas["SlaFirstResponseModel"]["properties"])
+    assert set(schemas["SlaStatusModel"]["properties"]) == {"Id", "Name"}
+    assert "1 NotApplicable / 2 Pending / 3 Met / 4 Breached" in " ".join(schemas["SlaStatusModel"]["description"].split())
+    for model in ("TicketListItemModel", "TicketDetailModel"):
+        assert schemas[model]["properties"]["Sla"] == {"$ref": "#/components/schemas/SlaModel"}
 
 
 # --------------------------------------------------------------------------
@@ -839,6 +994,25 @@ async def test_list_tickets_returns_gorelo_records_unchanged(server, mock_gorelo
     item = (await call_tool(server, "list_tickets"))["items"][0]
     assert item == row and item["ContactId"] is None and item["Sla"]["FirstResponse"]["ElapsedBusinessMinutes"] == 12.5
     assert "Description" not in item and "BillingOverride" not in item
+
+
+async def test_list_tickets_passes_the_sla_fields_of_contract_b0850edb962d_through_unchanged(server, mock_gorelo):
+    resolved, plain = sla_with_policy(40), sla_block()
+    rows = [ticket_row(1, Sla=resolved), ticket_row(2, Sla=plain)]
+    mock_gorelo.on("GET", LIST, paged_envelope(rows))
+    items = (await call_tool(server, "list_tickets"))["items"]
+    assert items == rows
+    first = items[0]["Sla"]
+    assert first["PolicyId"] == uid(40)
+    assert first["FirstResponse"]["Status"] == {"Id": 4, "Name": "Breached"}
+    assert (first["FirstResponse"]["DueOn"], first["FirstResponse"]["AtRiskOn"], first["FirstResponse"]["RespondedOn"]) == (
+        "2026-10-01T13:00:00Z", "2026-10-01T12:45:00Z", "2026-10-01T14:10:00Z",
+    )
+    assert first["FirstResponse"]["TargetBusinessMinutes"] == 60 and first["Resolution"] == {"Id": 2, "Name": "Pending"}
+    # null stays null: no policy, no target and no dates are reported as they are, never as a default
+    second = items[1]["Sla"]
+    assert second["PolicyId"] is None and second["FirstResponse"]["TargetBusinessMinutes"] is None
+    assert second["FirstResponse"]["DueOn"] is None and second["FirstResponse"]["Status"]["Name"] == "NotApplicable"
 
 
 LIST_VALIDATION = [
@@ -1553,6 +1727,17 @@ async def test_get_ticket_with_a_guid_is_one_detail_get_and_returns_the_record_u
     result = await call_tool(server, "get_ticket", {"ticket_id": T1})
     assert result == detail
     assert result["Description"] and result["BillingOverride"]["ServiceLine"] == {"Id": 11, "Name": "Support"}
+    assert [(r.method, r.path, r.query) for r in mock_gorelo.requests] == [("GET", f"{LIST}/{T1}", {})]
+
+
+async def test_get_ticket_passes_the_sla_fields_of_contract_b0850edb962d_through_unchanged(server, mock_gorelo):
+    detail = ticket_detail(1, Sla=sla_with_policy(41))
+    mock_gorelo.on("GET", f"{LIST}/{T1}", envelope(detail))
+    result = await call_tool(server, "get_ticket", {"ticket_id": T1})
+    assert result == detail
+    assert result["Sla"]["PolicyId"] == uid(41)
+    assert result["Sla"]["FirstResponse"]["Status"]["Id"] == 4 and result["Sla"]["FirstResponse"]["AtRiskOn"] == "2026-10-01T12:45:00Z"
+    assert result["Sla"]["Resolution"]["Name"] == "Pending"
     assert [(r.method, r.path, r.query) for r in mock_gorelo.requests] == [("GET", f"{LIST}/{T1}", {})]
 
 
@@ -3266,7 +3451,7 @@ def test_the_helpers_still_refuse_what_strict_typing_already_stops_before_the_to
     assert tickets._ticket_reference(" TCK-1234 ") == "TCK-1234" and tickets._ticket_reference(1234) == "1234"
 
 
-DESCRIPTION_LIMITS = {"update_ticket": 900}  # every other tool: 700 characters
+DESCRIPTION_LIMITS = {"update_ticket": 900, "list_tickets": 850}  # every other tool: 700 characters (list_tickets: the Sla fields of contract b0850edb962d)
 PARAM_LIMIT = 160
 # The size measure (json.dumps of each tool as a client lists it, summed). The advertised
 # schemas are compacted centrally (server.compact_input_schema: no null branches, no "default": null), so what the

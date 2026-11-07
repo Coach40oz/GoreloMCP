@@ -12,6 +12,7 @@ Nothing touches the network or the app's .env.
 from __future__ import annotations
 
 import itertools
+from types import SimpleNamespace
 from datetime import datetime, timezone
 
 import pytest
@@ -25,7 +26,6 @@ from test_live_write_matrix import (  # noqa: F401  (fixtures and helpers of the
     SOURCE_NAMES,
     TEST_CLIENT,
     FakeGorelo,
-    _contract_writes_released,
     _never_read_the_real_env,
     area_ops,
     invoice_guid,
@@ -699,7 +699,7 @@ def test_the_docstring_names_every_area_and_flag_of_1_5_0():
     for area in write_matrix.OPT_INS:
         assert area.flag in text and f"{area.key} ({area.flag}):" in write_matrix.__doc__, area.key
     assert "[--with-approved-invoice [--approve-via-update]]" in text and "--approve-via-update" in text
-    assert "A contract CANNOT be deleted through the API" in text and "the TAX PROBE" in text
+    assert "This harness and server never delete a contract" in text and "the TAX PROBE" in text
     assert "Id only" in text.replace("an Id only", "Id only")
 
 
@@ -718,14 +718,14 @@ async def test_each_area_is_skipped_without_its_flag_even_when_selected_and_send
 
 
 @pytest.mark.parametrize("flag", [True, False])
-async def test_the_contracts_area_is_skipped_with_a_reason_while_its_tools_are_held_back_and_nothing_is_sent(run, monkeypatch, flag):
+async def test_the_contracts_area_is_skipped_with_a_reason_while_its_tools_are_in_the_held_set_and_nothing_is_sent(run, monkeypatch, flag):
     monkeypatch.setattr(_common, "HELD_TOOLS", frozenset({"create_contract", "update_contract"}))
     fake = Fake150()
     report = await run(fake, areas=["contracts"], with_contracts=flag)  # not a setup error: the held tools are left out of what the run needs
     found = results(report)["contracts"]
     assert found.status == "skipped" and found.requests == 0 and report.ok and fake.mock.requests == [] and fake.contracts == {}
     assert found.detail == write_matrix.OPT_IN_BY_KEY["contracts"].held_reason
-    assert found.detail.startswith("create_contract and update_contract held back until Gorelo releases contract writes: ")
+    assert found.detail.startswith("create_contract and update_contract held back: the server does not register them")
     assert write_matrix.OPT_IN_BY_KEY["contracts"].held_tools == ["create_contract", "update_contract"]
     assert not write_matrix.tools_for(False, opt_in=["contracts"]) & {"create_contract", "update_contract"}
     assert {"list_items", "get_contract"} <= write_matrix.tools_for(False, opt_in=["contracts"])
@@ -899,6 +899,45 @@ async def test_alert_status_never_touches_another_clients_alert_even_when_it_is_
     report = await run_area(run, fake, "alert_status")
     assert report.ok and other["Status"]["Id"] == ALERT_NEW and other["DismissedOn"] is None
     assert all(alert_guid(9) not in (r.json or {}).get("AlertIds", []) for r in fake.mock.requests)
+
+
+async def test_alert_status_fails_and_stays_open_when_the_restore_moves_back_fewer_alerts_than_the_dismissal(run):
+    fake = Fake150(alerts=[alert(alert_guid(1)), alert(alert_guid(2))])
+    original = fake.handlers["PATCH /v1/alerts"]
+
+    def restores_only_the_named_alert(request):
+        if request.json["StatusId"] == ALERT_NEW:  # Gorelo's restore does not follow its stack rule
+            ident = request.json["AlertIds"][0]
+            fake.alerts[ident]["Status"] = {"Id": ALERT_NEW, "Name": "New"}
+            fake.alerts[ident]["DismissedOn"] = None
+            return envelope({"UpdatedIds": [ident]})
+        return original(request)
+
+    fake.handlers["PATCH /v1/alerts"] = restores_only_the_named_alert
+    report = await run_area(run, fake, "alert_status")
+    found = results(report)["alert_status"]
+    assert found.status == "FAIL" and not report.ok
+    assert "1 alert(s) of the stack still read Dismissed" in found.detail and alert_guid(2) in found.detail and "LEFT DISMISSED FOR THE USER" in found.detail
+    record = record_of(report, "alert")
+    assert not record.cleaned  # neither the area nor the cleanup marked it cleaned
+    assert fake.alerts[alert_guid(1)]["Status"]["Id"] == ALERT_NEW and fake.alerts[alert_guid(2)]["Status"]["Id"] == ALERT_DISMISSED
+    assert not report.cleanup.ok and alert_guid(2) in record.outcome and "restore them to New in the Gorelo app" in record.outcome
+    assert [r.json["StatusId"] for r in fake.mock.requests if r.method == "PATCH"] == [ALERT_DISMISSED, ALERT_NEW]  # the cleanup sent nothing more
+
+
+async def test_alert_status_a_stack_member_the_restore_did_not_name_but_that_reads_new_is_not_a_failure(run):
+    fake = Fake150(alerts=[alert(alert_guid(1)), alert(alert_guid(2))])
+    original = fake.handlers["PATCH /v1/alerts"]
+
+    def names_only_one_but_moves_both(request):
+        answer = original(request)
+        if request.json["StatusId"] == ALERT_NEW:
+            return envelope({"UpdatedIds": [request.json["AlertIds"][0]]})
+        return answer
+
+    fake.handlers["PATCH /v1/alerts"] = names_only_one_but_moves_both
+    report = await run_area(run, fake, "alert_status")
+    assert report.ok and record_of(report, "alert").cleaned
 
 
 async def test_alert_status_a_failure_after_the_dismissal_is_restored_by_the_cleanup(run, lines):
@@ -1317,9 +1356,9 @@ async def test_contracts_an_hourly_contract_is_created_changed_and_archived_and_
     assert record.outcome == cleanup.contract_residue("archived by the write matrix (update_contract)")
     assert report.summary["undeletable"] == 1 and report.summary["leftovers"] == 0 and report.ok
     assert report.contracts == ["4500"]
-    assert "known undeletable: contract 4500: archived by the write matrix (update_contract), stays in Gorelo until removed in the Gorelo app (a contract cannot be deleted through the API)" in lines
+    assert "known undeletable: contract 4500: archived by the write matrix (update_contract), stays in Gorelo until removed in the Gorelo app (this harness and server never delete a contract: DELETE /v1/contracts/{contractId} is forbidden)" in lines
     reminder = next(line for line in lines if line.startswith("reminder: 1 contract(s) of this run stay in Gorelo"))
-    assert "(a contract cannot be deleted through the API)" in reminder and RUN in reminder
+    assert "(this harness and server never delete a contract: DELETE /v1/contracts/{contractId} is forbidden)" in reminder and RUN in reminder
     assert "result: nothing left over" not in lines and lines[-1] == "result: PASSED"
     notes = " ".join(results(report)["contracts"].notes)
     assert "sent with an Id only read back with the same" in notes and "contract 4500 archived" in notes
@@ -1677,3 +1716,16 @@ async def test_alert_status_the_cleanup_restores_nothing_for_an_alert_dismissed_
     assert calls == [2, 1]  # dismiss, the area's restore (failed): the cleanup sent no restore
     record = record_of(report, "alert")
     assert not record.cleaned and "not inside this run's window" in record.outcome and report.summary["leftovers"] == 1
+
+
+def test_the_contract_residue_text_says_this_harness_forbids_the_delete_not_that_the_api_lacks_it():
+    tail = cleanup.CONTRACT_RESIDUE_TAIL
+    assert "DELETE /v1/contracts/{contractId} is forbidden" in tail and "never delete a contract" in tail
+    assert "cannot be deleted through the API" not in tail
+    for kind_outcome in (cleanup.contract_residue("archived by the write matrix (update_contract)"),
+                         "archived, stays in Gorelo " + cleanup.LEGACY_CONTRACT_RESIDUE_TAIL):
+        record = SimpleNamespace(kind="contract", outcome=kind_outcome)
+        assert cleanup.is_known_undeletable(record)
+    assert not cleanup.is_known_undeletable(SimpleNamespace(kind="contract", outcome="update_contract failed"))
+    text = " ".join(cleanup.__doc__.split())
+    assert "delete_contact exists since 1.5.2" in text and "deliberately have no tool: tickets, contacts" not in text

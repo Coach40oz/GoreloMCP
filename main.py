@@ -18,15 +18,14 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from oauth_guard import GateError
+from oauth_guard import GateError, harden_framework
 from oauth_store import StateFileError
 from personal_auth import PersonalAuthProvider
 from server import build_server, install_log_value_filter, resolve_gated_tools, warn_held_tools
 from settings import Settings, SettingsError
 
-# The directory this file lives in. In production that is /opt/gorelo-mcp/app, which is also the
-# systemd WorkingDirectory, so the OAuth state stays in the same ./.oauth-state it always used
-# (PersonalAuthProvider's default was the relative path ".oauth-state").
+# The directory this file lives in: /opt/gorelo-mcp/app in production, also the systemd WorkingDirectory, so the OAuth
+# state stays in the same ./.oauth-state it always used (PersonalAuthProvider's default was the relative path ".oauth-state").
 APP_DIR = Path(__file__).resolve().parent
 HOST = "127.0.0.1"
 PORT = 8765
@@ -52,6 +51,7 @@ def main() -> None:
     logger.info("gorelo-mcp gated tools: %s", ",".join(gated) or "none")  # names only; the ready line below keeps its shape
     warn_held_tools(settings)  # a held tool named in GORELO_ENABLE_DESTRUCTIVE is dropped with one warning, not an error
     try:
+        harden_framework()  # no update check against pypi.org, idle MCP sessions freed (see oauth_guard); before the lock is taken
         auth = PersonalAuthProvider(
             base_url=settings.public_base_url,
             password=settings.mcp_auth_password,

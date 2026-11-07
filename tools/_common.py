@@ -166,9 +166,11 @@ class ToolSpec:
     destructive_hint: bool = False
 
 
-# Tools that are declared but never registered on a server, whatever GORELO_ENABLE_DESTRUCTIVE says: held back until
-# Gorelo releases contract writes (every POST /v1/contracts answers HTTP 500, code 070501). Emptying the set brings them back.
-HELD_TOOLS: frozenset[str] = frozenset({"create_contract", "update_contract"})
+# Tools that are declared but never registered on a server, whatever GORELO_ENABLE_DESTRUCTIVE says. The set is empty: it held
+# create_contract and update_contract back from 1.5.1 until contract writes worked again (checked live on 2026-11-03; 1.5.3). The mechanism stays (with_held,
+# is_held, Registry.select, server.warn_held_tools, server.resolve_gated_tools) in case a tool has to be held back again: put its name
+# in the set and every setting stops registering it.
+HELD_TOOLS: frozenset[str] = frozenset()
 
 
 class Registry:
@@ -1260,7 +1262,9 @@ def format_gorelo_error(
     no exact mapping is shown against the nearest mapped ancestor with 1-based item numbers:
     "attachments (item 1, Url): message". Scope, rate limit, unconfirmed write and forbidden
     operations have their own wording. An unconfirmed SIDE_EFFECT_GETS call (the invoice PDF export)
-    says the export may already be recorded and that a retry records another export event.
+    says the export may already be recorded and that a retry records another export event. A write (or the export) whose
+    connection was never established (a "transport" error that is not write_unconfirmed) says that nothing was sent and
+    that repeating it is safe. A Notification whose PropertyName or Message is not text never crashes the formatter.
     """
     field_map = field_map or {}
     kind = err.kind
@@ -1282,6 +1286,11 @@ def format_gorelo_error(
             return (
                 f"Gorelo did not confirm {tool_name} ({what}). The change may or may not have been "
                 f"applied. {_UNCONFIRMED}"
+            )
+        if kind == "transport" and (is_side_effect_get(err.op_key) or not (err.op_key or "").startswith("GET ")):
+            return (
+                f"Gorelo could not be reached for {tool_name} (the connection was never established). "
+                "Nothing was sent, so repeating it is safe."
             )
         return f"Gorelo did not answer {tool_name} ({what}). This was a read, so retrying is safe."
     if kind == "rate_limit":
@@ -1331,6 +1340,10 @@ def _notification_detail(err: GoreloAPIError, field_map: Mapping[str, str]) -> s
     for note in err.notifications:
         message = note.get("message") or note.get("code") or "no message"
         prop = note.get("property")
+        if isinstance(prop, (bool, int, float)):
+            prop = str(prop)
+        elif not isinstance(prop, str):
+            prop = None  # a PropertyName that is not text (a list, an object) cannot be mapped; the message still shows
         label = _param_for_property(prop, field_map) or _indexed_label(prop, field_map) or prop
         parts.append(f"{label}: {message}" if label else str(message))
     return "; ".join(parts) if parts else "no details returned"

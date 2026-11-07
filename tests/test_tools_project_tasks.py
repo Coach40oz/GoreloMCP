@@ -1896,7 +1896,9 @@ def test_create_task_approval_docstring_states_who_may_approve_and_what_it_trigg
     doc = " ".join(specs()["create_task_approval"].fn.__doc__.split())
     for fragment in (
         "active contact of the task's client AND carry an approver contact tag",
-        "tags are set in the Gorelo UI (the API cannot set them)", "rejected before anything is written",
+        "the mark is set in the Gorelo UI, so ask the user which tag",
+        "update_contact(tag_ids=<complete list + it>) adds it",
+        "rejected before anything is written",
         "waiting-on-contact state",
         # The task operation never says whether creating the approval notifies anyone, so the text says that
         # Gorelo does not say, has the model tell the user first, and points to the approval comment
@@ -2265,3 +2267,14 @@ def test_update_task_comment_texts_match_the_spec():
         assert fragment in doc, fragment
     fields = schema_fields("UpdateTaskCommentCommand")
     assert "Max 100" in fields["Attachments"] and "Cannot be cleared: a blank body is a 400" in fields["Body"]
+
+
+# A comment body is HTML: text in angle brackets is read as a tag and lost (the same sentence as create_ticket's description).
+ANGLE_BRACKET_TEXT = "Write a literal < or > as &lt; / &gt;: text in angle brackets is read as a tag and lost."
+
+
+async def test_the_task_comment_body_tells_the_model_to_escape_angle_brackets(dserver):
+    tools = {t.name: t for t in await list_tools(dserver)}
+    body = tools["update_task_comment"].inputSchema["properties"]["body"]["description"]
+    assert body == "New comment body as HTML, not blank. It replaces the text; it cannot be cleared. " + ANGLE_BRACKET_TEXT
+    assert len(body) <= 220

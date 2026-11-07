@@ -55,7 +55,7 @@ CORE_TOOLS = {
     "list_agent_apps", "get_agent_hardware", "list_agent_patches", "list_agent_available_updates", "list_agent_tags",
     "list_asset_types", "list_scripts", "get_script",  # 1.4.0 (contract 05200951c89e)
     # 1.5.0 (contract 6c30770dffc0): the 19 regular tools these modules gained. The three gated ones (delete_asset_type,
-    # delete_client_location, delete_client_domain) are not in the group: no core tool here is destructive.
+    # delete_client_location, delete_client_domain; 1.5.2 adds delete_contact) are not in the group: no core tool here is destructive.
     "list_org_roles", "get_org_group", "get_org_user",
     "get_alert", "set_alert_status",
     "update_agent", "list_policies", "get_policy", "list_asset_tags", "create_asset_type", "update_asset_type",
@@ -92,7 +92,9 @@ def test_the_docstring_says_what_it_returns_and_that_a_failure_is_data_not_an_er
     doc = flat(meta_module.health_check.__doc__)
     assert "returns {ok, api, api_host, total_clients, toolsets, destructive, gated_tools, spec_sha256}" in doc
     assert "total_clients is the number of clients Gorelo lists by default (Archived clients are not counted)." in doc
-    assert "gated_tools lists the delete, void, approved-invoice and sharing tools switched on ([] means none)" in doc
+    # every gated tool, the contract writes and approve_invoice included, not a list of kinds that goes stale
+    assert "gated_tools names the gated tools switched on ([] means none)" in doc
+    assert "delete, void" not in doc
     assert "Side effects:" not in doc  # read only
     assert "api_host is the Gorelo host this server calls" in doc
     assert "api_host is the Gorelo host this server calls (GORELO_BASE_URL)." in doc
@@ -424,7 +426,7 @@ async def test_a_healthy_api_reports_the_client_count_and_the_server_configurati
         "total_clients": 40,
         "toolsets": ["core", "tickets"],
         "destructive": True,
-        "gated_tools": ["delete_asset_type", "delete_client_domain", "delete_client_location", "delete_ticket_comment"],  # core gained three gated tools in 1.5.0
+        "gated_tools": ["delete_asset_type", "delete_client_domain", "delete_client_location", "delete_contact", "delete_ticket_comment"],  # core gained three gated tools in 1.5.0 and delete_contact in 1.5.2
         "spec_sha256": spec_index.sha256,
     }
 
@@ -440,7 +442,7 @@ async def test_the_registered_gated_tools_are_reported_by_name_whether_all_or_so
     mock_gorelo.on("GET", CLIENTS, paged_envelope([a_client()], total_count=1))
     every = await call_tool(server_factory(toolsets={"core", "tickets", "time", "uptime"}, destructive=True), "health_check")
     assert every["gated_tools"] == [
-        "delete_asset_type", "delete_client_domain", "delete_client_location",
+        "delete_asset_type", "delete_client_domain", "delete_client_location", "delete_contact",
         "delete_ticket_comment", "delete_time_entry", "delete_uptime_check",
     ]
     some = await call_tool(

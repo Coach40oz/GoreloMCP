@@ -37,14 +37,6 @@ def _never_read_the_real_env(monkeypatch, tmp_path):
     monkeypatch.setattr(_env, "ENV_FILE", tmp_path / "no-such-dir" / ".env")
 
 
-@pytest.fixture(autouse=True)
-def _contract_writes_released(monkeypatch):
-    """create_contract and update_contract are held back (tools._common.HELD_TOOLS, since 1.5.1). The cleanup tests below run the
-    archive of a contract as it will work once Gorelo releases contract writes, so the set is emptied; the tests of the held state
-    set it again."""
-    monkeypatch.setattr(_common, "HELD_TOOLS", frozenset())
-
-
 @pytest.fixture
 def manifest(tmp_path: Path) -> Manifest:
     return Manifest(RUN, tmp_path / "runs" / f"{RUN}.json")
@@ -2770,6 +2762,36 @@ async def test_a_leftover_whose_delete_is_refused_is_reported(manifest, mock_gor
     assert not report.ok and [e["id"] for e in report.approved_problems] == [9801]
 
 
+async def test_a_failed_leftover_delete_of_an_earlier_run_does_not_keep_the_later_runs_failing(manifest, mock_gorelo, run_it):
+    gone = error_envelope(404, [("070404", "Client not found.")])
+    mock_gorelo.on("GET", "/v1/clients/9801", in_order(
+        envelope({"Id": 9801, "Name": "OLDTEST sample client"}), envelope({"Id": 9801, "Name": "OLDTEST sample client"}), gone,
+    ))
+    mock_gorelo.on("DELETE", "/v1/clients/9801", in_order(
+        error_envelope(409, [("070901", "The client has tickets.")]), envelope({"Result": "Deleted"}),
+    ))
+    mock_gorelo.on("GET", "/v1/clients/9802", error_envelope(404, [("070404", "Client not found.")]))
+    mock_gorelo.on("GET", "/v1/contacts/9900", error_envelope(404, [("070404", "Contact not found.")]))
+    first = await run_it(leftovers=True)
+    assert not first.ok and [e["id"] for e in first.approved_problems] == [9801]
+    # the cause is fixed: the same command again deletes the client and reports clean
+    second = await run_it(leftovers=True)
+    assert second.ok, second.render()
+    assert second.approved_problems == []
+    assert [(e["id"], e["outcome"]) for e in second.approved if e["id"] == 9801] == [(9801, "Deleted")]
+    text = second.render()
+    assert "PROBLEM" not in text and "delete failed" not in text and text.endswith("result: nothing left over")
+    # a third run finds the client gone: still clean
+    third = await run_it(leftovers=True)
+    assert third.ok and "PROBLEM" not in third.render()
+    # the manifest keeps the whole history of the three calls
+    assert [e["outcome"] for e in manifest.approved_leftover_outcomes() if e["id"] == 9801] == [
+        "delete failed: HTTP 409: The client has tickets.", "Deleted", "already gone (HTTP 404)",
+    ]
+    # and a run without --leftovers reports none of them
+    assert (await run_it(leftovers=False)).approved == []
+
+
 # command line
 
 
@@ -2962,7 +2984,7 @@ async def test_cleanup_deletes_the_records_of_the_1_5_0_areas_with_their_tools_n
     assert outcomes[("product_charge", CHARGE)] == outcomes[("client_domain", DOMAIN)] == outcomes[("asset_type", ASSET_TYPE)] == "Deleted"
     assert outcomes[("client_location", LOCATION)] == "Deleted"
     assert outcomes[("alert", ALERT_ID)] == "restored to New by the cleanup (set_alert_status; 1 alert(s) of its stack changed)"
-    # a contract cannot be deleted: archived, a known residue (neither cleaned nor a leftover)
+    # a contract is never deleted: archived, a known residue (neither cleaned nor a leftover)
     assert outcomes[("contract", CONTRACT_ID)] == RESIDUE_CONTRACT
     assert [(r.kind, r.id) for r in report.undeletable] == [("contract", CONTRACT_ID)] and report.leftovers == []
     assert lines[-1] == "result: cleanup complete; 1 known undeletable record remains (see above)"
@@ -3007,7 +3029,7 @@ async def test_a_contract_that_cannot_be_archived_is_a_leftover_that_says_so(man
     assert said in manifest.record("contract", CONTRACT_ID).outcome and not manifest.record("contract", CONTRACT_ID).cleaned
 
 
-async def test_while_update_contract_is_held_back_an_active_contract_is_a_leftover_for_the_gorelo_app_and_nothing_is_written(
+async def test_while_update_contract_is_in_the_held_set_an_active_contract_is_a_leftover_for_the_gorelo_app_and_nothing_is_written(
     manifest, mock_gorelo, run_it, monkeypatch
 ):
     monkeypatch.setattr(_common, "HELD_TOOLS", frozenset({"create_contract", "update_contract"}))
@@ -3017,7 +3039,7 @@ async def test_while_update_contract_is_held_back_an_active_contract_is_a_leftov
     assert sent(mock_gorelo) == [("GET", f"/v1/contracts/{CONTRACT_ID}")]
     record = manifest.record("contract", CONTRACT_ID)
     assert not report.ok and report.undeletable == [] and not record.cleaned
-    assert "update_contract is held back until Gorelo releases contract writes; archive it in the Gorelo app" in record.outcome
+    assert "update_contract is held back; archive it in the Gorelo app" in record.outcome
     assert [r.id for r in report.leftovers] == [CONTRACT_ID]
     # an archived one needs no write, so it stays a known residue, and one that is gone is cleaned, held or not
     manifest.created("contract", 4502, manifest.label("archived"), {"client_id": 9501})
@@ -3100,6 +3122,42 @@ async def test_the_cleanup_restores_an_alert_whose_stack_the_run_recorded_as_dis
     assert report.ok and manifest.record("alert", ALERT_ID).cleaned
 
 
+@pytest.mark.parametrize("alert_status", [1, 2], ids=["alert-already-new", "alert-restored-by-the-cleanup"])
+async def test_the_cleanup_names_a_recorded_stack_member_that_still_reads_dismissed(manifest, mock_gorelo, run_it, alert_status):
+    other = uid(60)
+    manifest.created("alert", ALERT_ID, manifest.label("alert"), {"client_id": 9501, "status_before": 1, "dismissed_ids": [ALERT_ID, other]})
+    route_areas(
+        mock_gorelo,
+        alert_status=alert_status,
+        overrides={
+            ("GET", f"/v1/alerts/{other}"): envelope({**alert_row(2), "Id": other}),
+            ("PATCH", "/v1/alerts"): envelope({"UpdatedIds": [ALERT_ID]}),  # the restore does not name the other member
+        },
+    )
+    report = await run_it()
+    record = manifest.record("alert", ALERT_ID)
+    assert not record.cleaned and not report.ok
+    assert f"({other})" in record.outcome and "still read Dismissed" in record.outcome and "in the Gorelo app" in record.outcome
+    assert ("GET", f"/v1/alerts/{other}") in sent(mock_gorelo)
+    assert [m for m in sent(mock_gorelo) if m[0] == "PATCH"] == ([] if alert_status == 1 else [("PATCH", "/v1/alerts")])  # never a restore of the member
+
+
+@pytest.mark.parametrize(
+    "other_read",
+    [envelope({**alert_row(1), "Id": uid(60)}), error_envelope(404, [("070404", "alert not found")]),
+     envelope({**alert_row(2), "Id": uid(60), "DismissedOn": "2099-10-02T10:14:00Z"})],
+    ids=["new", "gone", "dismissed-before-the-run"],
+)
+async def test_a_recorded_stack_member_that_reads_new_or_gone_or_was_dismissed_by_somebody_else_does_not_hold_the_record_open(
+    manifest, mock_gorelo, run_it, other_read
+):
+    other = uid(60)
+    manifest.created("alert", ALERT_ID, manifest.label("alert"), {"client_id": 9501, "status_before": 1, "dismissed_ids": [ALERT_ID, other]})
+    route_areas(mock_gorelo, alert_status=1, overrides={("GET", f"/v1/alerts/{other}"): other_read})
+    report = await run_it()
+    assert report.ok and manifest.record("alert", ALERT_ID).cleaned
+
+
 async def test_an_alert_of_another_client_is_never_restored_by_the_cleanup_guard(manifest, mock_gorelo, run_it):
     manifest.created("alert", ALERT_ID, manifest.label("alert"), {"client_id": 9502, "status_before": 1})  # not the test client
     route_areas(mock_gorelo)
@@ -3162,7 +3220,7 @@ def test_the_cleanup_docstring_names_the_records_of_the_1_5_0_areas():
     text = " ".join(cleanup.__doc__.split())
     for said in (
         "delete_asset_type, delete_client_location, delete_client_domain and delete_product_charge",
-        "a contract cannot be deleted through the API and the guard refuses the DELETE",
+        "this harness and this server never delete a contract (the API has DELETE /v1/contracts/{contractId}; FORBIDDEN_OPS and the guard refuse it)",
         "the cleanup guard allows exactly the body {\"StatusId\": 3}",
         "alert          not a create: an EXISTING alert of the test client",
         "the Drafts of the invoice_update area and the Draft that approve_invoice approves",

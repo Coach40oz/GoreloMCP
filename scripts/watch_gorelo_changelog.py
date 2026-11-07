@@ -54,6 +54,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import traceback
 import unicodedata
 from collections.abc import Callable, Mapping
@@ -252,10 +253,26 @@ def write_atomic(paths: Paths, target: Path, data: bytes) -> None:
     root = paths.state_dir.resolve()
     if root not in target.resolve().parents:
         raise WatchError(f"refusing to write outside {root}: {target}")
+    if target.is_symlink():
+        raise WatchError(f"refusing to replace a symbolic link: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(target.name + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, target)
+    # A unique name made with O_EXCL and O_NOFOLLOW (mkstemp), never a fixed "<name>.tmp": a planted symlink of that name
+    # would otherwise be written through, outside .state/.
+    fd, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp, 0o666 & ~umask)  # mkstemp makes 0600; the file keeps the mode a plain write would have given it
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def write_json(paths: Paths, target: Path, obj: Any) -> None:

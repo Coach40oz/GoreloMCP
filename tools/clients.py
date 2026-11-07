@@ -58,9 +58,14 @@ and update_client return it as it is (update_client with a custom field is the o
 again after the write and returns that read, see below). A write whose answer is not that record is
 refused through created_id / expect_object (kind "shape", write_unconfirmed): the write may have been
 applied, so the model must verify it with a read instead of repeating it. PATCH /v1/clients/{clientId} is a
-true partial update that treats null as "leave unchanged" for its four plain fields; probe 2026-10-01 showed that
-"" and null both leave a value unchanged, so name, status, billing name and alternate name cannot be cleared
-through the API and update_client has no clear option for them (it rejects "" and says why).
+true partial update that treats null as "leave unchanged" for its plain fields. The probe of 2026-10-01 showed that ""
+and null both left a value unchanged, but it ran against the retired collection form (the update with the client id in
+the body, which no longer exists), not the path form this tool calls. Since contract 05200951c89e the spec says, for
+AlternateName: "Leave null to keep the current value; send an empty string to clear it", so update_client offers clear_alternate_name=true,
+which sends AlternateName "". That clear has NOT been verified live on the path form: the tool says so in its texts and
+adds a `warning` to the result when Gorelo's answer still shows a value (the answer is the check). BillingName is
+"Leave null or empty to keep the current value" and Name cannot be blank, so those two cannot be cleared; update_client
+refuses "" for name, billing_name and alternate_name (a blank is never a clear by accident).
 
 Status scale (contract a7954b24844b, 2026-10-17): UpdateClientCommand.StatusId and the GET /v1/clients StatusIds filter
 take 1 Active, 3 Credit hold, 4 Archived; any other value is a 400 and 2 (Inactive) is gone. The default list leaves
@@ -289,6 +294,9 @@ UPDATE_FIELD_MAP = {
 }
 
 UPDATE_TEXT_PARAMS = ("name", "billing_name", "alternate_name")
+# What update_client may clear through clear_alternate_name, and what it sends: AlternateName "" ("send an empty string to clear it",
+# UpdateClientCommand.AlternateName, contract 05200951c89e onward). Not verified live on the path form.
+UPDATE_CLEAR_VALUES = {"alternate_name": ""}
 
 # What update_client declares as its field_map: the body fields plus the path placeholder, so that a Gorelo error
 # about the id names client_id (build_body is never given client_id). An error about the CustomProperties array is
@@ -670,6 +678,29 @@ class _AfterReadFailed(Exception):
     def __init__(self, why: str) -> None:
         super().__init__(why)
         self.why = why
+
+
+def _clear_warning(record: Any, clearing: list[str]) -> str | None:
+    """A sentence when update_client cleared the alternate name and Gorelo's answer does not show it gone. The clear is the
+    published spec's, not yet verified live, and the answer is the check (a tool reports only what Gorelo's answer says)."""
+    if "alternate_name" not in clearing or not isinstance(record, Mapping):
+        return None
+    shown = record.get("AlternateName")
+    if "AlternateName" in record and (shown is None or (isinstance(shown, str) and not shown.strip())):
+        return None
+    return (
+        "alternate_name was sent as an empty string to clear it (the published spec says that clears it; it has not been "
+        "verified live), but Gorelo's answer "
+        + ("does not show AlternateName" if "AlternateName" not in record else "still shows an alternate name")
+        + ". Check with get_client and tell the user whether it was cleared."
+    )
+
+
+def _with_clear_warning(record: Any, clearing: list[str]) -> Any:
+    warning = _clear_warning(record, clearing)
+    if warning is None or not isinstance(record, dict):
+        return record
+    return {**record, "warning": f"{record['warning']} {warning}" if record.get("warning") else warning}
 
 
 def _unusable_patch_answer(data: Any) -> str | None:
@@ -1288,7 +1319,13 @@ async def update_client(
         ),
     ] = None,
     billing_name: Annotated[str | None, Field(description="New name printed on invoices.")] = None,
-    alternate_name: Annotated[str | None, Field(description="New alternate or trading name.")] = None,
+    alternate_name: Annotated[str | None, Field(description="New alternate or trading name, not blank. To remove it use clear_alternate_name.")] = None,
+    clear_alternate_name: Annotated[
+        StrictBool | None,
+        Field(
+            description="true: remove it (sends an empty string; per the spec, not yet verified live: check the result)."
+        ),
+    ] = None,
     custom_properties: Annotated[
         list[CustomPropertySet] | None,
         Field(
@@ -1314,28 +1351,40 @@ async def update_client(
     ] = None,
 ) -> dict:
     """Update a client's name, status, billing name, alternate name or custom fields; returns the updated client record.
-    Pass at least one field; only custom fields can be cleared. group_ids REPLACES the whole group list: start from get_client's GroupIds ([9] alone drops the rest). Custom fields: ids from get_client's CustomProperties, values are text whatever the Type. Compare each returned CustomProperties Value with what you sent; tell the user if one differs. A hidden field (IsHidden) shows no Value: only IsSet is checked (see warning). It reads the client first: ids must be listed there, and other custom fields must come back unchanged. Side effects: overwrites current values; status_id 4 (Archived) hides the client from default lists; group_ids changes which technicians see the client.
+    Pass at least one field; only custom fields and alternate_name (clear_alternate_name, unverified live, so check) can be cleared. group_ids REPLACES the whole group list. Custom fields: ids from get_client's CustomProperties, values are text whatever the Type. Compare each returned CustomProperties Value with what you sent; tell the user if one differs. A hidden field (IsHidden) shows no Value: only IsSet is checked (see warning). It reads the client first: ids must be listed there, and other custom fields must come back unchanged. Side effects: overwrites current values; status_id 4 (Archived) hides the client from default lists; group_ids changes which technicians see the client.
     """
     cid = positive_id("client_id", client_id)
     sid = None if status_id is None else _status("status_id", status_id)
     texts = {"name": name, "billing_name": billing_name, "alternate_name": alternate_name}
+    clearing = ["alternate_name"] if clear_alternate_name is True else []
+    if clearing and alternate_name is not None:
+        raise ValueError("alternate_name: cannot be given a value and cleared in the same call")
     for param in UPDATE_TEXT_PARAMS:
         value = texts[param]
         if value is not None and not value.strip():
+            if param == "alternate_name":
+                raise ValueError(
+                    "alternate_name: must not be empty; to remove the alternate name pass "
+                    "clear_alternate_name=true (the published spec says an empty string clears it)"
+                )
+            reason = (
+                "a client always has a name"
+                if param == "name"
+                else "the published spec keeps the current value for a null or empty billing name"
+            )
             raise ValueError(
-                f"{param}: must not be empty. Gorelo cannot clear client fields through the API (an empty "
-                f"string or null leaves the value unchanged), so omit {param} to keep the current value"
+                f"{param}: must not be empty; {reason}, so omit {param} to keep the current value"
             )
     groups = _groups("group_ids", group_ids)
     type_id = None if client_type_id is None else positive_id("client_type_id", client_type_id)
     saved, cleared = _custom_property_changes(custom_properties, clear_custom_property_ids)
     if (
-        sid is None and groups is None and type_id is None and not saved and not cleared
+        sid is None and groups is None and type_id is None and not saved and not cleared and not clearing
         and all(value is None for value in texts.values())
     ):
         raise ValueError(
             "nothing to update: pass at least one of name, status_id, billing_name, alternate_name, group_ids, "
-            "client_type_id, custom_properties or clear_custom_property_ids (only the fields you pass are changed)"
+            "client_type_id, custom_properties, clear_custom_property_ids or clear_alternate_name (only the fields you pass are changed)"
         )
     # the saved entries first, then the cleared ones with a real JSON null (build_body leaves what is inside the list
     # alone); the client id is in the path, never in the body
@@ -1350,6 +1399,8 @@ async def update_client(
             "custom_properties": entries or None,
         },
         UPDATE_FIELD_MAP,
+        clear=clearing or None,
+        clear_values=UPDATE_CLEAR_VALUES,
     )
     saved_ids = [identifier for identifier, _ in saved]
     before: dict[int, _CustomField] = {}
@@ -1376,7 +1427,7 @@ async def update_client(
             raise relabelled from err
         data = None
     if not entries:
-        return expect_object(data, UPDATE_OP, tool="update_client")
+        return _with_clear_warning(expect_object(data, UPDATE_OP, tool="update_client"), clearing)
     # After any 2xx PATCH the custom fields are checked on a second read of the client, which has the rendering of the
     # first one, whatever the PATCH answer looks like: that answer is another rendering, and one that cannot be used
     # is one more problem in the error, not a stop (the read before holds values that would otherwise be lost). The
@@ -1389,7 +1440,7 @@ async def update_client(
     unread = _confirm_custom_properties(after, before, saved, cleared, cid, answer_problem)
     if unread:
         after_record["warning"] = _unread_warning(unread)
-    return after_record
+    return _with_clear_warning(after_record, clearing)
 
 
 @gorelo_tool(toolset="core", kind="read", ops=[LOCATIONS_OP], field_map=LOCATIONS_FIELD_MAP)
@@ -1746,8 +1797,8 @@ async def update_client_location(
     billing_contact_ids: Annotated[
         list[StrictId] | None,
         Field(
-            description="The COMPLETE new billing contact list (active contacts of this client, max 100); current one: "
-            "get_client_location. A current contact left off is refused unless in remove_billing_contact_ids."
+            description="The COMPLETE new billing list (active contacts, list_contacts; max 100); current: get_client_location. "
+            "A current contact left off is refused unless in remove_billing_contact_ids."
         ),
     ] = None,
     remove_billing_contact_ids: Annotated[

@@ -1,6 +1,6 @@
 {
- "contract_sha256": "6c30770dffc0fae758dc5e1de1752eec31e5b3b1c4cf32c4721d62e1e8a051ae",
- "op_count": 169,
+ "contract_sha256": "b0850edb962d5c6ad070f9bbdbccf51a9390493d4f09848fd37edbe5637b539b",
+ "op_count": 170,
  "openapi": "3.0.4",
  "ops": {
   "DELETE /v1/api-keys/{apiKeyId}": {
@@ -3639,6 +3639,26 @@
     "data": "[CodeModel]",
     "kind": "envelope",
     "schema": "CodeModelListBaseResponse"
+   },
+   "status_codes": [
+    "200",
+    "401",
+    "500"
+   ]
+  },
+  "GET /v1/tickets/sla/policies": {
+   "body": null,
+   "method": "GET",
+   "operation_id": "get_v1_tickets_sla_policies",
+   "page_size_rule": null,
+   "paged": false,
+   "path": "/v1/tickets/sla/policies",
+   "path_params": {},
+   "query_params": {},
+   "response": {
+    "data": "[SlaPolicyListItemModel]",
+    "kind": "envelope",
+    "schema": "SlaPolicyListItemModelListBaseResponse"
    },
    "status_codes": [
     "200",
@@ -19609,10 +19629,35 @@
   "SlaFirstResponseModel": {
    "additional_properties": false,
    "fields": {
+    "AtRiskOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "DueOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
     "ElapsedBusinessMinutes": {
      "format": "double",
      "nullable": true,
      "type": "number"
+    },
+    "RespondedOn": {
+     "format": "date-time",
+     "nullable": true,
+     "type": "string"
+    },
+    "Status": {
+     "nullable": false,
+     "ref": "SlaStatusModel",
+     "type": null
+    },
+    "TargetBusinessMinutes": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
     }
    },
    "required": [],
@@ -19625,6 +19670,119 @@
      "nullable": false,
      "ref": "SlaFirstResponseModel",
      "type": null
+    },
+    "PolicyId": {
+     "format": "uuid",
+     "nullable": true,
+     "type": "string"
+    },
+    "Resolution": {
+     "nullable": false,
+     "ref": "SlaStatusModel",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "SlaPolicyListItemModel": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "uuid",
+     "nullable": false,
+     "type": "string"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
+    },
+    "Order": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Targets": {
+     "items": {
+      "ref": "SlaPolicyTargetModel",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "SlaPolicyListItemModelListBaseResponse": {
+   "additional_properties": false,
+   "fields": {
+    "Data": {
+     "items": {
+      "ref": "SlaPolicyListItemModel",
+      "type": null
+     },
+     "nullable": true,
+     "type": "array"
+    },
+    "DataContext": {
+     "additional_properties": false,
+     "nullable": true,
+     "type": "object"
+    },
+    "IsSuccess": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "Notifications": {
+     "items": {
+      "ref": "Error",
+      "type": null
+     },
+     "nullable": false,
+     "type": "array"
+    },
+    "StatusCode": {
+     "nullable": false,
+     "ref": "HttpStatusCode",
+     "type": null
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "SlaPolicyTargetModel": {
+   "additional_properties": false,
+   "fields": {
+    "Is24x7": {
+     "nullable": false,
+     "type": "boolean"
+    },
+    "PriorityId": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "TargetBusinessMinutes": {
+     "format": "int32",
+     "nullable": true,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "SlaStatusModel": {
+   "additional_properties": false,
+   "fields": {
+    "Id": {
+     "format": "int32",
+     "nullable": false,
+     "type": "integer"
+    },
+    "Name": {
+     "nullable": false,
+     "type": "string"
     }
    },
    "required": [],
@@ -24698,6 +24856,6 @@
    "type": "apiKey"
   }
  },
- "sha256": "5a1085ac00a9a1c4a83aacd2c5f90bf1965a2c725af40a5a8fbb49436fcd1588",
+ "sha256": "f962f35a4e8f431efc39ecc5c9f14934d95e4c6139b6c08a764a425cba00ec8b",
  "source": "https://api.usw.gorelo.io/swagger/v1/swagger.json"
 }

@@ -34,7 +34,7 @@ import gen_tool_catalog as gen  # noqa: E402
 
 EM_DASH, EN_DASH = chr(0x2014), chr(0x2013)
 MARK = "only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name"
-# The tools a server can register: the held ones (create_contract and update_contract, tools._common.HELD_TOOLS) are not in the catalog.
+# The tools a server can register: the held ones (tools._common.HELD_TOOLS, empty since 1.5.3) are not in the catalog.
 SPECS = [spec for spec in REGISTRY.specs if not REGISTRY.is_held(spec.name)]
 
 
@@ -207,14 +207,23 @@ def test_the_summary_table_counts_what_the_registry_holds():
     assert f"registers {default_registered} of them." in text
 
 
-def test_the_held_tools_are_named_as_held_back_and_listed_nowhere_else():
+def test_nothing_is_held_back_so_the_catalog_lists_every_declared_tool_and_has_no_held_line():
     text = CATALOG.read_text(encoding="utf-8")
+    assert _common.HELD_TOOLS == frozenset() and "Held back" not in text
+    sections, _ = parse_catalog(text)
+    listed = {name for rows in sections.values() for name in rows}
+    assert {"create_contract", "update_contract"} <= listed and listed == {spec.name for spec in REGISTRY.specs}
+    assert "`create_contract`" in gen.GATED_OFF and "`update_contract`" in gen.GATED_OFF
+
+
+def test_a_held_tool_is_named_as_held_back_and_listed_nowhere_else_in_a_fresh_generation(monkeypatch):
+    monkeypatch.setattr(_common, "HELD_TOOLS", frozenset({"create_contract", "update_contract"}))
+    text = gen.build_catalog()
     bullet = next(line for line in text.splitlines() if line.startswith("- Held back: "))
     assert "`create_contract`, `update_contract`" in bullet and "no setting registers them" in bullet
-    assert "`list_contracts` and `get_contract` are" in bullet
     sections, _ = parse_catalog(text)
-    assert not {name for rows in sections.values() for name in rows} & _common.HELD_TOOLS
-    assert "`create_contract`" not in gen.GATED_OFF and "`update_contract`" not in gen.GATED_OFF
+    assert not {name for rows in sections.values() for name in rows} & {"create_contract", "update_contract"}
+    assert f"The registry holds {len(REGISTRY.specs) - 2} tools" in text
 
 
 def test_the_first_sentence_is_what_the_model_is_shown():

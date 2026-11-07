@@ -19,7 +19,8 @@ from pydantic import Field
 
 from server import build_instructions, build_server, held_names_listed, resolve_gated_tools, warn_held_tools
 from settings import TOOLSETS, Settings, SettingsError
-from tools._common import HELD_TOOLS, REGISTRY, Registry, StrictBool, client_of, require_confirm, server_info_of
+import tools._common as common
+from tools._common import REGISTRY, Registry, StrictBool, client_of, require_confirm, server_info_of
 
 pytestmark = pytest.mark.anyio
 
@@ -31,8 +32,9 @@ FIVE_GATED = (
     "remove_document_related_item,delete_time_entry"
 )
 FIVE_GATED_TOOLS = frozenset(FIVE_GATED.split(","))
-# The gated tools a server can register: the held ones (create_contract and update_contract) are declared but never registered.
-REAL_GATED = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive" and spec.name not in HELD_TOOLS)
+# Every gated tool of the real registry: HELD_TOOLS is empty (it held create_contract and update_contract back in 1.5.1 and 1.5.2), so a
+# server can register all of them. The tests of the held mechanism put names into the set with the `held` fixture below.
+REAL_GATED = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive")
 
 
 def demo_registry() -> Registry:
@@ -294,7 +296,7 @@ def test_the_server_instructions_do_not_depend_on_which_gated_tools_are_register
         for names, destructive in ((None, False), (None, True), ({"delete_time"}, True))
     }
     assert texts == {build_instructions(ALL)}
-    assert "6. Delete, void and approved-invoice tools exist only when the operator has enabled them" in texts.pop()
+    assert "6. Delete, void, approved-invoice and contract-write tools exist only when the operator has enabled them" in texts.pop()
 
 
 # --------------------------------------------------------------------------
@@ -307,11 +309,14 @@ def test_the_real_registry_has_the_gated_tools_the_five_list_is_made_of():
     assert set(REAL_GATED) - FIVE_GATED_TOOLS == {
         "create_approved_invoice", "delete_item", "delete_project_comment", "delete_project_task", "share_document",
         # 1.5.0
-        "approve_invoice", "delete_asset_type", "delete_client_location", "delete_client_domain", "delete_product_charge",
+        "approve_invoice", "create_contract", "update_contract", "delete_asset_type", "delete_client_location",
+        "delete_client_domain", "delete_product_charge",
+        # 1.5.2
+        "delete_contact",
     }
-    # the two contract writes are declared as gated tools and held back (1.5.1), so the real server never lists them
-    assert HELD_TOOLS == {"create_contract", "update_contract"}
-    assert {spec.name for spec in REGISTRY.specs if spec.kind == "destructive"} == set(REAL_GATED) | HELD_TOOLS
+    # nothing is held back since 1.5.3: the contract writes are gated tools like the others
+    assert common.HELD_TOOLS == frozenset()
+    assert len(REAL_GATED) == 18 and not {name for name in REAL_GATED if REGISTRY.is_held(name)}
 
 
 async def test_a_list_of_five_gated_tools_registers_exactly_those(server_factory):
@@ -371,45 +376,74 @@ async def test_a_real_gated_tool_that_is_listed_still_refuses_without_confirm_an
 
 
 # --------------------------------------------------------------------------
-# Held tools: create_contract and update_contract are never registered, and listing them is not an error
+# Held tools: the mechanism stays although HELD_TOOLS is empty (it held create_contract and update_contract back in 1.5.1 and 1.5.2).
+# A held tool is never registered, and listing it is not an error. These tests put real names into the set with the `held` fixture.
 # --------------------------------------------------------------------------
 
+HELD_PAIR = frozenset({"create_contract", "update_contract"})
 LISTED_WITH_HELD = "create_contract,delete_invoice,update_contract"
+
+
+@pytest.fixture
+def held(monkeypatch):
+    """Hold create_contract and update_contract back for the duration of one test (the module attribute the code reads)."""
+    monkeypatch.setattr(common, "HELD_TOOLS", HELD_PAIR)
+    return HELD_PAIR
 
 
 def held_settings(value: str, toolsets: str = "all") -> Settings:
     return Settings.from_env({"GORELO_API_KEY": "k", "GORELO_TOOLSETS": toolsets, "GORELO_ENABLE_DESTRUCTIVE": value}, require_http=False)
 
 
-async def test_held_names_in_the_list_are_dropped_and_the_rest_of_the_list_is_honored(server_factory):
+def test_the_held_set_is_empty_and_the_production_style_list_registers_every_gated_tool(caplog):
+    caplog.set_level(logging.INFO, logger="gorelo-mcp")
+    assert common.HELD_TOOLS == frozenset()
+    names = ",".join(sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive"))
+    for value in (names, "1", LISTED_WITH_HELD, "0", ""):
+        settings = held_settings(value)
+        assert held_names_listed(settings) == [] and warn_held_tools(settings) == []
+    assert resolve_gated_tools(held_settings(names)) == REAL_GATED and len(REAL_GATED) == 18
+    assert resolve_gated_tools(held_settings(LISTED_WITH_HELD)) == ["create_contract", "delete_invoice", "update_contract"]
+    assert [r for r in caplog.records if "held" in r.getMessage()] == []  # an empty set logs nothing, whatever the list says
+
+
+async def test_an_empty_held_set_registers_the_two_contract_writes_under_the_flag_only(server_factory):
+    settings = held_settings(LISTED_WITH_HELD)
+    names = {tool.name for tool in await list_tools(server_factory(settings=settings))}
+    assert HELD_PAIR | {"delete_invoice", "list_contracts", "get_contract"} <= names
+    off = {tool.name for tool in await list_tools(server_factory(toolsets=frozenset(TOOLSETS), destructive=False))}
+    assert not off & HELD_PAIR and {"list_contracts", "get_contract"} <= off
+
+
+async def test_held_names_in_the_list_are_dropped_and_the_rest_of_the_list_is_honored(server_factory, held):
     settings = held_settings(LISTED_WITH_HELD)
     assert resolve_gated_tools(settings) == ["delete_invoice"]
     assert held_names_listed(settings) == ["create_contract", "update_contract"]
     names = {tool.name for tool in await list_tools(server_factory(settings=settings))}
-    assert not names & HELD_TOOLS and "delete_invoice" in names and {"list_contracts", "get_contract"} <= names
+    assert not names & held and "delete_invoice" in names and {"list_contracts", "get_contract"} <= names
     # a list that holds only held names registers no gated tool at all, and the toolset of a held tool does not matter
     only = held_settings("create_contract, update_contract", toolsets="core")
     assert resolve_gated_tools(only) == [] and held_names_listed(only) == ["create_contract", "update_contract"]
-    assert not {tool.name for tool in await list_tools(server_factory(settings=only))} & HELD_TOOLS
+    assert not {tool.name for tool in await list_tools(server_factory(settings=only))} & held
 
 
-def test_every_production_style_list_with_all_the_gated_names_starts_cleanly():
+def test_every_production_style_list_with_all_the_gated_names_starts_cleanly_while_two_are_held(held):
     names = ",".join(sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive"))
     settings = held_settings(names)
-    assert resolve_gated_tools(settings) == REAL_GATED
-    assert held_names_listed(settings) == sorted(HELD_TOOLS)
+    assert resolve_gated_tools(settings) == [name for name in REAL_GATED if name not in held]
+    assert held_names_listed(settings) == sorted(held)
 
 
-def test_a_word_registers_no_held_tool_and_says_nothing(caplog):
+def test_a_word_registers_no_held_tool_and_says_nothing(caplog, held):
     caplog.set_level(logging.INFO, logger="gorelo-mcp")
     for value in ("1", "0", "", "delete_invoice"):
         settings = held_settings(value)
         assert held_names_listed(settings) == [] and warn_held_tools(settings) == []
-        assert not set(resolve_gated_tools(settings)) & HELD_TOOLS
+        assert not set(resolve_gated_tools(settings)) & held
     assert [r for r in caplog.records if "held" in r.getMessage()] == []
 
 
-def test_the_warning_is_one_line_naming_the_held_names_the_list_holds(caplog):
+def test_the_warning_is_one_line_naming_the_held_names_the_list_holds(caplog, held):
     caplog.set_level(logging.INFO, logger="gorelo-mcp")
     assert warn_held_tools(held_settings(LISTED_WITH_HELD)) == ["create_contract", "update_contract"]
     assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
@@ -422,7 +456,7 @@ def test_the_warning_is_one_line_naming_the_held_names_the_list_holds(caplog):
     ]
 
 
-def test_an_error_about_another_name_does_not_list_a_held_tool_as_valid():
+def test_an_error_about_another_name_does_not_list_a_held_tool_as_valid(held):
     with pytest.raises(SettingsError) as info:
         resolve_gated_tools(held_settings("create_contract,nope"))
     message = str(info.value)
@@ -431,11 +465,31 @@ def test_an_error_about_another_name_does_not_list_a_held_tool_as_valid():
     assert "update_contract" not in message
 
 
-def test_emptying_the_held_set_brings_the_two_tools_back(monkeypatch):
-    import tools._common as common
-
+def test_a_held_name_that_is_not_a_declared_tool_is_dropped_too(monkeypatch):
+    # a name that NO tool has (one removed after it was held): resolve_gated_tools must check is_held before the "no tool has
+    # this name" refusal, so the name is dropped with the held-tools warning and the start goes on
+    assert "retired_tool" not in {spec.name for spec in REGISTRY.specs}
+    monkeypatch.setattr(common, "HELD_TOOLS", frozenset({"retired_tool"}))
+    settings = held_settings("retired_tool,delete_invoice")
+    assert resolve_gated_tools(settings) == ["delete_invoice"] and held_names_listed(settings) == ["retired_tool"]
+    assert warn_held_tools(settings) == ["retired_tool"]
+    # the same name NOT held is refused, which is what the order of the two checks decides
     monkeypatch.setattr(common, "HELD_TOOLS", frozenset())
+    with pytest.raises(SettingsError, match="'retired_tool' \\(no tool has this name\\)"):
+        resolve_gated_tools(settings)
+
+
+def test_a_held_name_that_is_a_declared_gated_tool_is_dropped_too(monkeypatch):
+    monkeypatch.setattr(common, "HELD_TOOLS", frozenset({"delete_time_entry"}))
+    settings = held_settings("delete_time_entry,delete_invoice")
+    assert resolve_gated_tools(settings) == ["delete_invoice"] and held_names_listed(settings) == ["delete_time_entry"]
+
+
+def test_emptying_the_held_set_brings_the_two_tools_back(monkeypatch):
+    monkeypatch.setattr(common, "HELD_TOOLS", HELD_PAIR)
     settings = held_settings(LISTED_WITH_HELD)
+    assert resolve_gated_tools(settings) == ["delete_invoice"]
+    monkeypatch.setattr(common, "HELD_TOOLS", frozenset())
     assert resolve_gated_tools(settings) == ["create_contract", "delete_invoice", "update_contract"]
     assert held_names_listed(settings) == []
-    assert {"create_contract", "update_contract"} <= {spec.name for spec in REGISTRY.select(settings.toolsets, True)}
+    assert HELD_PAIR <= {spec.name for spec in REGISTRY.select(settings.toolsets, True)}

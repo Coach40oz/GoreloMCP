@@ -1571,6 +1571,27 @@ async def test_no_kind_of_failed_reread_can_blame_the_write_tool_or_call_a_retry
     assert "may or may not have been applied" not in warning  # nothing is unclear about the write: it succeeded
 
 
+@pytest.mark.parametrize("prop", [404, True, ["Id"]], ids=["int", "bool", "list"])
+async def test_a_failed_reread_with_a_property_name_that_is_not_text_is_still_a_warning(server_factory, mock_gorelo, prop):
+    # the write succeeded; the read-back answers 404 with a PropertyName that is not text. The tool must return the warning
+    # (the record exists), not fail with a crash that invites the model to write it again
+    mock_gorelo.on("POST", "/v1/clients", envelope({"Id": 7}))
+    mock_gorelo.on("GET", "/v1/clients/7", error_envelope(404, [{"Code": "070401", "Message": "Gone", "PropertyName": prop}], trace_id="00-t-9"))
+    server = server_factory(registry=_write_tool_registry())
+    result = await call_tool(server, "create_it", {"name": "Acme"})
+    assert result["Id"] == 7 and "Gone" in result["warning"] and "Do not repeat the write" in result["warning"]
+    assert len(mock_gorelo.calls("POST")) == 1
+
+
+async def test_a_5xx_write_with_a_numeric_property_name_keeps_the_unconfirmed_advice(server_factory, mock_gorelo):
+    mock_gorelo.on("POST", "/v1/clients", error_envelope(500, [{"Code": "070001", "Message": "Boom", "PropertyName": 7}]))
+    server = server_factory(registry=_write_tool_registry())
+    result = await call_tool_raw(server, "create_it", {"name": "Acme"})
+    assert result.is_error
+    text = result.content[0].text
+    assert "Boom" in text and "Verify with a read before retrying" in text and "expected string" not in text
+
+
 async def test_a_reread_that_the_tool_did_not_declare_is_a_warning_not_a_failed_write(server_factory, mock_gorelo):
     # a programming error must not make the model think the write failed (it would write again)
     mock_gorelo.on("POST", "/v1/clients", envelope({"Id": 7}))
@@ -2835,6 +2856,46 @@ def test_a_notification_without_a_property_shows_only_its_message_or_code():
     assert "): Invalid or malformed request body.; 070999 [trace" in text
 
 
+@pytest.mark.parametrize("prop", [7, 7.5, True, ["Name"], {"a": 1}], ids=["int", "float", "bool", "list", "object"])
+def test_a_property_name_that_is_not_text_does_not_hide_the_unconfirmed_write_advice(prop):
+    # Gorelo's PropertyName is text, but a gateway or a bug may send anything: the error must still be built, and a 5xx
+    # on a write must still tell the model that the change may have been applied
+    err = gerr(("070001", "Internal error", prop), status=500, write_unconfirmed=True)
+    text = format_gorelo_error(err, "create_client_domain", MAP)
+    assert text.startswith("Gorelo rejected create_client_domain (HTTP 500, code 070001): ")
+    assert "Internal error" in text
+    assert "Gorelo may have applied the change before failing. Verify with a read before retrying." in text
+
+
+def test_a_numeric_property_name_is_shown_as_text():
+    text = format_gorelo_error(gerr(("070001", "Internal error", 7)), "t", MAP)
+    assert "): 7: Internal error [trace" in text
+
+
+def test_a_property_name_that_is_not_text_is_also_safe_in_the_formatter_itself():
+    # a notification list that was changed after the error was built does not get the normalization of GoreloAPIError
+    err = gerr(("070001", "Internal error", None))
+    err.notifications[0]["property"] = 7
+    err.notifications[1:] = [{"code": "070002", "message": "Other", "property": ["x"]}]
+    text = format_gorelo_error(err, "t", MAP)
+    assert "7: Internal error; Other" in text
+
+
+def test_a_connection_that_was_never_made_on_a_write_says_nothing_was_sent():
+    err = GoreloAPIError(
+        "POST /v1/clients: the connection to Gorelo could not be established (ConnectError); nothing was sent, "
+        "so repeating it is safe",
+        op_key="POST /v1/clients", kind="transport",
+    )
+    text = format_gorelo_error(err, "create_client", MAP)
+    assert text == (
+        "Gorelo could not be reached for create_client (the connection was never established). "
+        "Nothing was sent, so repeating it is safe."
+    )
+    read = GoreloAPIError("x", op_key="GET /v1/clients", kind="transport")
+    assert format_gorelo_error(read, "list_clients", MAP).endswith("This was a read, so retrying is safe.")
+
+
 def test_no_notifications_and_no_trace():
     err = GoreloAPIError("x", status=502, op_key="GET /v1/clients", kind="http")
     assert format_gorelo_error(err, "list_clients", {}) == "Gorelo rejected list_clients (HTTP 502): no details returned"
@@ -3252,6 +3313,8 @@ REAL_DESTRUCTIVE_ARGUMENTS = {
     "delete_client_location": {"client_id": 9101, "location_id": 9001},
     "delete_client_domain": {"client_id": 9101, "domain_id": 4},
     "delete_product_charge": {"product_charge_id": 12},
+    # 1.5.2: deleting a contact (Gorelo publishes: marked inactive, history kept; measured: it leaves every list and GET answers 404)
+    "delete_contact": {"contact_id": 5},
     # not a delete, but gated by the same flag: approving an existing invoice pushes it to accounting
     "approve_invoice": {"invoice_id": uid(10)},
     # not deletes, but gated by the same flag: a contract can approve and send recurring invoices on its own
@@ -3269,7 +3332,7 @@ def test_the_table_of_real_destructive_tools_is_complete():
 async def test_a_real_destructive_tool_refuses_text_and_numbers_for_confirm_and_sends_nothing(
     server_factory, mock_gorelo, name
 ):
-    server = server_factory(registry=REGISTRY.with_held(), toolsets=frozenset(TOOLSETS), destructive=True)  # create_contract and update_contract are held back
+    server = server_factory(toolsets=frozenset(TOOLSETS), destructive=True)
     async with Client(server) as session:
         for confirm in ("true", "True", "yes", "on", "1", 1, 0, 1.0, None, "false", [True]):
             text = await call_tool_error(session, name, {**REAL_DESTRUCTIVE_ARGUMENTS[name], "confirm": confirm})
@@ -3281,7 +3344,7 @@ async def test_a_real_destructive_tool_refuses_text_and_numbers_for_confirm_and_
 async def test_a_real_destructive_tool_still_refuses_a_missing_or_false_confirm_with_its_own_message(
     server_factory, mock_gorelo, name
 ):
-    server = server_factory(registry=REGISTRY.with_held(), toolsets=frozenset(TOOLSETS), destructive=True)
+    server = server_factory(toolsets=frozenset(TOOLSETS), destructive=True)
     async with Client(server) as session:
         for extra in ({}, {"confirm": False}):
             text = await call_tool_error(session, name, {**REAL_DESTRUCTIVE_ARGUMENTS[name], **extra})

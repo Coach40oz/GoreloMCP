@@ -591,12 +591,19 @@ def _check_elements(
 
 
 def _object_fields(op: OpSpec, entry: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
-    """The field table an object value is checked against, or None if the entry is not an object."""
+    """The field table an object value is checked against, or None if the entry is not an object (or is a free-form one).
+
+    An object whose schema declares no fields AND says it takes no others (type object, additional_properties false, the
+    spec's UnlimitedHoursDetails) has an EMPTY table: the object is valid only as {}, and every key in it is refused. An
+    empty table without that statement (a free-form object or map) is not checked: None.
+    """
     if not isinstance(entry, Mapping):
         return None
     inline = entry.get("fields")
     if isinstance(inline, Mapping) and inline:
         return inline
+    if _closed_empty_object(entry):
+        return {}
     ref = entry.get("ref")
     if ref:
         schema = op.schemas.get(ref)
@@ -604,7 +611,14 @@ def _object_fields(op: OpSpec, entry: Mapping[str, Any] | None) -> Mapping[str, 
             fields = schema.get("fields")
             if isinstance(fields, Mapping) and fields:
                 return fields
+            if _closed_empty_object(schema):
+                return {}
     return None
+
+
+def _closed_empty_object(schema: Mapping[str, Any]) -> bool:
+    """True for an object schema that declares no fields and says no other key is allowed (additional_properties false)."""
+    return schema.get("type") == "object" and schema.get("additional_properties") is False
 
 
 def _shape_of(op: OpSpec, entry: Mapping[str, Any] | None) -> str | None:

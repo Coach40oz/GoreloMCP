@@ -19,6 +19,8 @@ import stat
 import types
 from pathlib import Path
 
+import fastmcp
+import fastmcp.server.http as fastmcp_http
 import httpx
 import pytest
 from mcp.server.auth.provider import AccessToken, RefreshToken
@@ -32,6 +34,7 @@ import oauth_store
 import personal_auth
 from scripts import oauth_state
 from server import build_server as real_build_server
+import tools._common as common
 from tools._common import REGISTRY
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -113,6 +116,9 @@ def launch(monkeypatch, tmp_path, caplog):
 
     monkeypatch.setattr(main_module, "PersonalAuthProvider", Recording)
     monkeypatch.setattr(main_module, "build_server", prepared_build_server)
+    # main() replaces the session manager class and a FastMCP setting for the whole process: put both back after each test
+    monkeypatch.setattr(fastmcp_http, "StreamableHTTPSessionManager", fastmcp_http.StreamableHTTPSessionManager)
+    monkeypatch.setattr(fastmcp.settings, "check_for_updates", fastmcp.settings.check_for_updates)
     caplog.set_level(logging.INFO)
     state = types.SimpleNamespace(
         app_dir=app_dir,
@@ -412,6 +418,27 @@ def test_main_refuses_to_start_on_a_bad_region_or_redirect_domain_before_it_buil
     assert not launch.state_dir.exists()  # the OAuth state directory was not even touched
 
 
+@pytest.mark.parametrize(
+    "value, fragment",
+    [
+        ("https://mcp.example.test/mcp", "PUBLIC_BASE_URL must not end in /mcp"),
+        ("http://mcp.example.test", "PUBLIC_BASE_URL must start with https://"),
+    ],
+)
+def test_main_refuses_a_public_base_url_that_would_break_the_sign_in_with_one_line_not_a_traceback(launch, monkeypatch, value, fragment):
+    # /mcp: the OAuth endpoints would answer 404 and claude.ai could never sign in; http: the OAuth library raises ValueError
+    # inside run(). Both are caught in the settings, before any provider or server is built.
+    monkeypatch.setenv("PUBLIC_BASE_URL", value)
+    with pytest.raises(SystemExit) as info:
+        launch.main()
+    assert info.value.code == 1
+    assert launch.served == [] and launch.providers == [] and launch.built == []
+    (message,) = launch.errors()
+    assert message.endswith("; refusing to start") and fragment in message
+    assert value not in message  # the address is never echoed (it may hold a password)
+    assert not launch.state_dir.exists()
+
+
 def registration(redirect):
     return {
         "redirect_uris": [redirect], "client_name": "Copilot Studio", "token_endpoint_auth_method": "client_secret_post",
@@ -475,9 +502,9 @@ def test_the_start_logs_every_gated_tool_of_the_enabled_toolsets_for_the_word_on
     monkeypatch.setenv("GORELO_ENABLE_DESTRUCTIVE", "1")
     monkeypatch.setenv("GORELO_TOOLSETS", "core,tickets,time")
     launch.main()
-    # core gained three gated tools in 1.5.0 (delete_asset_type, delete_client_domain, delete_client_location)
+    # core gained three gated tools in 1.5.0 (delete_asset_type, delete_client_domain, delete_client_location) and one in 1.5.2 (delete_contact)
     assert gated_lines(launch) == [
-        "gorelo-mcp gated tools: delete_asset_type,delete_client_domain,delete_client_location,delete_ticket_comment,delete_time_entry"
+        "gorelo-mcp gated tools: delete_asset_type,delete_client_domain,delete_client_location,delete_contact,delete_ticket_comment,delete_time_entry"
     ]
 
 
@@ -512,22 +539,78 @@ def test_a_list_of_five_gated_tools_starts_and_is_logged_in_full(launch, monkeyp
     assert gated_lines(launch) == ["gorelo-mcp gated tools: " + ",".join(sorted(FIVE_GATED.split(",")))]
 
 
-def test_a_list_with_the_held_contract_writes_starts_with_one_warning_between_the_gated_and_ready_lines(launch, monkeypatch):
-    # the production .env lists all 17 gated names of 1.5.0; 1.5.1 holds create_contract and update_contract back
-    declared = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive")
-    assert len(declared) == 17 and {"create_contract", "update_contract"} <= set(declared)
-    monkeypatch.setenv("GORELO_ENABLE_DESTRUCTIVE", ",".join(declared))
+HELD_PAIR = ("create_contract", "update_contract")
+HELD_LINE = "gorelo-mcp held tools ignored: create_contract, update_contract (held back until Gorelo releases them)"
+
+
+def _start_with_list(launch, monkeypatch, listed):
+    monkeypatch.setenv("GORELO_ENABLE_DESTRUCTIVE", ",".join(listed))
     monkeypatch.setenv("GORELO_TOOLSETS", "all")
     launch.main()
     assert launch.errors() == [] and launch.served
-    held = "gorelo-mcp held tools ignored: create_contract, update_contract (held back until Gorelo releases them)"
+    (ready,) = ready_lines(launch)
+    return ready
+
+
+def test_a_list_with_every_gated_name_starts_with_no_held_line_since_nothing_is_held_back(launch, monkeypatch):
+    # 1.5.3 released the contract writes: HELD_TOOLS is empty, so the 18 declared gated names (the production list of that release) all register
+    declared = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive")
+    assert len(declared) == 18 and {"create_contract", "update_contract", "delete_contact"} <= set(declared)
+    ready = _start_with_list(launch, monkeypatch, declared)
+    assert ready.endswith(" destructive=True tools=162")  # 144 regular tools and the 18 gated ones
+    assert gated_lines(launch) == ["gorelo-mcp gated tools: " + ",".join(declared)]
+    assert [m for m in launch.messages() if "held" in m] == []  # an empty held set logs nothing
+
+
+def test_the_gated_list_of_1_5_0_still_starts_cleanly_and_registers_17(launch, monkeypatch):
+    # the production .env of 1.5.0 and 1.5.1 listed 17 names (no delete_contact, the two contract writes in)
+    declared = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive")
+    listed = [name for name in declared if name != "delete_contact"]
+    assert len(listed) == 17
+    ready = _start_with_list(launch, monkeypatch, listed)
+    assert ready.endswith(" destructive=True tools=161")  # 144 regular tools and the 17 gated ones listed
+    assert [m for m in launch.messages() if "held" in m] == []
+
+
+def test_the_gated_list_of_1_5_2_starts_cleanly_registers_160_and_logs_no_held_line(launch, monkeypatch):
+    # the production .env since the 1.5.2 deploy: 16 names, delete_contact in and the two contract writes out (the 1.5.3 code registers
+    # the two only when the list names them)
+    declared = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive")
+    listed = [name for name in declared if name not in ("create_contract", "update_contract")]
+    assert len(listed) == 16 and "delete_contact" in listed
+    ready = _start_with_list(launch, monkeypatch, listed)
+    assert ready.endswith(" destructive=True tools=160")  # 144 regular tools and the 16 gated ones listed
+    assert gated_lines(launch) == ["gorelo-mcp gated tools: " + ",".join(listed)]
+    assert [m for m in launch.messages() if "held" in m] == []
+
+
+def _held_list_start(launch, monkeypatch, listed):
+    monkeypatch.setattr(common, "HELD_TOOLS", frozenset(HELD_PAIR))  # the mechanism: put the two names into the held set again
+    monkeypatch.setenv("GORELO_ENABLE_DESTRUCTIVE", ",".join(listed))
+    monkeypatch.setenv("GORELO_TOOLSETS", "all")
+    launch.main()
+    assert launch.errors() == [] and launch.served
     messages = launch.messages()
-    assert messages.count(held) == 1
-    kept = [name for name in declared if name not in ("create_contract", "update_contract")]
+    assert messages.count(HELD_LINE) == 1
+    kept = [name for name in listed if name not in HELD_PAIR]
     assert gated_lines(launch) == ["gorelo-mcp gated tools: " + ",".join(kept)]
     (ready,) = ready_lines(launch)
-    assert ready.endswith(" destructive=True tools=158")
-    assert messages.index(gated_lines(launch)[0]) < messages.index(held) < messages.index(ready)
+    assert messages.index(gated_lines(launch)[0]) < messages.index(HELD_LINE) < messages.index(ready)
+    return ready
+
+
+def test_a_list_with_held_names_starts_with_one_warning_between_the_gated_and_ready_lines(launch, monkeypatch):
+    declared = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive")
+    listed = [name for name in declared if name != "delete_contact"]
+    ready = _held_list_start(launch, monkeypatch, listed)
+    assert ready.endswith(" destructive=True tools=159")  # 144 regular tools and the 15 gated ones the list names that are not held
+
+
+def test_a_held_set_with_a_list_that_names_delete_contact_registers_it_next_to_the_other_gated_tools(launch, monkeypatch):
+    declared = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive")
+    ready = _held_list_start(launch, monkeypatch, declared)
+    assert ready.endswith(" destructive=True tools=160")
+    assert "delete_contact" in gated_lines(launch)[0].split(": ", 1)[1].split(",")
 
 
 @pytest.mark.parametrize(
@@ -584,6 +667,8 @@ def test_the_provider_is_built_with_the_four_arguments_main_passes(monkeypatch, 
         def run(self, **kwargs):
             seen["run"] = kwargs
 
+    monkeypatch.setattr(fastmcp_http, "StreamableHTTPSessionManager", fastmcp_http.StreamableHTTPSessionManager)  # main() swaps it
+    monkeypatch.setattr(fastmcp.settings, "check_for_updates", fastmcp.settings.check_for_updates)
     monkeypatch.setattr(main_module, "APP_DIR", tmp_path)
     monkeypatch.setattr(main_module, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setattr(main_module.logging, "basicConfig", lambda **kwargs: None)
@@ -605,3 +690,87 @@ def test_main_py_and_this_file_hold_no_em_or_en_dash():
     for path in (REPO_ROOT / "main.py", Path(__file__)):
         text = path.read_text(encoding="utf-8")
         assert EM_DASH not in text and EN_DASH not in text, path.name
+
+
+# --------------------------------------------------------------------------
+# No request to pypi.org at start, and idle MCP sessions are freed
+# --------------------------------------------------------------------------
+
+
+def test_a_start_turns_the_fastmcp_update_check_off_so_no_request_goes_to_pypi(launch, monkeypatch):
+    from fastmcp.utilities import version_check
+
+    fetched = []
+    monkeypatch.setattr(version_check, "_fetch_latest_version", lambda *a, **k: fetched.append(a) or "99.0.0")
+    monkeypatch.setattr(version_check, "_read_cache", lambda *a, **k: (None, 0))
+    monkeypatch.setattr(fastmcp.settings, "check_for_updates", "stable")  # what the process would have without main()
+    assert version_check.check_for_newer_version() == "99.0.0" and fetched  # the check does reach out when it is on
+    fetched.clear()
+    launch.main()
+    assert fastmcp.settings.check_for_updates == "off"
+    assert version_check.check_for_newer_version() is None and fetched == []  # the banner's check now asks nobody
+
+
+def test_the_session_manager_gets_an_idle_timeout_in_stateful_mode_only(launch):
+    launch.main()
+    manager = fastmcp_http.StreamableHTTPSessionManager
+    app = types.SimpleNamespace()
+    stateful = manager(app=app)
+    assert stateful.session_idle_timeout == oauth_guard.SESSION_IDLE_TIMEOUT_SECONDS and stateful.stateless is False
+    assert manager(app=app, session_idle_timeout=5).session_idle_timeout == 5  # an explicit value is not overridden
+    assert manager(app=app, stateless=True).session_idle_timeout is None  # mcp refuses a timeout in stateless mode
+    assert 0 < oauth_guard.SESSION_IDLE_TIMEOUT_SECONDS <= 24 * 3600
+    oauth_guard.limit_idle_sessions(1)  # a second call sets a new limit and does not stack classes
+    assert fastmcp_http.StreamableHTTPSessionManager(app=app).session_idle_timeout == 1
+    assert fastmcp_http.StreamableHTTPSessionManager.__mro__[2] is manager.__mro__[2]
+
+
+def test_a_start_refuses_when_the_installed_mcp_cannot_limit_idle_sessions(launch, monkeypatch):
+    class Old:
+        def __init__(self, app, event_store=None):
+            pass
+
+    monkeypatch.setattr(fastmcp_http, "StreamableHTTPSessionManager", Old)
+    with pytest.raises(SystemExit) as info:
+        launch.main()
+    assert info.value.code == 1 and launch.served == []
+    assert any("session_idle_timeout" in m and m.endswith("refusing to start") for m in launch.errors())
+
+
+@pytest.mark.anyio
+async def test_an_idle_session_is_freed_and_activity_keeps_it_alive(launch, monkeypatch):
+    import anyio
+
+    monkeypatch.setattr(oauth_guard, "SESSION_IDLE_TIMEOUT_SECONDS", 1.0)
+    document = version_1_document()
+    access = next(iter(document["access_tokens"]))
+    put_state(launch.state_dir, json.dumps(document, indent=2).encode())
+    launch.main()
+    created = []
+    base = fastmcp_http.StreamableHTTPSessionManager
+
+    class Spy(base):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+    monkeypatch.setattr(fastmcp_http, "StreamableHTTPSessionManager", Spy)  # to see the manager the app builds
+    headers = {**MCP_HEADERS, "Authorization": f"Bearer {access}"}
+    app, http = await http_get_app(launch.servers[-1])
+    async with app.router.lifespan_context(app), http:
+        opened = await http.post("/mcp", headers=headers, json=INITIALIZE)
+        assert opened.status_code == 200
+        session = {**headers, "mcp-session-id": opened.headers["mcp-session-id"]}
+        ping = {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+        await http.post("/mcp", headers=session, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+        manager = created[-1]
+        assert manager.session_idle_timeout == 1.0 and len(manager._server_instances) == 1
+        for _ in range(2):  # each request pushes the deadline back: the session outlives its first second
+            await anyio.sleep(0.6)
+            assert (await http.post("/mcp", headers=session, json=ping)).status_code == 200
+        await anyio.sleep(2.0)  # no request for twice the timeout
+        assert manager._server_instances == {}  # freed, not kept for the life of the process
+        gone = await http.post("/mcp", headers=session, json=ping)
+        assert gone.status_code == 404  # the client is told to start a new session, as after a restart
+        again = await http.post("/mcp", headers=headers, json=INITIALIZE)
+        assert again.status_code == 200 and again.headers["mcp-session-id"] != opened.headers["mcp-session-id"]

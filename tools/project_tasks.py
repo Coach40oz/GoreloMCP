@@ -681,11 +681,11 @@ async def create_task_approval(
         list[StrictId],
         Field(
             description="Approver contact ids (list_contacts): active contacts of the task's client that carry an "
-            "approver contact tag. At least one."
+            "approver contact tag (update_contact tag_ids can add one). At least one."
         ),
     ],
 ) -> dict:
-    """Ask contacts to approve something on a task and return the approval. Each contact must be an active contact of the task's client AND carry an approver contact tag; tags are set in the Gorelo UI (the API cannot set them), and an ineligible contact is rejected before anything is written. Approvers start Pending: get_task_approval has the status.
+    """Ask contacts to approve something on a task and return the approval. Each contact must be an active contact of the task's client AND carry an approver contact tag; the mark is set in the Gorelo UI, so ask the user which tag; update_contact(tag_ids=<complete list + it>) adds it. An ineligible contact is rejected before anything is written. Approvers start Pending: get_task_approval has the status.
     Side effects: creates the approval and puts the task into a waiting-on-contact state. Gorelo does not say whether creating it notifies the approvers, so tell the user they may be notified before you create one. The request text is posted with create_project_comment (task_id, conversation_type="approval", conversation_id = this Id), which emails the approvers. If the result is {Id, warning} the approval exists: do not create it again.
     """
     ids = _task_ids(project_id, task_id)
@@ -932,7 +932,9 @@ async def update_task_comment(
         str, Field(description="Id of a PRIVATE task comment (list_project_comments with task_id).")
     ],
     body: Annotated[
-        str | None, Field(description="New comment body as HTML, not blank. It replaces the text; it cannot be cleared.")
+        str | None, Field(
+            description="New comment body as HTML, not blank. It replaces the text; it cannot be cleared. Write a literal < or > as &lt; / &gt;: text in angle brackets is read as a tag and lost."
+        )
     ] = None,
     attachments: Annotated[
         list[CommentAttachment] | None,

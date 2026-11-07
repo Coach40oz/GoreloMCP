@@ -25,6 +25,8 @@ Rules that shape the code (the evidence is in docs/API-OBSERVED-BEHAVIOR.md and 
 
 * BillableStatusId is 1 Billable, 2 No charge, 3 Non-billable (match on Id, never on Name). Durations are
   decimal hours. Datetimes are UTC instants and always go through utc_iso (an offset is required).
+* actual_hours and distance are strict numbers (Annotated[float, Strict()] with a bound): FastMCP's default lax mode would
+  turn JSON true into 1.0 and false into 0.0 before the tool ran, so distance=false would be sent as a distance of 0.
 * Every integer id parameter is a StrictId (JSON true, "5" or 5.0 is refused by the schema) and is then
   range-checked by positive_id / positive_ids; GUID parameters go through guid / guids.
 * ServiceLineId null is not the same as ServiceLineId omitted. Omitted means "default it" on create and
@@ -63,7 +65,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastmcp import Context
-from pydantic import Field
+from pydantic import Field, Strict
 
 from gorelo_client import GoreloAPIError
 from tools._common import (
@@ -375,7 +377,7 @@ async def create_time_entry(
     ] = None,
     ended_on: Annotated[str | None, Field(description="End, later than started_on.")] = None,
     actual_hours: Annotated[
-        float | None, Field(description="Decimal hours worked, above 0. Do not pre-round.")
+        float | None, Strict(), Field(gt=0, description="Decimal hours worked, above 0. Do not pre-round.")
     ] = None,
     billable_status_id: Annotated[
         StrictId | None,
@@ -404,7 +406,7 @@ async def create_time_entry(
         ),
     ] = False,
     comment: Annotated[str | None, Field(description="Free-text note.")] = None,
-    distance: Annotated[float | None, Field(description="Distance travelled, 0 or more.")] = None,
+    distance: Annotated[float | None, Strict(), Field(ge=0, description="Distance travelled, 0 or more.")] = None,
     attachments: Annotated[
         list[dict[str, str]] | None,
         Field(
@@ -487,7 +489,9 @@ async def update_time_entry(
     time_entry_id: Annotated[StrictId, Field(description="Time entry id (list_time_entries).")],
     started_on: Annotated[str | None, Field(description="New start (ISO 8601 with UTC offset).")] = None,
     ended_on: Annotated[str | None, Field(description="New end, after the start.")] = None,
-    actual_hours: Annotated[float | None, Field(description="New duration in decimal hours, above 0.")] = None,
+    actual_hours: Annotated[
+        float | None, Strict(), Field(gt=0, description="New duration in decimal hours, above 0.")
+    ] = None,
     billable_status_id: Annotated[
         StrictId | None, Field(description="1 Billable, 2 No charge, 3 Non-billable.")
     ] = None,
@@ -506,7 +510,7 @@ async def update_time_entry(
     comment: Annotated[
         str | None, Field(description="New note; to erase the note use clear_comment.")
     ] = None,
-    distance: Annotated[float | None, Field(description="Distance travelled, 0 or more.")] = None,
+    distance: Annotated[float | None, Strict(), Field(ge=0, description="Distance travelled, 0 or more.")] = None,
     remove_from_contract: Annotated[
         bool,
         Field(

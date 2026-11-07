@@ -1790,7 +1790,7 @@ async def test_a_move_whose_read_back_is_not_a_usable_record_of_the_asset_return
             "applied. Verify with a read before retrying.",
         ),
         (
-            httpx.ConnectError("refused"),
+            httpx.ReadError("reset"),
             "Gorelo did not confirm update_custom_asset (the connection failed). The change may or may not have been "
             "applied. Verify with a read before retrying.",
         ),

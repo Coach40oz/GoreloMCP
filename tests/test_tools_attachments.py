@@ -57,12 +57,14 @@ TICKET_NOTE = (
 )
 TASK_NOTE = (
     "The url carries a time-limited access token. Pass name and url together, unchanged, as one entry of the "
-    "attachments of create_project_comment with project_id and task_id; do not store the url. "
+    "attachments of create_project_comment with project_id and task_id (a new comment) or update_task_comment (a private "
+    "comment that exists: send its complete list, the current files and this one); do not store the url. "
     "Until a comment carries it the file stays orphaned on the record."
 )
 PROJECT_NOTE = (
     "The url carries a time-limited access token. Pass name and url together, unchanged, as one entry of the "
-    "attachments of create_project_comment with project_id; do not store the url. "
+    "attachments of create_project_comment with project_id (a new comment) or update_project_comment (a private comment "
+    "that exists: send its complete list, the current files and this one); do not store the url. "
     "Until a comment carries it the file stays orphaned on the record."
 )
 DOCUMENT_NOTE = (
@@ -300,10 +302,10 @@ async def test_the_result_carries_gorelos_name_and_url_unchanged_with_the_note(s
 @pytest.mark.parametrize(
     "kind, note, absent",
     [
-        ("ticket", TICKET_NOTE, ("create_project_comment", "project_id", "task_id")),
-        ("task", TASK_NOTE, ("create_ticket_comment",)),
-        ("project", PROJECT_NOTE, ("create_ticket_comment", "task_id")),
-        ("document", DOCUMENT_NOTE, ("create_ticket_comment", "create_project_comment", "project_id", "task_id")),
+        ("ticket", TICKET_NOTE, ("create_project_comment", "update_task_comment", "update_project_comment", "project_id", "task_id")),
+        ("task", TASK_NOTE, ("create_ticket_comment", "update_project_comment")),
+        ("project", PROJECT_NOTE, ("create_ticket_comment", "task_id", "update_task_comment")),
+        ("document", DOCUMENT_NOTE, ("create_ticket_comment", "create_project_comment", "update_task_comment", "update_project_comment", "project_id", "task_id")),
     ],
 )
 async def test_the_next_step_note_is_built_from_the_item_type(server, mock_gorelo, kind, note, absent):
@@ -505,7 +507,8 @@ async def test_a_task_or_project_upload_is_refused_locally_when_the_projects_too
     text = await refused(server, mock_gorelo, text_upload(item_type=kind), "item_type", "GORELO_TOOLSETS")
     assert text.startswith(f"item_type: a {kind} upload needs the projects toolset, which is not enabled on this server")
     assert "add it to GORELO_TOOLSETS" in text
-    assert "create_project_comment is a projects tool" in text  # why: nothing could attach the file afterwards
+    # why: nothing could attach the file afterwards (the new-comment tool and the edit tool of the item are projects tools)
+    assert f"create_project_comment and update_{kind}_comment are projects tools" in text
     assert "cannot be deleted through the API, so nothing was uploaded" in text
     assert text.endswith("Tell the user.")
 
@@ -848,10 +851,21 @@ async def test_a_timeout_is_unconfirmed_and_is_not_retried(server, mock_gorelo):
 
 
 async def test_a_connection_failure_is_unconfirmed_and_is_not_retried(server, mock_gorelo):
-    mock_gorelo.on("POST", UPLOAD, httpx.ConnectError("refused"))
+    mock_gorelo.on("POST", UPLOAD, httpx.ReadError("reset"))  # made, then lost: the file may be stored
     text = await call_tool_error(server, "upload_attachment", text_upload())
     assert_upload_advice(text, "the connection failed")
     assert len(mock_gorelo.requests) == 1
+
+
+async def test_a_connection_that_was_never_made_stored_nothing_and_says_so(server, mock_gorelo):
+    # httpx.ConnectError: nothing reached Gorelo, so "the file may already be stored" would be wrong
+    mock_gorelo.on("POST", UPLOAD, httpx.ConnectError("refused"))
+    text = await call_tool_error(server, "upload_attachment", text_upload())
+    assert text == (
+        "Gorelo could not be reached for upload_attachment (the connection was never established). "
+        "Nothing was sent, so repeating it is safe."
+    )
+    assert "may already be stored" not in text and len(mock_gorelo.requests) == 1
 
 
 async def test_a_gateway_error_is_unconfirmed_and_is_not_retried(server, mock_gorelo):

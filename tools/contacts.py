@@ -1,6 +1,6 @@
-"""Contacts: list, read, create, update and the contact tags (toolset "core").
+"""Contacts: list, read, create, update, delete and the contact tags (toolset "core").
 
-Tools: list_contacts, get_contact, create_contact, update_contact, list_contact_tags.
+Tools: list_contacts, get_contact, create_contact, update_contact, delete_contact (gated), list_contact_tags.
 
 Ops owned by this module:
 
@@ -9,6 +9,7 @@ Ops owned by this module:
     GET /v1/contacts/{contactId}
     POST /v1/contacts
     PATCH /v1/contacts/{contactId}
+    DELETE /v1/contacts/{contactId}
 
 Contract notes (observed on 2026-10-01 and 2026-10-24, see docs/API-OBSERVED-BEHAVIOR.md):
 
@@ -74,17 +75,34 @@ Contract notes (observed on 2026-10-01 and 2026-10-24, see docs/API-OBSERVED-BEH
   record raises as before, with no note). create_contact refuses a region code passed without its phone, in the same
   words, before any request. A phone still needs its region code in both tools.
 
-There is no delete tool: DELETE /v1/contacts/{contactId} is in FORBIDDEN_OPS.
+* DELETE /v1/contacts/{contactId}. Measured (live, 2026-10-31, on a throwaway contact): 200 with Data holding only the
+  contact's Id (DeleteContactResult); afterwards GET of the contact answered 404 and the client's contact list no longer held
+  it. A second DELETE of the same id ALSO answered 200 with the same Id, so the answer cannot tell "deleted now" from
+  "already gone". The published text (contract 6c30770dffc0) says: "The contact is marked inactive, not removed, so its
+  history on tickets and conversations stays intact while it disappears from every list", and "A contact still attached to
+  an unclosed ticket, as its primary contact or in its secondary contacts, cannot be deleted, and the 409 message says how
+  many tickets are holding it. [...] this endpoint will not edit a caller's tickets as a side effect, so it refuses and leaves
+  the reassignment to the caller. Deleting an already-deleted contact succeeds". So the texts say only what was measured
+  (a get answers 404 right after the delete) and what the published text says (marked inactive, history kept), and neither
+  "removed for good" nor "not set inactive". delete_contact (gated since 1.5.2, kind destructive, always confirm=true)
+  reads the contact first (a missing one is a clear not-found error, nothing is sent), then deletes, requires the answer's Id
+  to equal the contact_id (else a write-unconfirmed shape error) and returns what the read showed, with deleted true. A 409
+  is worded the way the contract words it: the contact is the primary or a secondary contact of a ticket that is not closed;
+  reassign it on those tickets (or close them) and retry. The tool does NOT claim that Gorelo refuses to delete a client's
+  primary or billing contact: that was never measured. Deleting clients, tickets, agent assets, custom assets and contracts
+  stays in FORBIDDEN_OPS.
 """
 
 from typing import Annotated, Any, Literal, get_args
 
 from fastmcp import Context
+from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from gorelo_client import GoreloAPIError
 from tools._common import (
     MAX_ID,
+    StrictBool,
     StrictId,
     build_body,
     clamp_page_size,
@@ -93,6 +111,7 @@ from tools._common import (
     csv_ids,
     describe_value,
     expect_object,
+    format_gorelo_error,
     gorelo_tool,
     list_result,
     non_empty,
@@ -100,6 +119,7 @@ from tools._common import (
     positive_id,
     positive_ids,
     region_code,
+    require_confirm,
     utc_iso,
 )
 
@@ -108,6 +128,9 @@ TAGS_OP = "GET /v1/contacts/tags"
 GET_OP = "GET /v1/contacts/{contactId}"
 CREATE_OP = "POST /v1/contacts"
 UPDATE_OP = "PATCH /v1/contacts/{contactId}"
+DELETE_OP = "DELETE /v1/contacts/{contactId}"
+HTTP_NOT_FOUND = 404
+HTTP_CONFLICT = 409
 
 SINCE_HELP = "ISO 8601 with UTC offset, e.g. 2026-10-01T00:00:00Z."
 
@@ -442,7 +465,7 @@ async def create_contact(
     ] = None,
 ) -> dict:
     """Create a contact under a client; returns the created contact record.
-    This tool always creates a contact for a client, never a client-less temporary one. Only client_id, first_name, last_name and primary_email are required; nothing else is inferred or defaulted. Check list_contacts first for a duplicate. Side effects: creates a real contact at once; this server cannot delete contacts, so a mistaken one is removed in the Gorelo app.
+    This tool always creates a contact for a client, never a client-less temporary one. Only client_id, first_name, last_name and primary_email are required; nothing else is inferred or defaulted. Check list_contacts first for a duplicate. Side effects: creates a real contact at once; a mistaken one is removed with delete_contact, when deletes are enabled, or in the Gorelo app.
     """
     cid = positive_id("client_id", client_id)
     non_empty("first_name", first_name)
@@ -745,6 +768,101 @@ async def update_contact(
     if tags is not None:
         _tags_answered(result, tags, UPDATE_OP, "update_contact")
     return {**result, "note": _cleared_note(cleared, result)} if cleared else result
+
+
+# The contact fields delete_contact reports back: what the read showed, because the DELETE answers only the Id.
+DELETED_FIELDS = ("Id", "FirstName", "LastName", "PrimaryEmail", "ClientId")
+
+
+def _delete_unconfirmed(detail: str) -> GoreloAPIError:
+    """The answer of the DELETE cannot be used: the delete was sent and answered 2xx, so it may have been applied and must not
+    be repeated blindly (the write-unconfirmed shape error of the house)."""
+    return GoreloAPIError(
+        f"{DELETE_OP}: {detail}; the delete may have been applied, so verify it with a read before repeating it "
+        "(get_contact: a 404 means the contact is gone)",
+        status=200,
+        op_key=DELETE_OP,
+        kind="shape",
+        write_unconfirmed=True,
+    )
+
+
+def _not_found_error(err: GoreloAPIError, contact_id: int) -> ToolError:
+    """The read before the delete answered 404: nothing was sent to delete (Gorelo's DELETE would have answered 200 anyway)."""
+    suffix = f" [trace {err.trace_id}]" if err.trace_id else ""
+    return ToolError(
+        f"contact_id: no contact has the id {contact_id} (Gorelo answered HTTP 404), so nothing was deleted; it may be "
+        f"deleted already. Find the contact with list_contacts.{suffix}"
+    )
+
+
+def _in_use_error(err: GoreloAPIError, contact_id: int) -> ToolError:
+    """The DELETE answered 409: Gorelo refused and nothing was deleted. Gorelo's own text is kept; the cause and the fix are
+    the published contract's (a ticket that is not closed holds the contact as its primary or a secondary contact)."""
+    text = format_gorelo_error(err, "delete_contact", GET_FIELD_MAP)
+    suffix = f" [trace {err.trace_id}]" if err.trace_id else ""
+    head = text[: -len(suffix)] if suffix and text.endswith(suffix) else text
+    return ToolError(
+        f"{head.rstrip('. ')}. Gorelo refused to delete contact {contact_id}: it is still the primary contact, or one of "
+        "the secondary contacts, of a ticket that is not closed (Gorelo's message says how many tickets). Nothing was "
+        "deleted. Reassign the contact on those tickets, or close them, then try again."
+        f"{suffix}"
+    )
+
+
+@gorelo_tool(toolset="core", kind="destructive", ops=[GET_OP, DELETE_OP], field_map=GET_FIELD_MAP)
+async def delete_contact(
+    ctx: Context,
+    contact_id: Annotated[StrictId, Field(description="Contact id (list_contacts).")],
+    confirm: Annotated[StrictBool, Field(description="Must be true to delete; ask the user first.")] = False,
+) -> dict:
+    """Delete one contact; returns {deleted: true, Id, FirstName, LastName, PrimaryEmail, ClientId} of the contact removed.
+    The contact is read first, so an unknown id is a clear not-found error. Gorelo refuses (409) while the contact is the primary or a secondary contact of a ticket that is not closed (its message counts them): reassign it on those tickets or close them, then retry.
+    Resolve ids first: contact_id -> list_contacts.
+    Side effects: Gorelo marks the contact inactive and keeps its ticket and conversation history; it leaves every list and a get answers 404. This server cannot undo it. Name the contact (its name and client) to the user before asking.
+    Ask the user first; needs confirm=true.
+    """
+    cid = positive_id("contact_id", contact_id)
+    require_confirm(
+        confirm,
+        action=f"delete contact {cid}",
+        effect=(
+            "Gorelo marks the contact inactive (its ticket and conversation history stays) and it leaves every list and read "
+            "at once; this server cannot undo it. Gorelo refuses (409) while the contact is the primary or a secondary "
+            "contact of a ticket that is not closed. Nothing has been sent to Gorelo."
+        ),
+    )
+    client = client_of(ctx)
+    try:
+        record = await client.get_one(GET_OP, path_params={"contactId": cid}, tool="delete_contact")
+    except GoreloAPIError as err:
+        if err.status == HTTP_NOT_FOUND and err.kind == "http":
+            raise _not_found_error(err, cid) from err
+        raise
+    record = expect_object(record, GET_OP, tool="delete_contact")
+    if record.get("Id") != cid or isinstance(record.get("Id"), bool):
+        raise GoreloAPIError(
+            f"{GET_OP}: the record does not carry the Id {cid}, so nothing was deleted",
+            status=200,
+            op_key=GET_OP,
+            kind="shape",
+        )
+    deleted = {key: record.get(key) for key in DELETED_FIELDS}
+    try:
+        data = await client.delete(DELETE_OP, path_params={"contactId": cid}, tool="delete_contact")
+    except GoreloAPIError as err:
+        if err.status == HTTP_CONFLICT and not err.write_unconfirmed:
+            raise _in_use_error(err, cid) from err
+        raise
+    answer = expect_object(data, DELETE_OP, tool="delete_contact")  # write-unconfirmed unless Data is a record
+    answered = answer.get("Id")
+    if isinstance(answered, bool) or answered != cid:
+        if "Id" not in answer:
+            shown = "missing"
+        else:
+            shown = str(answered) if isinstance(answered, int) and not isinstance(answered, bool) else describe_value(answered)
+        raise _delete_unconfirmed(f"the answer's Id is {shown}, expected {cid}")
+    return {**deleted, "deleted": True}
 
 
 @gorelo_tool(toolset="core", kind="read", ops=[TAGS_OP])

@@ -34,13 +34,14 @@ sys.path.insert(0, str(REPO_ROOT))
 
 DESTRUCTIVE_MARK = "only when GORELO_ENABLE_DESTRUCTIVE=1 or lists it by name"
 # What the default settings leave out, in the intro sentence. The flag registers more than the delete and void tools
-# (it also registers create_approved_invoice and approve_invoice, which approve an invoice, share_document, which
-# exposes a document outside Gorelo, and remove_document_related_item, which removes a link), so the sentence names
-# the flag and the tools it gates and never calls it a switch for deletes only. create_contract and update_contract
-# are held back (tools._common.HELD_TOOLS): no setting registers them, so they are not in the catalog.
+# (it also registers create_approved_invoice and approve_invoice, which approve an invoice, create_contract and
+# update_contract, which write a billing contract, share_document, which exposes a document outside Gorelo, and
+# remove_document_related_item, which removes a link), so the sentence names the flag and the tools it gates
+# and never calls it a switch for deletes only. A tool in tools._common.HELD_TOOLS (empty since 1.5.3) is left out of
+# the catalog and named in a "Held back" line of the intro.
 GATED_OFF = (
     "GORELO_ENABLE_DESTRUCTIVE off, so no gated tool: no delete or void tool, no `remove_document_related_item`, "
-    "no `create_approved_invoice`, no `approve_invoice` and no `share_document`"
+    "no `create_approved_invoice`, no `approve_invoice`, no `create_contract`, no `update_contract` and no `share_document`"
 )
 MAX_SENTENCE = 320  # characters; a longer first sentence is cut at a word boundary and ends with "..."
 GENERATE_COMMAND = "uv run --frozen python scripts/gen_tool_catalog.py"
@@ -207,16 +208,16 @@ def render(
         "tools, `remove_document_related_item` (it removes the link between a document and another record), "
         "`create_approved_invoice` (it creates an invoice that is Approved at once, so Gorelo pushes it to the "
         "connected accounting system and may email its recipients), `approve_invoice` (it approves an existing invoice, "
-        "which Gorelo pushes to the connected accounting system at once) and "
+        "which Gorelo pushes to the connected accounting system at once), `create_contract` and `update_contract` (they "
+        "write a billing contract, which can make Gorelo approve and send recurring invoices on its own) and "
         "`share_document` (it turns on a document's public "
         "link or publishes it to the client portal, so anyone who has the link can read it outside Gorelo): "
         f"each is registered {DESTRUCTIVE_MARK} (1 registers all of them, a comma list of tool names registers just those), "
         "and every call also needs `confirm=true`.",
         *(
             [
-                "- Held back: " + ", ".join(f"`{name}`" for name in held) + " (they write a billing contract) exist in the code "
-                "but no setting registers them, not even GORELO_ENABLE_DESTRUCTIVE=1 or a list that names them, until Gorelo "
-                "releases contract writes. They are not in this catalog; `list_contracts` and `get_contract` are."
+                "- Held back: " + ", ".join(f"`{name}`" for name in held) + " exist in the code but no setting registers them, "
+                "not even GORELO_ENABLE_DESTRUCTIVE=1 or a list that names them. They are not in this catalog."
             ]
             if held
             else []

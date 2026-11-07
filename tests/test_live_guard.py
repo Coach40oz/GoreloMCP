@@ -1492,6 +1492,14 @@ def test_an_uptime_check_may_probe_only_the_probe_domain(guard, target):
         ({"Ip": "10.0.0.5"}, "Target.Ip is not allowed"),
         ({"Ip": "10.0.0.5", "Port": 22}, "Target.Ip is not allowed"),
         ({"Url": "https://mcp.example.net/", "Ip": "10.0.0.5"}, "Target.Ip is not allowed"),
+        # Gorelo binds names case-insensitively: a key that is Ip or Url in another case must not slip past the exact-name rules
+        ({"ip": "198.51.100.7"}, "Target.ip is not allowed"),
+        ({"IP": "198.51.100.7"}, "Target.IP is not allowed"),
+        ({"iP": "198.51.100.7", "Url": "https://mcp.example.net/"}, "Target.iP is not allowed"),
+        ({"url": "https://customer.example.org"}, "Target.url is not allowed"),
+        ({"URL": "https://customer.example.org"}, "Target.URL is not allowed"),
+        ({"Url": "https://mcp.example.net/", "port": 22}, "Target.port is not allowed"),
+        ({"Url": "https://mcp.example.net/", "Host": "customer.example.org"}, "Target.Host is not allowed"),
         ("https://mcp.example.net/", "Target must be an object"),
         (["https://mcp.example.net/"], "Target must be an object"),
     ],
@@ -1671,6 +1679,20 @@ INVOICE_BODY = {
 def test_post_invoices_allows_a_draft_for_test_client_with_no_recipients(guard, cleanup_guard, overrides):
     for subject in (guard, cleanup_guard):
         subject.check(build("POST", "/invoices", make(INVOICE_BODY, **overrides)))
+
+
+@pytest.mark.parametrize("key", ["discountPercent", "DISCOUNTPERCENT", "billableStatusId", "taxId", "coaCode", "UNITCOST"])
+def test_a_nested_key_that_is_a_spec_field_in_another_case_is_blocked_on_a_draft_too(guard, cleanup_guard, key):
+    """The backstop for every nested object: no rule looks for the key, yet Gorelo would bind it (names are case-insensitive)."""
+    line = {**INVOICE_LINE, key: 3}
+    for subject in (guard, cleanup_guard):
+        error = refused(subject, build("POST", "/invoices", make(INVOICE_BODY, LineItems=[line])), "spec field name in another spelling")
+        assert f"LineItems[0].{key}" in str(error)
+
+
+def test_the_spelling_backstop_leaves_the_exact_spellings_and_unknown_nested_names_alone(guard):
+    guard.check(build("POST", "/invoices", make(INVOICE_BODY, LineItems=[{**INVOICE_LINE, "DiscountPercent": 10, "TaxId": None}])))
+    guard.check(build("POST", "/invoices", make(INVOICE_BODY, LineItems=[{**INVOICE_LINE, "notAGorelofield": 1}])))
 
 
 @pytest.mark.parametrize(
@@ -2051,6 +2073,12 @@ def test_a_draft_is_still_allowed_with_the_option_under_the_old_rules(approved_m
         ({"LineItems": [make(APPROVED_LINE, DiscountPercent=0)]}, "DiscountPercent must be absent"),
         ({"LineItems": [make(APPROVED_LINE, DiscountPercent=None)]}, "DiscountPercent must be absent"),
         ({"LineItems": [make(APPROVED_LINE, DiscountPercent=10)]}, "DiscountPercent must be absent"),
+        # Gorelo binds names case-insensitively, so a lower-case key reaches the same field: refused like the exact spelling
+        ({"LineItems": [make(APPROVED_LINE, discountPercent=100)]}, "DiscountPercent must be absent from an Approved invoice \\(in any spelling\\)"),
+        ({"LineItems": [make(APPROVED_LINE, DISCOUNTPERCENT=100)]}, "DiscountPercent must be absent from an Approved invoice \\(in any spelling\\)"),
+        ({"LineItems": [make(APPROVED_LINE, billableStatusId=3)]}, "LineItems\\[0\\] may not carry billableStatusId"),
+        ({"LineItems": [make(APPROVED_LINE, coaCode="x")]}, "LineItems\\[0\\] may not carry coaCode"),
+        ({"LineItems": [make(APPROVED_LINE, Discount=1)]}, "LineItems\\[0\\] may not carry Discount"),
         ({"LineItems": [make(APPROVED_LINE, BillableStatusId=2)]}, "BillableStatusId must be absent or exactly the JSON integer 1"),
         ({"LineItems": [make(APPROVED_LINE, BillableStatusId=3)]}, "BillableStatusId must be absent or exactly the JSON integer 1"),
         ({"LineItems": [make(APPROVED_LINE, BillableStatusId=None)]}, "BillableStatusId must be absent or exactly the JSON integer 1"),
@@ -5204,3 +5232,14 @@ async def test_a_product_charge_that_would_be_billable_is_stopped_before_a_reque
         server, "create_product_charge", {"item_id": INVOICE_ITEM, "ticket_id": TICKET_NONE, "quantity": 1}  # BillableStatusId left out: 1 Billable
     )
     assert "BillableStatusId must be exactly the JSON integer 2" in text and mock_gorelo.requests == []
+
+
+def test_the_guard_docs_name_the_one_asset_delete_and_do_not_claim_a_draft_tax_check():
+    text = " ".join(guard_module.__doc__.split())
+    assert "never under /assets/ except DELETE /assets/types/{assetTypeId} of an asset type this run created" in text
+    assert "never under /assets/ (deleting an agent" not in text
+    assert "the guard does not check the TaxId of a Draft line at all" in text
+    assert "GET /api-keys (a credential list; refused in both modes)" in text
+    doc = " ".join(guard_module._is_custom_asset_write.__doc__.split())
+    assert "DELETE under /assets/ and every" not in doc and "_is_asset_type_write" in doc
+    assert "never: this harness never deletes a custom asset" in text

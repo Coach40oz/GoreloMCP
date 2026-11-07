@@ -43,9 +43,11 @@ def test_units_run_the_venv_python_directly_with_a_private_umask(unit):
     assert s["NoNewPrivileges"] == ["true"] and s["ProtectSystem"] == ["strict"] and s["ProtectHome"] == ["true"]
 
 
-def test_main_unit_may_write_only_the_two_state_directories():
+def test_main_unit_may_write_only_the_oauth_state_directory():
     s = settings(MAIN)
-    assert s["ReadWritePaths"] == ["/opt/gorelo-mcp/app/.oauth-state /opt/gorelo-mcp/app/.state"]
+    # .state is the API watcher's directory: no server code writes there, and a writable .state would let a hijacked service
+    # process plant files (symbolic links) for a watcher that may be run as root
+    assert s["ReadWritePaths"] == ["/opt/gorelo-mcp/app/.oauth-state"]
     assert s["ExecStart"] == [f"{VENV_PYTHON} main.py"]
     assert s["EnvironmentFile"] == [APP_ENV]
     assert s["Environment"] == ["PYTHONDONTWRITEBYTECODE=1"]
@@ -60,12 +62,25 @@ def test_watcher_unit_gets_only_the_watcher_env_file_and_writes_only_state():
     assert s["ExecStart"] == [f"{VENV_PYTHON} scripts/watch_gorelo_changelog.py --quiet"]
 
 
-def test_watcher_env_example_holds_only_the_key_the_script_reads():
-    lines = [x for x in (DEPLOY / "watcher.env.example").read_text(encoding="utf-8").splitlines() if x and not x.startswith("#")]
-    assert [x.split("=")[0] for x in lines] == ["GORELO_API_KEY"]
+def test_watcher_env_example_holds_exactly_the_variables_the_script_reads():
+    """The names come from the script's own constants (it reads the environment through them, `env.get(API_KEY_ENV)`), so
+    the example must list each one, the optional ones commented out, and nothing else; the unit's comment names them too."""
     script = (REPO_ROOT / "scripts" / "watch_gorelo_changelog.py").read_text(encoding="utf-8")
-    assert re.findall(r"""environ(?:\.get)?[\[(]\s*["'](\w+)""", script) == []  # it reads the key only through API_KEY_ENV
-    assert 'API_KEY_ENV = "GORELO_API_KEY"' in script
+    read = set(re.findall(r'^(\w+_ENV) = "(\w+)"$', script, re.M))
+    assert {name for const, name in read} == {"GORELO_API_KEY", "GORELO_BASE_URL"}, read
+    for const, name in read:  # each constant is the only way the script names a variable: used with env.get / environ
+        assert len(re.findall(rf"\b{const}\b", script)) >= 2, const
+    # the script reads nothing from the environment by a literal name or in another way than through those constants
+    assert re.findall(r"""(?:environ|getenv|env\.get|env\[)\(?\s*["'](\w+)""", script) == []
+    assert re.findall(r"os\.getenv|os\.environ\b", script) == ["os.environ"]  # only `env = os.environ if env is None ...`
+    example = (DEPLOY / "watcher.env.example").read_text(encoding="utf-8").splitlines()
+    names = {m.group(1) for line in example if (m := re.match(r"#?\s*([A-Z][A-Z0-9_]*)=", line))}
+    assert names == {name for const, name in read}
+    active = [x.split("=")[0] for x in example if x and not x.startswith("#")]
+    assert active == ["GORELO_API_KEY"]  # the key is set; GORELO_BASE_URL is the commented, optional line
+    assert any(line.startswith("# GORELO_BASE_URL=") for line in example)
+    unit = WATCH.read_text(encoding="utf-8")
+    assert "GORELO_API_KEY" in unit and "GORELO_BASE_URL" in unit  # the unit's comment names both
 
 
 @pytest.mark.parametrize("dropin", DROPINS, ids=["main", "watcher"])
@@ -91,3 +106,15 @@ def test_dependencies_are_pinned_with_double_equals():
     for dep in deps:
         name, version = re.match(r"([A-Za-z0-9_.\-]+)", dep).group(1), dep.split("==")[1]
         assert re.search(rf'^name = "{re.escape(name)}"\nversion = "{re.escape(version)}"$', lock, re.M), dep
+
+
+def test_the_locked_certifi_no_longer_trusts_the_compromised_emsign_ecc_root_g3():
+    """GHSA-6q48-6c7w-9gw2: certifi before 2026.10.19 still trusts the emSign ECC Root CA - G3, whose intermediates' keys were
+    compromised. httpx takes its trust store from certifi, and the Gorelo API key travels over that connection."""
+    lock = (REPO_ROOT / "uv.lock").read_text(encoding="utf-8")
+    match = re.search(r'^name = "certifi"\nversion = "([\d.]+)"$', lock, re.M)
+    assert match, "certifi is not in the lock"
+    assert tuple(int(x) for x in match.group(1).split(".")) >= (2026, 10, 19), match.group(1)
+    import certifi
+
+    assert "emSign ECC Root CA - G3" not in Path(certifi.where()).read_text(encoding="utf-8")

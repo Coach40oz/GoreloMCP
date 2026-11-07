@@ -8,9 +8,12 @@ WHAT
   then checked against an allowlist BEFORE it leaves the process:
     - reads are allowed, except the invoice PDF export (it records an event);
     - writes are allowed only against the one configured test client (and a second one for
-      email-area tests), and deletes only for records created by this very run;
-    - never agent assets, never contracts, never the test client itself, never the forbidden
-      operations; e-mail goes only to one configured operator contact and address;
+      email-area tests), and deletes only for records created by this very run (plus, with the
+      cleanup option for old leftovers, the clients listed in the site file, name-checked);
+    - the server's forbidden operations stay forbidden in the server itself; the harness
+      deletes only the clients, tickets and contacts it created. It never deletes agent assets,
+      custom assets or contracts, never deletes the test client itself, and never touches API
+      keys; e-mail goes only to one configured operator contact and address;
     - bodies must be single JSON objects with only spec fields; anything unparseable is blocked;
     - the API key goes only to the host of the configured Gorelo address (GORELO_BASE_URL, the US
       host unless it says otherwise); the client-name check and the cleanup use the same address.

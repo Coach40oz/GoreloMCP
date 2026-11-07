@@ -10,7 +10,7 @@ Three layers:
   client does not list (no PATCH, no second GET); otherwise it sends the PATCH and reads the client again (a second GET), and
   checks the fields on that read.
 * The cleanup (always runs): the real _Cleaner behind the real cleanup guard, with a scripted tools client.
-* End to end (runs once update_client reads the client before it writes custom fields): run_matrix against a FakeGorelo that
+* End to end (the real update_client): run_matrix against a FakeGorelo that
   serves custom fields, with the real tools, the real guard and the real cleanup.
 
 The test client is the one client a live run may write a custom field value to, and only through this area, and only while no
@@ -1665,7 +1665,7 @@ async def test_a_run_with_the_flag_records_the_field_in_a_manifest_that_survives
 
 
 # --------------------------------------------------------------------------
-# End to end with the real tools (runs once update_client reads the client before it writes custom fields)
+# End to end with the real tools (the real update_client)
 # --------------------------------------------------------------------------
 
 UPDATE_CLIENT = next(spec for spec in REGISTRY.specs if spec.name == "update_client")
@@ -1673,7 +1673,14 @@ TOOL_READS_FIRST = (
     {"custom_properties", "clear_custom_property_ids"} <= set(inspect.signature(UPDATE_CLIENT.fn).parameters)
     and CLIENT_OP in UPDATE_CLIENT.ops
 )
-needs_tool = pytest.mark.skipif(not TOOL_READS_FIRST, reason="update_client does not read the client before it writes custom fields yet")
+
+
+def test_update_client_still_reads_the_client_before_it_writes_custom_fields():
+    """The end-to-end tests below drive the real update_client. They used to be skipped while the tool lacked these parts; now a change
+    of its signature or of its ops fails here (and in them) instead of turning them into skips."""
+    assert TOOL_READS_FIRST, (sorted(inspect.signature(UPDATE_CLIENT.fn).parameters), sorted(UPDATE_CLIENT.ops))
+    for caller in (write_matrix.area_custom_properties, cleanup._Cleaner._clean_custom_property):
+        assert "clear_custom_property_ids" in inspect.getsource(caller)
 
 
 class PropertiesFake(FakeGorelo):
@@ -1739,7 +1746,6 @@ class PropertiesFake(FakeGorelo):
         return envelope({**client, "CustomProperties": self.custom_properties(client["Id"])})
 
 
-@needs_tool
 async def test_end_to_end_the_area_passes_and_leaves_the_test_client_as_it_was(run, lines):
     fake = PropertiesFake()
     report = await run(fake, areas=["custom_properties"], with_custom_properties=True)
@@ -1764,7 +1770,6 @@ async def test_end_to_end_the_area_passes_and_leaves_the_test_client_as_it_was(r
     assert not fake.mock.unmatched
 
 
-@needs_tool
 async def test_end_to_end_the_unknown_id_is_refused_by_the_tool_after_one_get_and_no_request_carries_it(run):
     fake = PropertiesFake()
     report = await run(fake, areas=["custom_properties"], with_custom_properties=True)
@@ -1775,7 +1780,6 @@ async def test_end_to_end_the_unknown_id_is_refused_by_the_tool_after_one_get_an
     assert report.summary["leftovers"] == 0
 
 
-@needs_tool
 async def test_end_to_end_a_read_the_tool_cannot_use_before_the_negative_update_fails_the_area_and_nothing_is_written(run, lines):
     fake = PropertiesFake()
     original = fake.handlers["GET /v1/clients/{clientId}"]
@@ -1798,7 +1802,6 @@ async def test_end_to_end_a_read_the_tool_cannot_use_before_the_negative_update_
     assert fake.saved.get(TEST_CLIENT, {}) == {} and report.summary["leftovers"] == 0  # the field of the run was cleared before it
 
 
-@needs_tool
 async def test_end_to_end_a_tenant_where_a_custom_field_is_set_is_a_skip_and_no_replace_can_destroy_it(run):
     fake = PropertiesFake(saved={TEST_CLIENT: {40: "Gold"}}, replace=True)
     report = await run(fake, areas=["custom_properties"], with_custom_properties=True)
@@ -1807,7 +1810,6 @@ async def test_end_to_end_a_tenant_where_a_custom_field_is_set_is_a_skip_and_no_
     assert fake.patches == [] and fake.saved[TEST_CLIENT] == {40: "Gold"} and report.ok and report.summary["created"] == 0
 
 
-@needs_tool
 async def test_end_to_end_a_replace_in_a_tenant_with_nothing_set_destroys_nothing_and_the_area_passes(run, lines):
     fake = PropertiesFake(replace=True)
     report = await run(fake, areas=["custom_properties"], with_custom_properties=True)
@@ -1823,7 +1825,6 @@ async def rerun_cleanup(report, fake, make_settings, echo):
     )
 
 
-@needs_tool
 async def test_end_to_end_a_field_that_changes_after_the_tools_checks_fails_the_area_and_the_cleanup_sends_no_write(run, lines, make_settings):
     fake = PropertiesFake()
     original = fake.handlers["GET /v1/clients/{clientId}"]
@@ -1861,7 +1862,6 @@ async def test_end_to_end_a_field_that_changes_after_the_tools_checks_fails_the_
     assert after.ok and fake.saved.get(TEST_CLIENT, {}) == {} and fake.patches[-1] == {"CustomProperties": [{"Id": FIELD, "Value": None}]}
 
 
-@needs_tool
 async def test_end_to_end_the_tools_own_alarm_fails_the_area_with_its_text_cut_of_names_and_the_cleanup_sends_no_write(run, lines):
     fake = PropertiesFake()
     original = fake.handlers["PATCH /v1/clients/{clientId}"]
@@ -1886,7 +1886,6 @@ async def test_end_to_end_the_tools_own_alarm_fails_the_area_with_its_text_cut_o
     assert report.summary["leftovers"] == 1 and area_ops(fake, report)["cleanup"] == ["GET /v1/clients/{clientId}"]
 
 
-@needs_tool
 async def test_end_to_end_the_alarm_words_the_cleanup_looks_for_are_the_ones_the_real_tool_uses(make_settings):
     fake = PropertiesFake(saved={TEST_CLIENT: {FIELD: RUN}})
     original = fake.handlers["PATCH /v1/clients/{clientId}"]
@@ -1905,7 +1904,6 @@ async def test_end_to_end_the_alarm_words_the_cleanup_looks_for_are_the_ones_the
     assert text.startswith(alarm_text(OTHER, "Seats").split(" Tell the user")[0]) and "LEAKED" not in cleanup.without_quotes(text)
 
 
-@needs_tool
 async def test_end_to_end_the_standalone_cleanup_sends_no_write_while_another_custom_field_is_set(tmp_path, make_settings):
     fake = PropertiesFake(saved={TEST_CLIENT: {FIELD: RUN, OTHER: "Somebody's own text"}}, replace=True)
     manifest = recorded_manifest(tmp_path)
@@ -1923,7 +1921,6 @@ async def test_end_to_end_the_standalone_cleanup_sends_no_write_while_another_cu
     assert "Somebody" not in "\n".join(echoed) and "Seats" not in "\n".join(echoed)
 
 
-@needs_tool
 async def test_end_to_end_the_alarm_during_the_standalone_cleanup_is_kept_until_it_is_acknowledged(tmp_path, make_settings):
     fake = PropertiesFake(saved={TEST_CLIENT: {FIELD: RUN}})
     original = fake.handlers["PATCH /v1/clients/{clientId}"]
@@ -1959,7 +1956,6 @@ async def test_end_to_end_the_alarm_during_the_standalone_cleanup_is_kept_until_
     assert last.ok and acknowledged.record("custom_property", FIELD).outcome == "already unset (IsSet false), nothing to clear"
 
 
-@needs_tool
 async def test_end_to_end_a_run_whose_cleanup_meets_the_alarm_ends_with_a_summary_that_names_the_ids_and_not_a_rerun(run, lines):
     fake = PropertiesFake()
     get = fake.handlers["GET /v1/clients/{clientId}"]
@@ -1995,7 +1991,6 @@ async def test_end_to_end_a_run_whose_cleanup_meets_the_alarm_ends_with_a_summar
     assert lines[-1] == "result: FAILED" and "LEAKED" not in "\n".join(lines) and "Seats" not in "\n".join(lines)
 
 
-@needs_tool
 async def test_end_to_end_a_run_that_stops_after_the_set_has_its_field_cleared_by_the_cleanup(run, lines):
     fake = PropertiesFake()
     original = fake.handlers["GET /v1/clients/{clientId}"]
@@ -2020,7 +2015,6 @@ async def test_end_to_end_a_run_that_stops_after_the_set_has_its_field_cleared_b
     assert report.cleanup.ok and report.summary["leftovers"] == 0 and not report.ok  # the area failed, nothing is left over
 
 
-@needs_tool
 async def test_end_to_end_a_second_read_that_fails_after_the_set_fails_the_area_and_the_cleanup_clears_the_field(run, lines):
     fake = PropertiesFake()
     original = fake.handlers["GET /v1/clients/{clientId}"]
@@ -2043,7 +2037,6 @@ async def test_end_to_end_a_second_read_that_fails_after_the_set_fails_the_area_
     assert record.cleaned and record.outcome == cleanup.CUSTOM_PROPERTY_CLEARED and report.summary["leftovers"] == 0
 
 
-@needs_tool
 async def test_end_to_end_an_update_that_gorelo_ignores_fails_the_area_and_the_cleanup_finds_nothing_to_clear(run, lines):
     fake = PropertiesFake()
     original = fake.handlers["PATCH /v1/clients/{clientId}"]
@@ -2065,7 +2058,6 @@ async def test_end_to_end_an_update_that_gorelo_ignores_fails_the_area_and_the_c
     assert record.cleaned and record.outcome == "already unset (IsSet false), nothing to clear" and report.summary["leftovers"] == 0
 
 
-@needs_tool
 async def test_end_to_end_an_interrupted_run_has_its_field_cleared_by_the_cleanup_that_runs_in_finally(run, lines, monkeypatch):
     fake = PropertiesFake()
 
@@ -2087,7 +2079,6 @@ async def test_end_to_end_an_interrupted_run_has_its_field_cleared_by_the_cleanu
     assert any(line.startswith(f"  cleaned    custom_property {FIELD} ") and line.endswith(f"({cleanup.CUSTOM_PROPERTY_CLEARED})") for line in lines)
 
 
-@needs_tool
 async def test_end_to_end_a_field_somebody_changed_in_between_is_left_alone_and_reported(run, lines):
     fake = PropertiesFake()
     original = fake.handlers["PATCH /v1/clients/{clientId}"]
@@ -2108,7 +2099,6 @@ async def test_end_to_end_a_field_somebody_changed_in_between_is_left_alone_and_
     assert lines[-1] == "result: FAILED"
 
 
-@needs_tool
 async def test_end_to_end_a_required_field_gorelo_will_not_clear_is_a_leftover_naming_the_field_and_the_client(run, lines):
     fake = PropertiesFake(required={FIELD})
     report = await run(fake, areas=["custom_properties"], with_custom_properties=True)
@@ -2122,7 +2112,6 @@ async def test_end_to_end_a_required_field_gorelo_will_not_clear_is_a_leftover_n
     ) in leftover
 
 
-@needs_tool
 async def test_end_to_end_a_tenant_without_a_usable_field_is_a_skip_and_writes_nothing(run):
     fake = PropertiesFake(fields=[{"Id": 7, "Variable": "seats", "Name": "Seats", "Type": {"Id": 2, "Name": "Number"}, "default": None}])
     report = await run(fake, areas=["custom_properties"], with_custom_properties=True)
@@ -2131,7 +2120,6 @@ async def test_end_to_end_a_tenant_without_a_usable_field_is_a_skip_and_writes_n
     assert fake.patches == [] and report.ok and report.summary["created"] == 0
 
 
-@needs_tool
 async def test_end_to_end_the_flag_does_not_make_any_other_area_write_the_test_client(run):
     fake = PropertiesFake()
     report = await run(fake, with_custom_properties=True, skip_email=True)

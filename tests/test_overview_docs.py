@@ -193,7 +193,7 @@ def unquote(cell: str) -> str:
 # --------------------------------------------------------------------------
 
 
-# The tools a server registers: create_contract and update_contract are held back (tools._common.HELD_TOOLS) and the document does not count them.
+# The tools a server registers: the tools in tools._common.HELD_TOOLS (empty in 1.6.0) are not counted.
 SPECS = [spec for spec in REGISTRY.specs if not REGISTRY.is_held(spec.name)]
 
 
@@ -450,6 +450,25 @@ def test_the_gated_tools_it_lists_are_the_registry_destructive_tools():
     assert line is not None, "the overview no longer lists the gated tools"
     listed = set(re.findall(r"`([^`]+)`", line.split("): ", 1)[1]))
     assert listed == {spec.name for spec in SPECS if spec.kind == "destructive"}
+
+
+def test_the_kind_glossary_names_every_gated_tool_that_is_not_a_delete():
+    row = next((line for line in overview().splitlines() if line.startswith("| Kind |")), None)
+    assert row is not None, "the overview no longer has the Kind row of its glossary"
+    for spec in SPECS:
+        if spec.kind == "destructive" and not spec.name.startswith("delete_"):
+            assert f"`{spec.name}`" in row, f"the Kind row does not name the gated tool {spec.name}"
+
+
+def test_the_summary_of_the_server_rule_about_gated_tools_names_the_kinds_the_instructions_name():
+    from server import INSTRUCTIONS
+
+    rule = next(line for line in INSTRUCTIONS.splitlines() if line.startswith("6. "))
+    kinds = re.search(r"6\. (.+?) tools exist only when", rule).group(1)  # "Delete, void, approved-invoice and contract-write"
+    words = [word for word in re.split(r",\s*|\s+and\s+", kinds.lower()) if word]
+    assert "contract-write" in words and "approved-invoice" in words
+    text = " ".join(overview().split())
+    assert f"{', '.join(words[:-1])} and {words[-1]} tools exist only when enabled" in text, "the overview summarizes rule 6 differently from INSTRUCTIONS"
 
 
 def test_the_forbidden_operations_and_side_effect_gets_it_lists_are_the_codes():

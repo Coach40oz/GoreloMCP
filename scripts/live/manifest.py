@@ -84,10 +84,11 @@ The guard and cleanup read these `details` keys, so the harness must record them
     client_domain      a web domain of the TEST CLIENT (--with-client-domains): client_id and name (mcptest-<run>.example, the reserved
                        .example TLD, which can route no inbound email)
     product_charge     a product charge on a run-created ticket of the test client (--with-product-charges): ticket_id and client_id
-    contract           a contract of the TEST CLIENT (--with-contracts): client_id, labor terms 2 (Hourly) only. A contract cannot be
-                       deleted through the API, so every one is a known residue from the moment it exists: the run archives it
-                       (StatusId 3), a cleanup archives one a stopped run left, and the outcome of an archived one ends with
-                       "(a contract cannot be deleted through the API)", which cleanup counts as known undeletable
+    contract           a contract of the TEST CLIENT (--with-contracts): client_id, labor terms 2 (Hourly) only. This harness
+                       and server never delete a contract (the API has the DELETE; FORBIDDEN_OPS and the guard refuse it), so every one
+                       is a known residue from the moment it exists: the run archives it (StatusId 3), a cleanup archives one a stopped
+                       run left, and the outcome of an archived one ends with "(this harness and server never delete a contract:
+                       DELETE /v1/contracts/{contractId} is forbidden)", which cleanup counts as known undeletable
     alert              an EXISTING alert of the test client that the alert_status area dismisses and restores. Not a create: like
                        custom_property the record says what the cleanup must undo, so it is written BEFORE the first write. details:
                        client_id (the test client; the guard refuses any other alert), status_before (1, New), and the label names the

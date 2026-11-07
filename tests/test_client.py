@@ -96,7 +96,6 @@ def test_constants():
     assert FORBIDDEN_OPS == frozenset(
         {
             "DELETE /v1/clients/{clientId}",
-            "DELETE /v1/contacts/{contactId}",
             "DELETE /v1/tickets/{ticketId}",
             "DELETE /v1/assets/agents/{agentAssetId}",
             "DELETE /v1/assets/custom/{customAssetId}",
@@ -423,7 +422,6 @@ async def test_server_errors_on_writes_are_flagged_unconfirmed_but_reads_are_not
 
 FORBIDDEN_CALLS = {
     "DELETE /v1/clients/{clientId}": {"clientId": 1},
-    "DELETE /v1/contacts/{contactId}": {"contactId": 1},
     "DELETE /v1/tickets/{ticketId}": {"ticketId": "11111111-1111-1111-1111-111111111111"},
     "DELETE /v1/assets/agents/{agentAssetId}": {"deviceId": "11111111-1111-1111-1111-111111111111"},
     "DELETE /v1/assets/custom/{customAssetId}": {"customAssetId": "11111111-1111-1111-1111-111111111111"},
@@ -1610,14 +1608,39 @@ async def test_a_post_timeout_is_not_retried_and_is_marked_write_unconfirmed(cli
         pytest.param(lambda c: c.post_multipart("POST /v1/attachments", files={"file": ("a", b"x")}, form={"itemType": "Ticket"}, tool="t"), id="multipart"),
     ],
 )
-@pytest.mark.parametrize("failure, kind", [(httpx.ConnectError("refused"), "transport"), (httpx.WriteTimeout("slow"), "timeout")])
+@pytest.mark.parametrize("failure, kind", [(httpx.ReadError("reset"), "transport"), (httpx.WriteTimeout("slow"), "timeout")])
 async def test_other_writes_that_hit_a_transport_error_are_unconfirmed(client_factory, mock_gorelo, call, failure, kind):
+    # the connection was made, so the request may have reached Gorelo
     for method, path in (("PATCH", "/v1/time-entries/1"), ("DELETE", "/v1/time-entries/1"), ("POST", "/v1/attachments")):
         mock_gorelo.on(method, path, failure)
     async with client_factory() as client:
         with pytest.raises(GoreloAPIError) as info:
             await call(client)
     assert info.value.kind == kind and info.value.write_unconfirmed is True and len(mock_gorelo.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda c: c.post(CREATE_CLIENT, json_body={"Name": "x", "Location": {"Name": "y"}}, tool="create_client"), id="post"),
+        pytest.param(lambda c: c.patch("PATCH /v1/time-entries/{timeEntryId}", path_params={"timeEntryId": 1}, json_body={"Comment": "x"}, tool="t"), id="patch"),
+        pytest.param(lambda c: c.delete("DELETE /v1/time-entries/{timeEntryId}", path_params={"timeEntryId": 1}, tool="t"), id="delete"),
+        pytest.param(lambda c: c.post_multipart("POST /v1/attachments", files={"file": ("a", b"x")}, form={"itemType": "Ticket"}, tool="t"), id="multipart"),
+    ],
+)
+async def test_a_write_whose_connection_was_never_made_was_not_sent_and_is_not_unconfirmed(client_factory, mock_gorelo, fake_sleep, call):
+    # httpx.ConnectError: nothing reached Gorelo, the same premise on which a read is sent once more. A write is still
+    # never sent again by the client (one arrival), but it is NOT write_unconfirmed and the text says repeating it is safe.
+    for method, path in (("POST", "/v1/clients"), ("PATCH", "/v1/time-entries/1"), ("DELETE", "/v1/time-entries/1"), ("POST", "/v1/attachments")):
+        mock_gorelo.on(method, path, httpx.ConnectError("refused"))
+    async with client_factory() as client:
+        with pytest.raises(GoreloAPIError) as info:
+            await call(client)
+    err = info.value
+    assert (err.kind, err.status, err.write_unconfirmed) == ("transport", None, False)
+    assert "the connection to Gorelo could not be established (ConnectError); nothing was sent, so repeating it is safe" in str(err)
+    assert "may or may not" not in str(err) and "Verify with a read" not in str(err)
+    assert len(mock_gorelo.requests) == 1 and fake_sleep.delays == []
 
 
 WRITE_CALLS = {
@@ -1649,7 +1672,12 @@ FAILURES = {
 }
 
 
-@pytest.mark.parametrize("failure_name", sorted(FAILURES))
+# What a write sees: the same failures, except that the connection which is "lost" was made first (a read error), because
+# a connection that was never made is not unconfirmed (see test_a_write_whose_connection_was_never_made_...).
+WRITE_FAILURES = {**FAILURES, "transport": (httpx.ReadError("reset"), "transport")}
+
+
+@pytest.mark.parametrize("failure_name", sorted(WRITE_FAILURES))
 @pytest.mark.parametrize("method", sorted(WRITE_CALLS))
 async def test_a_failed_post_patch_or_delete_is_sent_exactly_once_and_never_waits(
     client_factory, mock_gorelo, fake_sleep, method, failure_name
@@ -1657,7 +1685,7 @@ async def test_a_failed_post_patch_or_delete_is_sent_exactly_once_and_never_wait
     # A write is retried on a 429 only. A timeout, a lost connection and even a 503 that says Retry-After may have
     # reached Gorelo, so repeating the write could apply it twice.
     path, call = WRITE_CALLS[method]
-    failure, kind = FAILURES[failure_name]
+    failure, kind = WRITE_FAILURES[failure_name]
     mock_gorelo.on(method, path, failure)
     async with client_factory() as client:
         with pytest.raises(GoreloAPIError) as info:
@@ -1701,7 +1729,7 @@ def _is_unconfirmed_export(err):
     )
 
 
-@pytest.mark.parametrize("failure, kind", [(httpx.ReadTimeout("slow"), "timeout"), (httpx.ConnectError("refused"), "transport")])
+@pytest.mark.parametrize("failure, kind", [(httpx.ReadTimeout("slow"), "timeout"), (httpx.ReadError("reset"), "transport")])
 async def test_a_pdf_export_that_times_out_or_loses_the_connection_may_already_be_recorded(
     client_factory, mock_gorelo, fake_sleep, failure, kind
 ):
@@ -1712,6 +1740,22 @@ async def test_a_pdf_export_that_times_out_or_loses_the_connection_may_already_b
     assert info.value.kind == kind and _is_unconfirmed_export(info.value), str(info.value)
     assert "nothing was changed" not in str(info.value)
     assert len(mock_gorelo.requests) == 1 and fake_sleep.delays == []  # never retried
+
+
+@pytest.mark.parametrize("name", ["id", "documentId"])
+async def test_a_pdf_export_whose_connection_was_never_made_is_not_recorded_and_is_not_unconfirmed(
+    client_factory, mock_gorelo, fake_sleep, name
+):
+    # nothing reached Gorelo, so no export event exists; the client still sends it once (it never repeats an export itself)
+    spec, key = spec_with_renamed_pdf_placeholder(name)
+    mock_gorelo.on("GET", PDF_PATH, httpx.ConnectError("refused"))
+    async with client_factory(spec=spec) as client:
+        with pytest.raises(GoreloAPIError) as info:
+            await client.get_binary(key, path_params={name: INVOICE}, max_bytes=1000, tool="export_invoice_pdf")
+    err = info.value
+    assert (err.kind, err.write_unconfirmed) == ("transport", False)
+    assert "nothing was sent, so repeating it is safe" in str(err) and EXPORT_NOTE not in str(err)
+    assert len(mock_gorelo.requests) == 1 and fake_sleep.delays == []
 
 
 @pytest.mark.parametrize(
@@ -1859,7 +1903,7 @@ RENAMED_PDF_ANSWERS = [
 
 
 @pytest.mark.parametrize("name", ["id", "documentId"])
-@pytest.mark.parametrize("failure, kind", [(httpx.ReadTimeout("slow"), "timeout"), (httpx.ConnectError("refused"), "transport")])
+@pytest.mark.parametrize("failure, kind", [(httpx.ReadTimeout("slow"), "timeout"), (httpx.ReadError("reset"), "transport")])
 async def test_a_renamed_pdf_export_that_times_out_or_loses_the_connection_may_still_be_recorded(
     client_factory, mock_gorelo, fake_sleep, name, failure, kind
 ):

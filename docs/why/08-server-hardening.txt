@@ -6,9 +6,10 @@ WHAT
       the edge, so the host needs no inbound rule at all; a default-drop inbound firewall is
       advised. The internet can reach only /mcp and the OAuth pages, through the tunnel.
     - Root-owned, read-only code. The application directory belongs to root; the service user
-      can read it and cannot change it. Only the OAuth state directory and the watcher's .state
-      directory are writable (ReadWritePaths with ProtectSystem=strict). A bug or a hijacked
-      process cannot rewrite the code that will run at the next start.
+      can read it and cannot change it. Only the OAuth state directory is writable
+      (ReadWritePaths with ProtectSystem=strict); the watcher's .state directory is writable by the
+      watcher's own unit only, so a hijacked server process cannot plant files there. A bug or a
+      hijacked process cannot rewrite the code that will run at the next start.
     - The venv's Python is run directly (ExecStart is .venv/bin/python main.py), not through uv.
       Nothing re-syncs or writes under the code tree at start.
     - UMask=0077, so files the service creates (the OAuth state) are private to its user.
@@ -38,7 +39,7 @@ WHAT
       (`redirect=`). The web server adds one access line per HTTP request: the visitor's address, the path and the
       query string in full, the HTTP version and the status. The API key and the password are never logged. A filter
       trims FastMCP's own logs: it cuts the argument values out of a validation error, logs an error that carries a
-      summary (the custom field alarm, the attachment refusal) as that summary alone, and redacts `input_value=` text
+      summary (the custom field alarm, the attachment refusals of document and comment edits) as that summary alone, and redacts `input_value=` text
       from messages; other errors are logged as they are.
 
 WHY

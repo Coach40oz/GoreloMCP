@@ -121,6 +121,7 @@ class ReadFake:
         on("/v1/tickets/tags", Items([row(700)]))
         on("/v1/tickets/priorities", Items([row(3)]))
         on("/v1/tickets/sources", Items([row(6)]))
+        on("/v1/tickets/sla/policies", Items([row(50)]))
         on("/v1/tickets", self.list_tickets)
         on("/v1/tickets/{ticketId}", lambda q: envelope(next(t for t in TICKETS if t["Id"] == last(q, 3))))
         on("/v1/tickets/{ticketId}/comments", Pages([row(COMMENT_ID)]))
@@ -280,7 +281,7 @@ def outcomes(report) -> dict[str, smoke.Row]:
 
 def test_the_plan_covers_exactly_the_registered_read_tools_once_get_ticket_three_times_and_get_client_twice():
     reads = smoke.read_tools()
-    assert len(reads) == 88 and "export_invoice_pdf" not in reads
+    assert len(reads) == 89 and "export_invoice_pdf" not in reads
     assert {"list_alerts", "get_invoice", "get_custom_asset", "list_deletions", "export_document_pdf"} <= set(reads)
     assert {name for name, toolset in reads.items() if toolset == "documents"} == {
         "list_documents", "get_document", "export_document_pdf", "list_document_versions", "get_document_version",
@@ -294,7 +295,7 @@ def test_the_plan_covers_exactly_the_registered_read_tools_once_get_ticket_three
         "get_ticket": 3, "get_client": 2, "list_client_locations": 2,
     }
     labels = [case.row for case in smoke.CASES]
-    assert len(labels) == len(set(labels)) == 92
+    assert len(labels) == len(set(labels)) == 93
     assert [case.row for case in smoke.CASES if case.tool == "get_ticket"] == [
         "get_ticket (guid)", "get_ticket (number)", "get_ticket (display number)",
     ]
@@ -321,15 +322,15 @@ async def test_a_full_run_calls_every_read_tool_once_sends_only_gets_and_passes(
     fake = ReadFake()
     report = await run(fake)
     assert report.ok, "\n".join(lines)
-    assert len(report.rows) == 92 and all(r.outcome == smoke.OK for r in report.rows), [
+    assert len(report.rows) == 93 and all(r.outcome == smoke.OK for r in report.rows), [
         (r.label, r.outcome, r.note) for r in report.rows if r.outcome != smoke.OK
     ]
     assert {r.method for r in fake.mock.requests} == {"GET"}
-    # 92 calls with HTTP (88 read tools; the priorities and the sources are network reads since 1.5.0, there are no local cases left)
+    # 93 calls with HTTP (89 read tools, list_sla_policies among them since 1.6.0; the priorities and the sources are network reads since 1.5.0, there are no local cases left)
     # plus the search behind get_ticket by number and by display number
-    assert report.requests == len(fake.mock.requests) == 94 and report.refused == 0
-    assert report.counts() == {smoke.OK: 92, smoke.SCOPE_MISSING: 0, smoke.SKIPPED: 0, smoke.FAILED: 0}
-    assert lines[-1] == "result: PASSED" and "92 checks: 92 ok, 0 scope missing, 0 skipped, 0 FAILED; 94 requests sent" in lines[-2]
+    assert report.requests == len(fake.mock.requests) == 95 and report.refused == 0
+    assert report.counts() == {smoke.OK: 93, smoke.SCOPE_MISSING: 0, smoke.SKIPPED: 0, smoke.FAILED: 0}
+    assert lines[-1] == "result: PASSED" and "93 checks: 93 ok, 0 scope missing, 0 skipped, 0 FAILED; 95 requests sent" in lines[-2]
     assert not fake.mock.unmatched
 
 
@@ -345,8 +346,8 @@ async def test_the_rows_are_printed_as_they_complete_and_make_up_the_rendered_ta
     }
     assert by_start["tool"] == 0  # the header is out before the first request
     assert by_start["health_check"] == 1 and by_start["list_clients"] == 2  # each row appears when its call is done
-    assert by_start["list_form_responses"] == 84  # the forms are not the last any more: 6 document requests and 4 structured follow
-    assert by_start["list_document_related_items"] == 90  # the four structured document reads follow it
+    assert by_start["list_form_responses"] == 85  # the forms are not the last any more: 6 document requests and 4 structured follow
+    assert by_start["list_document_related_items"] == 91  # the four structured document reads follow it
 
 
 async def test_get_ticket_is_called_with_the_guid_the_number_and_the_display_number_of_a_listed_ticket(run):
@@ -795,8 +796,8 @@ async def test_the_requests_are_paced_one_second_apart(run, monkeypatch):
     monkeypatch.setattr(smoke, "Pacer", lambda interval: _env.Pacer(interval, clock=time.clock, sleep=time.sleep))
     assert smoke.PACE_SECONDS == 1.0
     report = await run(ReadFake(), pace=smoke.PACE_SECONDS)
-    assert report.ok and report.requests == 94
-    assert time.sleeps == [1.0] * 93  # one second between two requests, none before the first
+    assert report.ok and report.requests == 95
+    assert time.sleeps == [1.0] * 94  # one second between two requests, none before the first
 
 
 # --------------------------------------------------------------------------
@@ -1042,6 +1043,15 @@ async def test_the_priorities_and_the_sources_are_network_reads_since_1_5_0(run)
         assert outcomes(again)[name].outcome == smoke.FAILED, name
 
 
+async def test_the_sla_policy_list_is_a_network_read_and_a_tenant_without_policies_is_a_good_answer(run):
+    fake = ReadFake()
+    found = outcomes(await run(fake))
+    assert found["list_sla_policies"].outcome == smoke.OK
+    assert "/v1/tickets/sla/policies" in {r.path for r in fake.mock.requests}
+    empty = outcomes(await run(ReadFake(empty={"/v1/tickets/sla/policies"})))
+    assert empty["list_sla_policies"].outcome == smoke.OK  # a tenant may define no SLA policy
+
+
 async def test_a_tenant_with_nothing_behind_the_1_5_0_lists_skips_the_single_reads_and_says_which_list(run):
     fake = ReadFake(
         empty={
@@ -1249,7 +1259,7 @@ async def test_an_active_test_client_gets_an_ok_row_before_the_cases(run, lines)
     assert report.test_client.outcome == smoke.OK and report.test_client.note == "Active (status 1): the write matrix may start"
     assert lines[1].startswith("tool") and lines[2].startswith("test client status") and lines[3].startswith("health_check")
     assert report.render()[:2] == lines[1:3] and "write matrix: BLOCKED" not in "\n".join(lines)
-    assert len(report.rows) == 92  # the status row is not one of the cases: counts and the summary line keep their shape
+    assert len(report.rows) == 93  # the status row is not one of the cases: counts and the summary line keep their shape
 
 
 # --------------------------------------------------------------------------

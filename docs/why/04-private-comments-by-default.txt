@@ -11,8 +11,10 @@ WHAT
   comment is posted into it. Related: creating a ticket with SendTicketCreatedEmail true emails
   the contact, so that option is explicit and described in the tool text.
   The server instructions tell the model to say who will be emailed before posting anything
-  that is not Private. Approvers must be contacts carrying an approver tag, which can only be
-  set in the Gorelo app; the API has no way to set it.
+  that is not Private. Approvers must be contacts carrying an approver tag. The approver mark of a
+  tag is set in the Gorelo app. update_contact with the complete tag list (the contact's
+  current TagIds plus that tag) gives a contact that tag; it has not been tried live whether
+  this makes the contact eligible as an approver.
 
 WHY
   A comment sent to a customer cannot be recalled. A private note that should have been public
@@ -30,6 +32,8 @@ WHERE IN THE CODE
   tools/conversations.py     Module docstring and the comment tools. The conversation type
                              mapping (ConversationTypeId) and the default of Private.
   server.py                  INSTRUCTIONS, rule 5 (who a comment emails).
-  tools/project_tasks.py     The same rule for task and project comments (task comments other
-                             than Private put the task in a waiting-on-contact state).
+  tools/projects.py          The same rule for project comments (create_project_comment, where
+                             the default conversation type 2, Private, is set).
+  tools/project_tasks.py     The same rule for task comments (task comments other than Private
+                             put the task in a waiting-on-contact state).
   docs/API-OBSERVED-BEHAVIOR.md        Where production differed from the published spec.

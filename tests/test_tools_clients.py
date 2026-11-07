@@ -64,7 +64,7 @@ TOOLS = {
     ),
     "update_client": (
         "write", ["GET /v1/clients/{clientId}", "PATCH /v1/clients/{clientId}"], True,
-        ["client_id", "name", "status_id", "billing_name", "alternate_name", "custom_properties", "clear_custom_property_ids", "group_ids", "client_type_id"],
+        ["client_id", "name", "status_id", "billing_name", "alternate_name", "clear_alternate_name", "custom_properties", "clear_custom_property_ids", "group_ids", "client_type_id"],
         ["client_id"],
     ),
     "list_client_locations": (
@@ -299,7 +299,8 @@ def test_the_docstrings_carry_the_documented_facts():
     create = flat(clients_module.create_client.__doc__)
     assert "creates a real client" in create and "cannot delete clients" in create
     update = flat(clients_module.update_client.__doc__)
-    assert "only custom fields can be cleared" in update and "overwrites current values" in update
+    assert "only custom fields and alternate_name (clear_alternate_name, unverified live, so check) can be cleared" in update
+    assert "overwrites current values" in update
     assert "Custom fields: ids from get_client's CustomProperties, values are text whatever the Type" in update
     # a field that already held a value read IsSet true before the update, so the answer cannot prove an ignored one:
     # the model compares the returned Values itself (there is no read before the write)
@@ -1068,24 +1069,118 @@ async def test_update_client_with_nothing_to_change_is_a_local_error(server, moc
     text = await call_tool_error(server, "update_client", {"client_id": 9101})
     assert text == (
         "nothing to update: pass at least one of name, status_id, billing_name, alternate_name, group_ids, "
-        "client_type_id, custom_properties or clear_custom_property_ids (only the fields you pass are changed)"
+        "client_type_id, custom_properties, clear_custom_property_ids or clear_alternate_name (only the fields you pass are changed)"
     )
     assert mock_gorelo.requests == []
 
 
-@pytest.mark.parametrize("param", ["name", "billing_name", "alternate_name"])
+@pytest.mark.parametrize("param", ["name", "billing_name"])
 @pytest.mark.parametrize("blank", ["", "   "])
-async def test_update_client_rejects_blank_text_and_says_gorelo_cannot_clear_client_fields(server, mock_gorelo, param, blank):
+async def test_update_client_rejects_blank_name_and_billing_name_and_says_why_without_claiming_the_api_cannot_clear(server, mock_gorelo, param, blank):
     text = await call_tool_error(server, "update_client", {"client_id": 9101, param: blank})
-    assert text.startswith(f"{param}: must not be empty. Gorelo cannot clear client fields through the API")
-    assert f"omit {param} to keep the current value" in text
+    reason = {
+        "name": "a client always has a name",
+        "billing_name": "the published spec keeps the current value for a null or empty billing name",
+    }[param]
+    assert text == f"{param}: must not be empty; {reason}, so omit {param} to keep the current value"
+    assert "cannot clear client fields" not in text
     assert mock_gorelo.requests == []
 
 
-async def test_update_client_has_no_clear_option_for_the_plain_fields_only_custom_fields_can_be_cleared(server):
+@pytest.mark.parametrize("blank", ["", "   "])
+async def test_update_client_refuses_a_blank_alternate_name_and_points_to_clear_alternate_name(server, mock_gorelo, blank):
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, "alternate_name": blank})
+    assert text == (
+        "alternate_name: must not be empty; to remove the alternate name pass clear_alternate_name=true "
+        "(the published spec says an empty string clears it)"
+    )
+    assert "cannot clear" not in text
+    assert mock_gorelo.requests == []
+
+
+async def test_update_client_clears_the_alternate_name_with_an_empty_string_as_the_spec_says(server, mock_gorelo):
+    # UpdateClientCommand.AlternateName: "Leave null to keep the current value; send an empty string to clear it."
+    # (contract 05200951c89e onward; NOT yet verified live on PATCH /v1/clients/{clientId})
+    mock_gorelo.on("PATCH", CLIENT_9101, envelope(client_record(AlternateName=None)))
+    result = await call_tool(server, "update_client", {"client_id": 9101, "clear_alternate_name": True})
+    request = mock_gorelo.last
+    assert (request.method, request.path, request.query) == ("PATCH", CLIENT_9101, {})
+    assert request.json == {"AlternateName": ""} and len(mock_gorelo.requests) == 1
+    assert "warning" not in result
+
+
+async def test_a_clear_can_ride_along_with_other_changes(server, mock_gorelo):
+    mock_gorelo.on("PATCH", CLIENT_9101, envelope(client_record(AlternateName="")))
+    result = await call_tool(
+        server, "update_client",
+        {"client_id": 9101, "name": "N", "billing_name": "B", "clear_alternate_name": True},
+    )
+    assert mock_gorelo.last.json == {"Name": "N", "BillingName": "B", "AlternateName": ""}
+    assert "warning" not in result
+
+
+@pytest.mark.parametrize("still", ["Old trading name"], ids=["still-set"])
+async def test_a_clear_whose_answer_still_shows_a_name_adds_a_warning(server, mock_gorelo, still):
+    mock_gorelo.on("PATCH", CLIENT_9101, envelope(client_record(AlternateName=still)))
+    result = await call_tool(server, "update_client", {"client_id": 9101, "clear_alternate_name": True})
+    assert result["AlternateName"] == still
+    assert result["warning"] == (
+        "alternate_name was sent as an empty string to clear it (the published spec says that clears it; it has not been "
+        "verified live), but Gorelo's answer still shows an alternate name. Check with get_client and tell the user whether "
+        "it was cleared."
+    )
+    assert still not in result["warning"]
+
+
+async def test_a_clear_whose_answer_has_no_alternate_name_field_adds_a_warning(server, mock_gorelo):
+    record = client_record()
+    record.pop("AlternateName", None)
+    mock_gorelo.on("PATCH", CLIENT_9101, envelope(record))
+    result = await call_tool(server, "update_client", {"client_id": 9101, "clear_alternate_name": True})
+    assert "does not show AlternateName" in result["warning"]
+
+
+async def test_a_plain_update_never_adds_the_clear_warning(server, mock_gorelo):
+    mock_gorelo.on("PATCH", CLIENT_9101, envelope(client_record(AlternateName="Still here")))
+    assert "warning" not in await call_tool(server, "update_client", {"client_id": 9101, "name": "N"})
+
+
+def test_the_clear_warning_is_added_next_to_another_warning_of_the_record():
+    # the custom field path returns its second read, which may carry a warning of its own (a hidden field)
+    record = {"Id": 1, "AlternateName": "Old", "warning": "Custom field(s) 5 could not be read."}
+    out = clients_module._with_clear_warning(record, ["alternate_name"])
+    assert out["warning"].startswith("Custom field(s) 5 could not be read. alternate_name was sent as an empty string")
+    assert clients_module._with_clear_warning(record, []) is record
+
+
+async def test_a_value_and_a_clear_of_the_alternate_name_in_one_call_are_refused_with_no_request(server, mock_gorelo):
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, "alternate_name": "X", "clear_alternate_name": True})
+    assert text == "alternate_name: cannot be given a value and cleared in the same call"
+    assert mock_gorelo.requests == []
+
+
+async def test_clear_alternate_name_false_is_the_same_as_not_asking(server, mock_gorelo):
+    mock_gorelo.on("PATCH", CLIENT_9101, envelope(client_record()))
+    await call_tool(server, "update_client", {"client_id": 9101, "name": "N", "clear_alternate_name": False})
+    assert mock_gorelo.last.json == {"Name": "N"}
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, "clear_alternate_name": False})
+    assert text.startswith("nothing to update: pass at least one of")
+
+
+@pytest.mark.parametrize("bad", ["true", "yes", 1, 0], ids=["text-true", "text-yes", "number-1", "number-0"])
+async def test_clear_alternate_name_is_a_strict_boolean(server, mock_gorelo, bad):
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, "clear_alternate_name": bad})
+    assert "clear_alternate_name" in text and "valid boolean" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_update_client_offers_one_clear_for_the_plain_fields_the_alternate_name_and_says_it_is_unverified(server):
     tool = next(t for t in await list_tools(server) if t.name == "update_client")
     props = tool.inputSchema["properties"]
-    assert "clear_fields" not in props  # name, status, billing name and alternate name still cannot be cleared
+    assert "clear_fields" not in props  # the clear is its own boolean, only for the alternate name
+    assert props["clear_alternate_name"]["type"] == "boolean" and "default" not in props["clear_alternate_name"]
+    assert "not yet verified live" in props["clear_alternate_name"]["description"] and len(props["clear_alternate_name"]["description"]) <= 160
+    assert "clear_alternate_name" not in tool.inputSchema.get("required", [])
     assert "clear_custom_property_ids" in props
 
 
@@ -1237,6 +1332,19 @@ async def test_update_client_saves_custom_properties_as_id_and_value_entries_and
     assert (request.method, request.path, request.query, request.raw_path) == ("PATCH", CLIENT_9101, {}, CLIENT_9101)
     # only custom properties were given, so nothing else is sent (and the client id is in the path only)
     assert request.json == {"CustomProperties": [{"Id": 5, "Value": "Gold"}, {"Id": 9, "Value": "2026-10-14"}]}
+
+
+@pytest.mark.parametrize("shown, warns", [(None, False), ("Old trading name", True)], ids=["cleared", "still-set"])
+async def test_a_clear_of_the_alternate_name_together_with_a_custom_field_sends_both_and_checks_the_second_read(
+    server, mock_gorelo, shown, warns
+):
+    answer = client_with_custom_properties(saved=[5])
+    answer["AlternateName"] = shown
+    arguments = {"custom_properties": [{"id": 5, "value": "Gold"}]}
+    route_update(mock_gorelo, arguments, envelope(answer))
+    result = await call_tool(server, "update_client", {"client_id": 9101, "clear_alternate_name": True, **arguments})
+    assert mock_gorelo.calls("PATCH")[-1].json == {"AlternateName": "", "CustomProperties": [{"Id": 5, "Value": "Gold"}]}
+    assert ("still shows an alternate name" in result.get("warning", "")) is warns
 
 
 async def test_update_client_clears_a_custom_field_with_a_real_json_null(server, mock_gorelo):
@@ -2642,7 +2750,7 @@ def not_confirmed(
 
 PATCH_FAILURES = [
     pytest.param(httpx.ReadTimeout("slow"), "the request timed out", "", id="timeout"),
-    pytest.param(httpx.ConnectError("down"), "the connection failed", "", id="connection-error"),
+    pytest.param(httpx.ReadError("down"), "the connection failed", "", id="connection-error"),  # made, then lost
     pytest.param(
         error_envelope(500, [("070101", "Something broke.")]),
         "Gorelo answered HTTP 500 (code 070101): Something broke",
@@ -2682,6 +2790,19 @@ async def test_a_patch_that_ends_without_an_answer_lists_what_every_custom_field
     assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]  # sent once, never repeated, no read after it
     assert "SECRET-VALUE" not in text  # what the caller sent is never echoed
     assert "may or may not have been applied" in text and text.count("verify it with a read before repeating it") == 1
+
+
+async def test_a_patch_whose_connection_was_never_made_is_a_plain_refusal_not_a_collateral_change_warning(server, mock_gorelo):
+    # httpx.ConnectError: nothing reached Gorelo, so nothing may have changed and there is nothing to put back
+    arguments = {"custom_properties": [{"id": 41, "value": "SECRET-VALUE"}]}
+    route_update(mock_gorelo, arguments, httpx.ConnectError("down"), prior=BEFORE)
+    text = await call_tool_error(server, "update_client", {"client_id": 9101, **arguments})
+    assert text == (
+        "Gorelo could not be reached for update_client (the connection was never established). "
+        "Nothing was sent, so repeating it is safe."
+    )
+    assert "SECRET-VALUE" not in text and "may or may not have been applied" not in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
 
 
 async def test_a_patch_that_ends_in_a_5xx_keeps_the_labels_of_gorelos_notifications(server, mock_gorelo):
@@ -2727,7 +2848,7 @@ async def test_the_unconfirmed_patch_error_is_a_collateral_change_error_that_kee
     "spec, how, cause_kind",
     [
         pytest.param(httpx.ReadTimeout("slow"), "timeout", "timeout", id="timeout"),
-        pytest.param(httpx.ConnectError("down"), "connection error", "transport", id="connection-error"),
+        pytest.param(httpx.ReadError("down"), "connection error", "transport", id="connection-error"),
         pytest.param(httpx.Response(502, content=b"<html>x</html>"), "HTTP 502", "shape", id="502-page"),
     ],
 )
@@ -3793,7 +3914,7 @@ async def test_a_gorelo_error_about_the_client_type_names_client_type_id(server,
 async def test_update_client_offers_no_way_to_clear_the_type(server):
     # the spec text of UpdateClientCommand.ClientTypeId: "Leave null to keep the current value."
     tool = next(t for t in await list_tools(server) if t.name == "update_client")
-    assert "clear_fields" not in tool.inputSchema["properties"]
+    assert "clear_fields" not in tool.inputSchema["properties"]  # only the alternate name has a clear, and it is a boolean
     assert "cannot be cleared" in tool.inputSchema["properties"]["client_type_id"]["description"]
     assert "list_client_types" in tool.inputSchema["properties"]["client_type_id"]["description"]
     create = next(t for t in await list_tools(server) if t.name == "create_client")
@@ -4159,7 +4280,7 @@ async def test_the_location_tools_name_the_tools_that_resolve_their_ids(server):
     for name in ("create_client_location", "update_client_location"):
         for param in ("primary_contact_id", "billing_contact_ids"):
             description = tools[name].inputSchema["properties"][param]["description"]
-            assert "list_contacts" in description and "ACTIVE" in description or "active" in description
+            assert "list_contacts" in description and ("ACTIVE" in description or "active" in description), (name, param)
 
 
 async def test_location_ids_given_as_text_or_booleans_are_refused_by_the_schema(server, mock_gorelo):

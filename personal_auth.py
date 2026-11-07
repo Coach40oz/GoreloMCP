@@ -523,7 +523,10 @@ class PersonalAuthProvider(InMemoryOAuthProvider):
     ) -> Optional[RefreshToken]:
         """The refresh token if it is live, belongs to this client and has not expired (refresh tokens do not expire in
         this release). A string that is not live but is a rotated-away token is a reuse: see _note_reuse (which does
-        nothing inside a request to /revoke). Either way nothing is deleted here."""
+        nothing inside a request to /revoke). The request is refused in every case, and under the default "log" policy
+        nothing is deleted or saved here. Under the "revoke" policy a reuse later than the grace window revokes the live
+        access and refresh tokens of the family and saves the state file (see _note_reuse), so do not call this from a
+        lookup or diagnostic path."""
         record = self.refresh_tokens.get(refresh_token)
         if record is None:
             self._note_reuse(client, refresh_token)
@@ -895,7 +898,7 @@ class PersonalAuthProvider(InMemoryOAuthProvider):
 <input id="password" type="password" name="password" autofocus required>
 <div class="buttons">
 <button class="approve" type="submit" name="decision" value="approve">Approve</button>
-<button class="deny" type="submit" name="decision" value="deny">Deny</button>
+<button class="deny" type="submit" name="decision" value="deny" formnovalidate>Deny</button>
 </div>
 </form>
 </div>

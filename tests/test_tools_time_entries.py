@@ -45,11 +45,9 @@ LATEST_SPEC = Path(__file__).resolve().parent.parent / "backups" / "swagger-late
 # (111 bytes); the limit did not move.
 # 1.5.0: the group gained create_contract and update_contract (contract 6c30770dffc0; 14 tools now) and the new query and body
 # texts of list_contracts and get_contract: 37845 bytes measured, the limit is that plus about 1 percent, rounded up to the next 100.
-MODULE_BUDGET_BYTES = 38300
-# 1.5.1: create_contract and update_contract are held back (tools._common.HELD_TOOLS), so a server lists 12 of the 14 tools of the group:
-# 18221 bytes measured, the limit is that plus about 1 percent, rounded up to the next 100. MODULE_BUDGET_BYTES keeps guarding the
-# group with the two held tools, so bringing them back cannot grow the list beyond what it was.
-REGISTERED_BUDGET_BYTES = 18500
+# 1.6.0: actual_hours and distance are strict numbers with a bound (the schema now carries exclusiveMinimum and minimum): 38250 bytes
+# became 38324; the limit is the new size plus about 1 percent, rounded up to the next 100.
+MODULE_BUDGET_BYTES = 38800
 VERIFY_AFTER_SHAPE = "the write may have been applied, so verify it with a read before repeating it"
 
 # What the time entry tools must provide: name -> (kind, ops)
@@ -404,12 +402,10 @@ def test_the_module_documents_the_two_409_refusals():
 
 async def test_the_package_tool_list_stays_within_its_budget(server_factory):
     names = {spec.name for spec in REGISTRY.specs if spec.fn.__module__ in MODULE_GROUP}
-    assert len(names) == 14
-    for registry, count, budget in ((None, 12, REGISTERED_BUDGET_BYTES), (REGISTRY.with_held(), 14, MODULE_BUDGET_BYTES)):
-        package = [t for t in await list_tools(server_factory(registry=registry, destructive=True)) if t.name in names]
-        assert len(package) == count
-        size = sum(len(json.dumps(t.model_dump(mode="json", exclude_none=True))) for t in package)
-        assert size <= budget, f"{size} bytes, budget {budget}"
+    package = [t for t in await list_tools(server_factory(destructive=True)) if t.name in names]
+    assert len(package) == len(names) == 14
+    size = sum(len(json.dumps(t.model_dump(mode="json", exclude_none=True))) for t in package)
+    assert size <= MODULE_BUDGET_BYTES, f"{size} bytes, budget {MODULE_BUDGET_BYTES}"
 
 
 # --------------------------------------------------------------------------
@@ -980,8 +976,8 @@ async def test_an_explicit_service_line_is_sent_as_its_id(server, mock_gorelo):
         ({"ended_on": "2026-10-01T13:00:00Z"}, "ended_on: must be later than started_on"),
         ({"ended_on": "2026-10-01T14:00:00Z"}, "ended_on: must be later than started_on"),
         ({"ended_on": "2026-10-01T09:30:00-05:00", "started_on": "2026-10-01T15:00:00Z"}, "ended_on: must be later than started_on"),
-        ({"actual_hours": 0}, "actual_hours: must be a number of decimal hours greater than 0"),
-        ({"actual_hours": -1.5}, "actual_hours: must be a number of decimal hours greater than 0"),
+        ({"actual_hours": 0}, "Input should be greater than 0"),
+        ({"actual_hours": -1.5}, "Input should be greater than 0"),
         ({"billable_status_id": 0}, "billable_status_id: must be one of 1 (Billable), 2 (No charge), 3 (Non-billable), got 0"),
         ({"billable_status_id": 4}, "billable_status_id: must be one of 1 (Billable), 2 (No charge), 3 (Non-billable), got 4"),
         ({"billing_role_id": 0}, "billing_role_id: expected a positive whole number"),
@@ -993,7 +989,7 @@ async def test_an_explicit_service_line_is_sent_as_its_id(server, mock_gorelo):
         ({"service_line_id": 77, "no_service_line": True}, "no_service_line: cannot be true together with service_line_id"),
         ({"comment": ""}, "comment: must not be empty or whitespace only"),
         ({"comment": "   "}, "comment: must not be empty or whitespace only"),
-        ({"distance": -1}, "distance: must be a distance of 0 or more"),
+        ({"distance": -1}, "Input should be greater than or equal to 0"),
         ({"attachments": []}, "attachments: expected a non-empty list of objects"),
         ({"attachments": [{"name": "a.txt"}]}, "attachments[0].url: required, and must be non-empty text"),
         ({"attachments": [{"url": "https://x.example.test/a"}]}, "attachments[0].name: required, and must be non-empty text"),
@@ -1015,6 +1011,8 @@ async def test_an_explicit_service_line_is_sent_as_its_id(server, mock_gorelo):
 async def test_create_time_entry_rejects_bad_input_before_any_http_call(server, mock_gorelo, overrides, fragment):
     text = await call_tool_error(server, "create_time_entry", make_args(CREATE_BASE, **overrides))
     assert fragment in text
+    if "Input should be" in fragment:  # the bound is the schema's: the message names the parameter
+        assert next(iter(overrides)) in text
     assert mock_gorelo.requests == []
 
 
@@ -1302,8 +1300,8 @@ UPDATE_CHANGE_NAMES = (
             {"started_on": "2026-10-01T15:00:00Z", "ended_on": "2026-10-01T14:00:00Z"},
             "ended_on: must be later than started_on",
         ),
-        ({"actual_hours": 0}, "actual_hours: must be a number of decimal hours greater than 0"),
-        ({"actual_hours": -2}, "actual_hours: must be a number of decimal hours greater than 0"),
+        ({"actual_hours": 0}, "Input should be greater than 0"),
+        ({"actual_hours": -2}, "Input should be greater than 0"),
         ({"billable_status_id": 0}, "billable_status_id: must be one of 1 (Billable), 2 (No charge), 3 (Non-billable), got 0"),
         ({"billable_status_id": 9}, "billable_status_id: must be one of 1 (Billable), 2 (No charge), 3 (Non-billable), got 9"),
         ({"user_id": 0}, "user_id: expected a positive whole number"),
@@ -1314,7 +1312,7 @@ UPDATE_CHANGE_NAMES = (
         ({"work_type_id": MAX_ID + 1}, "work_type_id: expected a positive whole number"),
         ({"service_line_id": 0}, "service_line_id: expected a positive whole number"),
         ({"service_line_id": MAX_ID + 1}, "service_line_id: expected a positive whole number"),
-        ({"distance": -0.5}, "distance: must be a distance of 0 or more"),
+        ({"distance": -0.5}, "Input should be greater than or equal to 0"),
         ({"ticket_id": uid(1)}, "ticket_id"),
         ({"attachments": [{"name": "a", "url": "b"}]}, "attachments"),
     ],
@@ -1322,6 +1320,8 @@ UPDATE_CHANGE_NAMES = (
 async def test_update_time_entry_rejects_bad_input_before_any_http_call(server, mock_gorelo, args, fragment):
     text = await call_tool_error(server, "update_time_entry", {"time_entry_id": 55, **args})
     assert fragment in text
+    if "Input should be" in fragment:  # the bound is the schema's: the message names the parameter
+        assert next(iter(args)) in text
     assert mock_gorelo.requests == []
 
 
@@ -1639,6 +1639,34 @@ async def test_every_id_parameter_is_range_checked_by_name(
     named = f"{param}[0]" if is_list else param
     assert text.startswith(f"{named}: expected a positive whole number such as 123, got {what}")
     assert mock_gorelo.requests == []
+
+
+# actual_hours and distance are strict numbers: FastMCP's lax mode would turn JSON true into 1.0 and false into 0.0, so a
+# distance of false would be sent as 0 and a duration of true as one hour. These go through the MCP schema.
+NOT_A_NUMBER = [pytest.param(True, id="json-true"), pytest.param(False, id="json-false"), pytest.param("1.5", id="text")]
+
+
+@pytest.mark.parametrize("bad", NOT_A_NUMBER)
+@pytest.mark.parametrize("param", ["actual_hours", "distance"])
+async def test_create_time_entry_refuses_a_boolean_or_text_number_at_the_schema(server, mock_gorelo, param, bad):
+    text = await call_tool_error(server, "create_time_entry", make_args(CREATE_BASE, **{param: bad}))
+    assert param in text and "valid number" in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("bad", NOT_A_NUMBER)
+@pytest.mark.parametrize("param", ["actual_hours", "distance"])
+async def test_update_time_entry_refuses_a_boolean_or_text_number_at_the_schema(server, mock_gorelo, param, bad):
+    text = await call_tool_error(server, "update_time_entry", {"time_entry_id": 55, param: bad})
+    assert param in text and "valid number" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_a_whole_number_of_hours_and_a_zero_distance_still_pass_the_strict_schema(server, mock_gorelo):
+    on_create(mock_gorelo)
+    await call_tool(server, "create_time_entry", make_args(CREATE_BASE, ended_on=DROP, actual_hours=2, distance=0))
+    body = mock_gorelo.calls("POST")[0].json
+    assert body["ActualHours"] == 2 and body["Distance"] == 0 and body["Distance"] is not False
 
 
 def lax_int(tp):

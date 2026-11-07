@@ -18,7 +18,7 @@ before you open a pull request.
 ## Rules
 
 - No em dashes (U+2014) or en dashes (U+2013) in code, comments, docstrings, the guides under
-  `docs/` or the notes under `docs/why/`. `tests/test_hygiene.py` scans them and fails on one.
+  `docs/`, `CHANGELOG.md` or the notes under `docs/why/`. `tests/test_hygiene.py` scans them and fails on one.
 - Verify behavior against the live Gorelo spec (`scripts/spec_snapshot.py`, then
   `spec/spec_index.json`), not against changelog prose, which drifts. If you learn that
   production differs from the spec, add it to `docs/API-OBSERVED-BEHAVIOR.md`.

@@ -13,7 +13,7 @@ WHY
   tenants. If a shared service were breached, every tenant would be exposed at once.
   Running it yourself also means you decide:
     - which Gorelo key it uses and what scopes that key has;
-    - which tools exist (toolsets, and the gated tools: delete, void, approved invoices and sharing a document);
+    - which tools exist (toolsets, and the gated tools: delete, void, approving or creating approved invoices, contract writes and sharing a document);
     - when it updates, so that a Gorelo API change does not reach your tenant untested;
     - where logs go. The journal holds request paths with their record ids and the names of the query
       parameters and body fields sent to Gorelo, the error text of a failed tool call (which can quote

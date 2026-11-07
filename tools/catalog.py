@@ -32,7 +32,14 @@ too, and name, number, unit_cost, unit_price and status never.
 Money (contract e15cb5a18ec2): a unit price may be negative, for a discount or credit line, on create and on update,
 so unit_price accepts any finite number. A unit cost may not: the update text says a negative UnitCost is a 400 and the
 create text says nothing to the contrary, so unit_cost must be 0 or more on both, and a negative one is refused here,
-naming unit_cost, before anything is sent.
+naming unit_cost, before anything is sent. The money and quantity parameters (unit_price, unit_cost, a sub-item's
+quantity) are strict numbers (Annotated[float, Strict()]) and the two display flags strict booleans: FastMCP's default lax
+mode would turn JSON true into 1.0 and text "7" into 7.0 and write it, so a bool or a text is refused at the MCP boundary.
+
+A bundle's sub-items: PATCH /v1/items/{itemId} with a non-empty SubItems "fully replaces" the list and recomputes UnitCost
+("a partial patch of the list is not offered", spec). update_item therefore reads the item first when sub_items is given and
+refuses a list that leaves out a current sub-item unless remove_sub_item_ids names it (the pattern of update_document and its
+remove_attachment_names), so a model that means to add one sub-item cannot drop the others without saying so.
 """
 
 import math
@@ -40,8 +47,9 @@ from collections.abc import Mapping
 from typing import Annotated, Any, Literal, get_args
 
 from fastmcp import Context
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, Strict
 
+from gorelo_client import GoreloAPIError
 from tools._common import (
     StrictBool,
     StrictId,
@@ -53,6 +61,7 @@ from tools._common import (
     expect_object,
     gorelo_tool,
     guid,
+    guids,
     list_result,
     non_empty,
     paged_result,
@@ -161,7 +170,7 @@ class SubItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     item_id: str
-    quantity: Annotated[float, Field(gt=0)]
+    quantity: Annotated[float, Strict(), Field(gt=0)]
 
 
 # --------------------------------------------------------------------------
@@ -307,6 +316,63 @@ def _sub_items(param: str, value: Any, *, if_empty: str) -> list[dict[str, Any]]
     return payload
 
 
+def _shape_error(detail: str) -> GoreloAPIError:
+    return GoreloAPIError(
+        f"{GET_OP}: {detail}; refusing to guess. Nothing was changed", status=200, op_key=GET_OP, kind="shape"
+    )
+
+
+def _current_sub_items(record: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """{canonical ItemId: the stored sub-item} of a bundle as read from Gorelo; empty for a product (SubItems null)."""
+    stored = record.get("SubItems")
+    if stored is None:
+        return {}
+    if not isinstance(stored, list):
+        raise _shape_error("SubItems is not a list")
+    current: dict[str, Mapping[str, Any]] = {}
+    for entry in stored:
+        raw = entry.get("ItemId") if isinstance(entry, Mapping) else None
+        try:
+            key = guid("SubItems.ItemId", raw)
+        except ValueError:
+            raise _shape_error("a stored sub-item has no readable ItemId, so the new list cannot be compared with it") from None
+        current[key] = entry
+    return current
+
+
+def _describe_sub_item(item_id: str, entry: Mapping[str, Any]) -> str:
+    name = entry.get("Name")
+    quantity = entry.get("Quantity")
+    label = f"{name!r} " if isinstance(name, str) and name.strip() else ""
+    amount = f" x{quantity:g}" if isinstance(quantity, (int, float)) and not isinstance(quantity, bool) else ""
+    return f"{label}({item_id}){amount}"
+
+
+def _check_sub_item_drops(
+    current: dict[str, Mapping[str, Any]], new_items: list[dict[str, Any]], removed: list[str] | None
+) -> None:
+    """Refuse a new sub-item list that silently drops a current one (Gorelo replaces the whole list)."""
+    new_ids = {entry["ItemId"] for entry in new_items}
+    removing = removed or []
+    for position, key in enumerate(removing):
+        if key not in current:
+            raise ValueError(
+                f"remove_sub_item_ids[{position}]: {key} is not a current sub-item of this bundle (get_item lists them)"
+            )
+        if key in new_ids:
+            raise ValueError(
+                f"remove_sub_item_ids[{position}]: {key} is also in sub_items; leave it out of sub_items to drop it"
+            )
+    dropped = [key for key in current if key not in new_ids and key not in removing]
+    if dropped:
+        listing = "; ".join(_describe_sub_item(key, current[key]) for key in dropped)
+        raise ValueError(
+            "sub_items: Gorelo REPLACES the bundle's whole sub-item list, and this list leaves out "
+            f"{len(dropped)} current sub-item(s): {listing}. Nothing was changed. Send every sub-item to keep with its "
+            "quantity (get_item shows them), or name the ones to drop on purpose in remove_sub_item_ids"
+        )
+
+
 def _refuse_wrong_type(item_type: str, given: dict[str, Any], names: tuple[str, ...], only: str) -> None:
     """Fields that belong to the other item type are local errors naming every offending param."""
     offending = [name for name in names if given.get(name) is not None]
@@ -441,13 +507,15 @@ async def create_item(
         StrictId | None, Field(description="From list_client_locations; send client_id too.")
     ] = None,
     vendor: Annotated[str | None, Field(description="Vendor name.")] = None,
-    unit_price: Annotated[float | None, Field(description="May be negative, for a discount or credit line.")] = None,
+    unit_price: Annotated[
+        float | None, Strict(), Field(description="May be negative, for a discount or credit line.")
+    ] = None,
     tax_id: Annotated[StrictId | None, Field(description="From list_taxes.")] = None,
     external_product_id: Annotated[str | None, Field(description="Accounting system id.")] = None,
     sku: Annotated[str | None, Field(description="Products only.")] = None,
     part_number: Annotated[str | None, Field(description="Products only.")] = None,
     manufacturer: Annotated[str | None, Field(description="Products only.")] = None,
-    unit_cost: Annotated[float | None, Field(description="Products only, 0 or more.")] = None,
+    unit_cost: Annotated[float | None, Strict(), Field(description="Products only, 0 or more.")] = None,
     sub_items: Annotated[
         list[SubItem] | None,
         Field(
@@ -455,8 +523,8 @@ async def create_item(
             "A bundle's cost comes from its sub-items."
         ),
     ] = None,
-    show_sub_items_on_invoice: Annotated[bool | None, Field(description="Bundles only.")] = None,
-    show_sub_item_descriptions_on_invoice: Annotated[bool | None, Field(description="Bundles only.")] = None,
+    show_sub_items_on_invoice: Annotated[StrictBool | None, Field(description="Bundles only.")] = None,
+    show_sub_item_descriptions_on_invoice: Annotated[StrictBool | None, Field(description="Bundles only.")] = None,
 ) -> dict:
     """Create a product or a bundle and return it.
     Side effects: creates a real catalog item that contracts and invoices can use. To undo, archive it with
@@ -549,18 +617,24 @@ async def update_item(
         StrictId | None, Field(description="From list_client_locations; of the item's client.")
     ] = None,
     tax_id: Annotated[StrictId | None, Field(description="From list_taxes.")] = None,
-    unit_cost: Annotated[float | None, Field(description="Products only, 0 or more.")] = None,
-    unit_price: Annotated[float | None, Field(description="May be negative, for a discount or credit line.")] = None,
+    unit_cost: Annotated[float | None, Strict(), Field(description="Products only, 0 or more.")] = None,
+    unit_price: Annotated[
+        float | None, Strict(), Field(description="May be negative, for a discount or credit line.")
+    ] = None,
     status: Annotated[Literal["active", "archived"] | None, Field(description="Archive or reactivate.")] = None,
     sub_items: Annotated[
         list[SubItem] | None,
         Field(
             description="Bundles only: the COMPLETE new list [{item_id (a product from list_items), quantity}]; "
-            "replaces the list and Gorelo recomputes the bundle's UnitCost."
+            "REPLACES all sub-items. One left out is refused."
         ),
     ] = None,
-    show_sub_items_on_invoice: Annotated[bool | None, Field(description="Bundles only.")] = None,
-    show_sub_item_descriptions_on_invoice: Annotated[bool | None, Field(description="Bundles only.")] = None,
+    remove_sub_item_ids: Annotated[
+        list[str] | None,
+        Field(description="With sub_items: ItemIds (get_item) of current sub-items it drops on purpose."),
+    ] = None,
+    show_sub_items_on_invoice: Annotated[StrictBool | None, Field(description="Bundles only.")] = None,
+    show_sub_item_descriptions_on_invoice: Annotated[StrictBool | None, Field(description="Bundles only.")] = None,
     clear_fields: Annotated[
         list[ClearableField] | None,
         Field(description="Text emptied, ids unset, sub_items empties a bundle."),
@@ -568,6 +642,7 @@ async def update_item(
 ) -> dict:
     """Change fields of a catalog item (partial update) and return it. The type never changes; values are
     removed only through clear_fields. At least one change.
+    sub_items REPLACES the whole sub-item list: the item is read first; one left out is refused unless in remove_sub_item_ids.
     Side effects: overwrites stored values, changing what future contract and invoice lines pick up.
     A failed re-read returns {Id, warning}: the change WAS applied, do not repeat it.
     """
@@ -578,6 +653,12 @@ async def update_item(
             raise ValueError(
                 f"clear_fields: {field!r} cannot be cleared; allowed: {', '.join(CLEARABLE)}"
             )
+    if remove_sub_item_ids is not None and sub_items is None:
+        raise ValueError(
+            "remove_sub_item_ids: only valid together with sub_items (the complete new list); to remove every "
+            "sub-item pass clear_fields=['sub_items']"
+        )
+    removing = guids("remove_sub_item_ids", non_empty("remove_sub_item_ids", remove_sub_item_ids))
     values = {
         "name": _fixed_text("name", name),
         "number": _fixed_text("number", number),
@@ -615,6 +696,15 @@ async def update_item(
         raise ValueError(
             "no change requested: give at least one field to change, or name fields to remove in clear_fields"
         )
+    if values["sub_items"] is not None:
+        # Gorelo replaces the whole list ("a partial patch of the list is not offered"), so read the bundle first and
+        # refuse a list that drops a current sub-item unless the caller named it in remove_sub_item_ids.
+        record = expect_object(
+            await client_of(ctx).get_one(GET_OP, path_params={"itemId": item_guid}, tool="update_item"),
+            GET_OP,
+            tool="update_item",
+        )
+        _check_sub_item_drops(_current_sub_items(record), values["sub_items"], removing)
     written = await client_of(ctx).patch(UPDATE_OP, path_params={"itemId": item_guid}, json_body=body, tool="update_item")
     expect_object(written, UPDATE_OP, tool="update_item")
     return await reread_after_write(

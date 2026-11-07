@@ -16,7 +16,8 @@ step with the ops=[...] of the declarations below):
     PATCH /v1/contracts/{contractId}
 
 DELETE /v1/contracts/{contractId} is in FORBIDDEN_OPS (it destroys billing configuration), so it can never be declared
-or called. A contract is archived (StatusId 3) and restored (StatusId 1) with update_contract instead.
+or called. A contract is archived (StatusId 3) and restored (StatusId 1) with update_contract instead (when the operator
+enabled update_contract: GORELO_ENABLE_DESTRUCTIVE may name create_contract alone, and then only the Gorelo app archives).
 
 Why create and update are gated (kind "destructive", registered only when GORELO_ENABLE_DESTRUCTIVE enables them, each
 refused with no HTTP call unless confirm is true): a Block Hours line raises a Draft invoice for the block at once (the
@@ -140,6 +141,7 @@ STATUS_WRITES = {"active": 1, "archived": 3}
 LABOR_TERMS = {1: "Unlimited Hours", 2: "Hourly", 3: "Block Hours", 4: "No Labor Terms", 5: "Limited Hours"}
 LABOR_TERMS_SCALE = ", ".join(f"{key} {label}" for key, label in LABOR_TERMS.items())
 NO_LABOR_TERMS = 4
+UNLIMITED_HOURS = 1
 # labor terms id -> (the snake_case details parameter, the Gorelo field). No Labor Terms takes none.
 DETAILS = {
     1: ("unlimited_hours_details", "UnlimitedHoursDetails"),
@@ -313,7 +315,9 @@ class NewLineItem(_Strict):
     discount_percent: Annotated[float | None, Strict(), Field(description="0-100. Default 0.")] = None
     tax_id: Annotated[StrictId | None, Field(description="From list_taxes. Default: the item's tax.")] = None
     billable_status_id: Annotated[StrictId | None, Field(description="1 Billable (default), 2 No charge, 3 Non-billable.")] = None
-    start_date: Annotated[str | None, Field(description="YYYY-MM-DD. Default: today.")] = None
+    start_date: Annotated[
+        str | None, Field(description="YYYY-MM-DD. Default: today in Gorelo's time zone, or the contract's start if later.")
+    ] = None
     end_date: Annotated[str | None, Field(description="YYYY-MM-DD. Default: open-ended.")] = None
 
 
@@ -334,7 +338,11 @@ class LineItemChange(_Strict):
 
 class _LineSettings(_Strict):
     work_type_ids: Annotated[
-        list[StrictId] | None, Field(description="From list_work_types. New line: omitted covers all. Not on No Labor Terms.")
+        list[StrictId] | None,
+        Field(
+            description="From list_work_types, no repeats. New line: omitted covers all. Not on No Labor Terms. "
+            "Gorelo shows the selection back only on Unlimited Hours lines."
+        ),
     ] = None
     work_role_ids: Annotated[list[StrictId] | None, Field(description="From list_billing_roles. Same rules.")] = None
     auto_approve_time: Annotated[StrictBool | None, Field(description="Not on No Labor Terms. Default false.")] = None
@@ -467,7 +475,9 @@ def _midnight(day: str) -> str:
 
 
 def _distinct_ids(where: str, values: Any) -> list[int]:
-    """Ids with no repeat: a repeated id in a list that names things to change or remove is a mistake, not a no-op."""
+    """Ids with no repeat: a repeated id in a list that names things to change or remove, or in a set Gorelo keeps (contacts,
+    locations, work types, work roles), is a mistake, not a no-op: Gorelo stores each once, so the read-back would differ from
+    the list that was sent."""
     ids = positive_ids(where, values)
     assert ids is not None
     seen: set[int] = set()
@@ -686,7 +696,7 @@ def _line_wire(
         if data.get(key) is not None:
             if terms == NO_LABOR_TERMS:
                 raise ValueError(f"{where}.{key}: not accepted on a No Labor Terms line")
-            wire[field] = positive_ids(f"{where}.{key}", data[key])
+            wire[field] = _distinct_ids(f"{where}.{key}", data[key])
     for key, field in (("auto_approve_time", "AutoApproveTime"), ("auto_invoice_time", "AutoInvoiceTime")):
         if data.get(key) is not None:
             value = _flag(f"{where}.{key}", data[key])
@@ -775,8 +785,11 @@ def _item_wire(where: str, data: Mapping[str, Any], *, existing: bool) -> dict[s
     return wire
 
 
-def _line_items(where: str, value: Any, *, change: bool) -> list[tuple[int | None, dict[str, Any]]]:
-    """The line_items of one service line as [(id or None, wire)], each entry validated. [] is refused."""
+def _line_items(where: str, value: Any, *, change: bool, on_update: bool = False) -> list[tuple[int | None, dict[str, Any]]]:
+    """The line_items of one service line as [(id or None, wire)], each entry validated. [] is refused.
+
+    `change` is a line that exists already (its items may be updated by id); `on_update` is any line of update_contract,
+    new ones included, only to word the refusal of an id on a line item of a new line."""
     if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, (list, tuple)):
         raise ValueError(f"{where}: expected a list of line items, got {describe_value(value)}")
     if not value:
@@ -789,6 +802,10 @@ def _line_items(where: str, value: Any, *, change: bool) -> list[tuple[int | Non
         item_id = data.get("id")
         if item_id is not None:
             if not change:
+                if on_update:
+                    raise ValueError(
+                        f"{at}.id: not accepted on a line item of a new service line (leave id out to add the item)"
+                    )
                 raise ValueError(f"{at}.id: not accepted when the contract is created")
             item_id = positive_id(f"{at}.id", item_id)
             if item_id in seen:
@@ -867,9 +884,9 @@ def _contract_values(v: Mapping[str, Any], *, creating: bool) -> dict[str, Any]:
         if isinstance(v["contact_ids"], (list, tuple)) and not v["contact_ids"]:
             how = "omit it for none" if creating else "to remove every auto-approve contact pass clear_fields=['contact_ids']"
             raise ValueError(f"contact_ids: expected at least one id, got an empty list ({how})")
-        out["contact_ids"] = positive_ids("contact_ids", v["contact_ids"])
+        out["contact_ids"] = _distinct_ids("contact_ids", v["contact_ids"])
     if v.get("location_ids") is not None:
-        out["location_ids"] = positive_ids("location_ids", v["location_ids"])
+        out["location_ids"] = _distinct_ids("location_ids", v["location_ids"])
     everywhere = out.get("is_for_all_locations")
     if "location_ids" in out and everywhere is True:
         raise ValueError(
@@ -1043,7 +1060,8 @@ def _create_effect(body: Mapping[str, Any], blocks: int) -> str:
     lines = len(body["ServiceLines"])
     parts = [
         f"It creates a real billing contract for client {body['ClientId']} with {lines} service line{'' if lines == 1 else 's'}; "
-        "contracts cannot be deleted through this server, only archived with update_contract."
+        "contracts cannot be deleted through this server; a mistaken one is archived with update_contract when that tool is "
+        "enabled, else in the Gorelo app."
     ]
     if blocks:
         parts.append(
@@ -1101,7 +1119,7 @@ async def create_contract(
         list[StrictId] | None, Field(description="Locations covered (list_client_locations). Only with is_for_all_locations=false.")
     ] = None,
     reference: Annotated[str | None, Field(description="Free text printed on the invoices, e.g. a PO number.")] = None,
-    start_date: Annotated[str | None, Field(description="YYYY-MM-DD. Default: today.")] = None,
+    start_date: Annotated[str | None, Field(description="YYYY-MM-DD. Default: today in Gorelo's time zone.")] = None,
     end_date: Annotated[str | None, Field(description="YYYY-MM-DD, after start_date. Default: open-ended.")] = None,
     prorate_type_id: Annotated[
         StrictId | None, Field(description="0 do not prorate (default), 1 prorate and add to next invoice, 2 prorate and invoice at once.")
@@ -1132,9 +1150,9 @@ async def create_contract(
 ) -> dict:
     """Create a billing contract with its service lines and return it as get_contract shows it.
 
-    Needs name, client_id and at least one service line. Each line needs name, labor_terms_id (1 Unlimited, 2 Hourly, 3 Block, 4 No Labor Terms, 5 Limited) and the one matching details object; a setting the labor terms cannot have is refused.
+    Needs at least one service line. Each line needs name, labor_terms_id (1 Unlimited, 2 Hourly, 3 Block, 4 No Labor Terms, 5 Limited) and the one matching details object.
     Resolve ids first: client_id -> list_clients, item_id -> list_items, tax_id -> list_taxes, work_type_ids -> list_work_types, work_role_ids -> list_billing_roles.
-    Side effects: creates a real contract that cannot be deleted through this server (update_contract archives it). A Block Hours line raises a Draft invoice for the block at once. auto_approve_and_send=true makes Gorelo approve and send the recurring invoices on its own; it emails each to the client and approval pushes them to the accounting system. Tell the user.
+    Side effects: creates a real contract that cannot be deleted through this server (update_contract archives it if enabled, else the Gorelo app does). A Block Hours line raises a Draft invoice for the block at once. auto_approve_and_send=true makes Gorelo approve and send the recurring invoices on its own; it emails each to the client and approval pushes them to the accounting system. Tell the user.
     Ask the user first; needs confirm=true.
     """
     body, blocks = _create_request(
@@ -1168,7 +1186,10 @@ async def create_contract(
     record = await reread_after_write(ctx, GET_OP, path_params={"contractId": new_id}, tool="create_contract", written_id=new_id)
     if set(record) == {"Id", "warning"}:  # the read-back failed: the contract exists, say so and do not repeat the write
         return record
-    problems = _create_problems(record, body)
+    try:
+        problems = _create_problems(record, body)
+    except Exception as err:  # the write was applied: whatever the read-back looks like, never a raw error (and never a retry)
+        problems = [f"the read-back could not be checked ({type(err).__name__})"]
     if problems:
         raise _unconfirmed(CREATE_OP, f"the read-back does not match the request ({'; '.join(problems)})", f"get_contract, contract {new_id}")
     return record
@@ -1236,7 +1257,7 @@ def _plan_lines(service_lines: Any, remove_ids: Any) -> tuple[list[_LinePlan], l
                 plan.new_wire = _line_wire(where, data, terms=terms, fresh=True, emit_terms=True)
                 plan.terms = terms
             if data.get("line_items") is not None:
-                plan.items = _line_items(f"{where}.line_items", data["line_items"], change=plan.id is not None)
+                plan.items = _line_items(f"{where}.line_items", data["line_items"], change=plan.id is not None, on_update=True)
             if data.get("remove_line_item_ids") is not None:
                 plan.item_removes = _distinct_ids(f"{where}.remove_line_item_ids", data["remove_line_item_ids"])
                 updated = {item_id for item_id, _ in plan.items or [] if item_id is not None}
@@ -1521,10 +1542,25 @@ def _detail_problems(label: str, before_row: Mapping[str, Any] | None, sent: Map
     return found
 
 
+def _whole_id(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _ids_of(rows: Any) -> list[int] | None:
     if not isinstance(rows, list):
         return None
-    return sorted(row["Id"] for row in rows if isinstance(row, Mapping) and isinstance(row.get("Id"), int) and not isinstance(row.get("Id"), bool))
+    return sorted(row["Id"] for row in rows if isinstance(row, Mapping) and _whole_id(row.get("Id")))
+
+
+def _all_ids(rows: Any, *, coded: bool) -> list[int] | None:
+    """The sorted ids of a list the read shows, or None when it is not a list or ANY entry has no usable id (a CodeModel row
+    with no Id, a null or a text in a list of ids): such a list cannot confirm the ids that were sent, and must never raise."""
+    if not isinstance(rows, list):
+        return None
+    found = [row.get("Id") if isinstance(row, Mapping) else None for row in rows] if coded else list(rows)
+    if not all(_whole_id(number) for number in found):
+        return None
+    return sorted(found)
 
 
 def _item_expectation(before: Mapping[str, Any] | None, sent: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -1602,8 +1638,12 @@ def _field_problems(rows: Mapping[int, Mapping[str, Any]], expect: _Expect) -> l
                 expected[model] = _code_id(before, model) if model in _CODE_KEYS else before[model]
         found.extend(_compare(label, expected, row))
         found.extend(_detail_problems(label, before, sent, row))
+        # Gorelo's read model records the work types and roles of an Unlimited Hours line only ("empty for every other
+        # LaborTerms today": the other labor terms keep no such selection), so a line that is not Unlimited Hours after the
+        # write is not compared, whatever was sent
+        after_terms = sent["LaborTermsId"] if converting else _code_id(before, "LaborTerms")
         for model, field in (("WorkTypes", "WorkTypeIds"), ("WorkRoles", "WorkRoleIds")):
-            if converting and field not in sent:
+            if after_terms != UNLIMITED_HOURS or (converting and field not in sent):
                 continue
             want = sorted(sent[field]) if field in sent else _ids_of(before.get(model))
             got = _ids_of(row.get(model))
@@ -1715,13 +1755,10 @@ def _update_problems(record: Mapping[str, Any], wire: Mapping[str, Any], expect:
         if shown not in ((3,) if wire["StatusId"] == 3 else (1, 2)):
             problems.append("Status is not the one that was asked for")
     if "ContactIds" in wire:
-        contacts = record.get("Contacts")
-        shown_ids = sorted(row.get("Id") for row in contacts if isinstance(row, Mapping)) if isinstance(contacts, list) else None
-        if shown_ids != sorted(wire["ContactIds"]):
+        if _all_ids(record.get("Contacts"), coded=True) != sorted(wire["ContactIds"]):
             problems.append("Contacts are not the ones that were sent")
     if "LocationIds" in wire:
-        shown_ids = record.get("LocationIds")
-        if not isinstance(shown_ids, list) or sorted(shown_ids) != sorted(wire["LocationIds"]):
+        if _all_ids(record.get("LocationIds"), coded=False) != sorted(wire["LocationIds"]):
             problems.append("LocationIds are not the ones that were sent")
     if expect is not None:
         problems.extend(_line_problems(record, expect))
@@ -1864,7 +1901,7 @@ async def update_contract(
         Literal["active", "archived"] | None, Field(description="archived archives the contract, active restores it.")
     ] = None,
     reference: Annotated[str | None, Field(description="Free text on the invoices. To clear it use clear_fields.")] = None,
-    start_date: Annotated[str | None, Field(description="YYYY-MM-DD. Refused (409) once an invoice was generated.")] = None,
+    start_date: Annotated[str | None, Field(description="YYYY-MM-DD. Refused (409) once an invoice was generated. Line items keep their own dates.")] = None,
     end_date: Annotated[str | None, Field(description="YYYY-MM-DD. To make the contract open-ended use clear_fields.")] = None,
     repeat_period_id: Annotated[
         StrictId | None, Field(description="1 Monthly, 2 Quarterly, 3 Yearly, 4 Half Yearly. Refused (409) once an invoice was generated.")
@@ -1989,7 +2026,10 @@ async def update_contract(
     shown = await reread_after_write(ctx, GET_OP, path_params={"contractId": number}, tool="update_contract", written_id=number)
     if set(shown) == {"Id", "warning"}:  # the read-back failed: the update was applied, say so and do not repeat it
         return shown
-    problems = _update_problems(shown, wire, expect, clear)
+    try:
+        problems = _update_problems(shown, wire, expect, clear)
+    except Exception as err:  # the PATCH was applied: whatever the read-back looks like, never a raw error (and never a retry)
+        problems = [f"the read-back could not be checked ({type(err).__name__})"]
     if problems:
         raise _unconfirmed(UPDATE_OP, f"the read-back does not show the change ({'; '.join(problems)})", f"get_contract, contract {number}")
     return shown

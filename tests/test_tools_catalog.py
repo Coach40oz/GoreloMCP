@@ -247,7 +247,8 @@ async def test_the_parameter_descriptions_carry_the_id_sources_and_the_confirm_r
     assert "COMPLETE new list" in text("update_item", "sub_items")
     # what a bundle's sub-items do to its cost
     assert "A bundle's cost comes from its sub-items" in text("create_item", "sub_items")
-    assert "replaces the list and Gorelo recomputes the bundle's UnitCost" in text("update_item", "sub_items")
+    assert "REPLACES all sub-items. One left out is refused" in text("update_item", "sub_items")
+    assert "ItemIds (get_item) of current sub-items it drops on purpose" in text("update_item", "remove_sub_item_ids")
     for tool in ("get_item", "update_item", "delete_item"):
         assert "list_items" in text(tool, "item_id"), tool
     assert "Must be true" in text("delete_item", "confirm") and "user approves" in text("delete_item", "confirm")
@@ -1055,12 +1056,12 @@ async def test_a_price_that_is_not_a_finite_number_is_refused_naming_unit_price(
 @pytest.mark.parametrize("word", ["nan", "inf", "-inf", "Infinity"])
 async def test_the_words_nan_and_infinity_never_become_a_price_or_a_cost(server, mock_gorelo, field, word):
     # pydantic's lax float turns these strings into non-finite numbers: the tool still refuses them, naming the param
-    wanted = {
-        "unit_price": "unit_price: must be a finite number (it may be negative, for a discount or credit line)",
-        "unit_cost": "unit_cost: must be a number of 0 or more",
-    }[field]
-    assert await call_tool_error(server, "create_item", {"type": "product", "name": "Widget", field: word}) == wanted
-    assert await call_tool_error(server, "update_item", {"item_id": ITEM_ID, field: word}) == wanted
+    # (now the strict float refuses a text outright, so the model sees the schema error that names the param)
+    for text in (
+        await call_tool_error(server, "create_item", {"type": "product", "name": "Widget", field: word}),
+        await call_tool_error(server, "update_item", {"item_id": ITEM_ID, field: word}),
+    ):
+        assert field in text and "Input should be a valid number" in text
     assert mock_gorelo.requests == []
 
 
@@ -1281,7 +1282,8 @@ async def test_every_field_is_sent_under_its_pascal_name(server, mock_gorelo):
         "show_sub_item_descriptions_on_invoice": True,
     }
     await call_tool(server, "update_item", args)
-    assert mock_gorelo.requests[0].json == {
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH", "GET"]  # sub_items: the item is read first
+    assert mock_gorelo.calls("PATCH")[0].json == {
         "Name": "Widget 2",
         "Number": "W-101",
         "Description": "New description",
@@ -1615,3 +1617,186 @@ async def test_the_catalog_tools_belong_to_the_billing_toolset(server_factory):
     names = set(EXPECTED_TOOLS)
     assert not names & {t.name for t in await list_tools(server_factory(toolsets={"core"}, destructive=True))}
     assert names <= {t.name for t in await list_tools(server_factory(toolsets={"billing"}, destructive=True))}
+
+
+# --------------------------------------------------------------------------
+# Money and quantity are strict numbers: a JSON boolean or a text is refused at the MCP boundary
+# --------------------------------------------------------------------------
+
+LAX_VALUES = [
+    pytest.param(True, id="json-true"),
+    pytest.param(False, id="json-false"),
+    pytest.param("7", id="text-7"),
+    pytest.param("7.5", id="text-7.5"),
+]
+
+
+@pytest.mark.parametrize("field", ["unit_price", "unit_cost"])
+@pytest.mark.parametrize("bad", LAX_VALUES)
+async def test_a_boolean_or_text_money_value_is_refused_by_the_schema_on_create_and_update(server, mock_gorelo, field, bad):
+    for tool, args in (
+        ("create_item", {"type": "product", "name": "Widget"}),
+        ("update_item", {"item_id": ITEM_ID}),
+    ):
+        text = await call_tool_error(server, tool, {**args, field: bad})
+        assert field in text and "Input should be a valid number" in text, (tool, text)
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("bad", LAX_VALUES)
+async def test_a_boolean_or_text_sub_item_quantity_is_refused_by_the_schema(server, mock_gorelo, bad):
+    entry = {"item_id": PRODUCT_A, "quantity": bad}
+    for tool, args in (
+        ("create_item", {"type": "bundle", "name": "Kit"}),
+        ("update_item", {"item_id": ITEM_ID}),
+    ):
+        text = await call_tool_error(server, tool, {**args, "sub_items": [entry]})
+        assert "quantity" in text and "Input should be a valid number" in text, (tool, text)
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("field", ["show_sub_items_on_invoice", "show_sub_item_descriptions_on_invoice"])
+@pytest.mark.parametrize("bad", ["true", "yes", 1, 0])
+async def test_the_two_display_flags_are_strict_booleans(server, mock_gorelo, field, bad):
+    for tool, args in (
+        ("create_item", {"type": "bundle", "name": "Kit", "sub_items": [{"item_id": PRODUCT_A, "quantity": 1}]}),
+        ("update_item", {"item_id": ITEM_ID}),
+    ):
+        text = await call_tool_error(server, tool, {**args, field: bad})
+        assert field in text and "valid boolean" in text, (tool, text)
+    assert mock_gorelo.requests == []
+
+
+async def test_whole_numbers_and_decimals_are_still_accepted_as_money_and_quantity(server, mock_gorelo):
+    route_create(mock_gorelo, item_detail(bundle=True))
+    args = {"type": "bundle", "name": "Kit", "unit_price": 70, "sub_items": [{"item_id": PRODUCT_A, "quantity": 2}, {"item_id": PRODUCT_B, "quantity": 0.5}]}
+    await call_tool(server, "create_item", args)
+    assert mock_gorelo.requests[0].json["UnitPrice"] == 70
+    assert [e["Quantity"] for e in mock_gorelo.requests[0].json["SubItems"]] == [2.0, 0.5]
+
+
+# --------------------------------------------------------------------------
+# update_item sub_items replaces the whole list: the bundle is read first and nothing is dropped silently
+# --------------------------------------------------------------------------
+
+PRODUCT_C = uid(23)
+
+
+def bundle_with(*ids):
+    """A stored bundle whose sub-items are `ids` (name 'Product <n>', quantity 1)."""
+    detail = item_detail(bundle=True)
+    detail["SubItems"] = [
+        {"ItemId": item, "Name": f"Product {position}", "Quantity": 1.0, "UnitCost": 10.0, "UnitPrice": 15.0}
+        for position, item in enumerate(ids, start=1)
+    ]
+    return detail
+
+
+async def test_a_new_list_that_leaves_out_a_current_sub_item_is_refused_before_the_patch(server, mock_gorelo):
+    mock_gorelo.on("GET", ITEM_PATH, envelope(bundle_with(PRODUCT_A, PRODUCT_B)))
+    text = await call_tool_error(server, "update_item", {"item_id": ITEM_ID, "sub_items": [{"item_id": PRODUCT_C, "quantity": 1}]})
+    assert text.startswith("sub_items: Gorelo REPLACES the bundle's whole sub-item list, and this list leaves out 2 current sub-item(s): ")
+    assert f"'Product 1' ({PRODUCT_A}) x1" in text and f"'Product 2' ({PRODUCT_B}) x1" in text
+    assert "Nothing was changed" in text and "remove_sub_item_ids" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]  # read only, no PATCH
+
+
+async def test_adding_one_sub_item_needs_the_complete_list(server, mock_gorelo):
+    mock_gorelo.on("PATCH", ITEM_PATH, envelope({"Id": ITEM_ID}))
+    mock_gorelo.on("GET", ITEM_PATH, in_order(envelope(bundle_with(PRODUCT_A, PRODUCT_B)), envelope(bundle_with(PRODUCT_A, PRODUCT_B, PRODUCT_C))))
+    entries = [{"item_id": PRODUCT_A, "quantity": 1}, {"item_id": PRODUCT_B.upper(), "quantity": 3}, {"item_id": PRODUCT_C, "quantity": 1}]
+    await call_tool(server, "update_item", {"item_id": ITEM_ID, "sub_items": entries})
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH", "GET"]
+    assert mock_gorelo.calls("PATCH")[0].json == {
+        "SubItems": [{"ItemId": PRODUCT_A, "Quantity": 1.0}, {"ItemId": PRODUCT_B, "Quantity": 3.0}, {"ItemId": PRODUCT_C, "Quantity": 1.0}]
+    }
+
+
+async def test_a_sub_item_can_be_dropped_on_purpose_by_naming_it(server, mock_gorelo):
+    mock_gorelo.on("PATCH", ITEM_PATH, envelope({"Id": ITEM_ID}))
+    mock_gorelo.on("GET", ITEM_PATH, in_order(envelope(bundle_with(PRODUCT_A, PRODUCT_B)), envelope(bundle_with(PRODUCT_A))))
+    args = {"item_id": ITEM_ID, "sub_items": [{"item_id": PRODUCT_A, "quantity": 2}], "remove_sub_item_ids": [PRODUCT_B.upper()]}
+    await call_tool(server, "update_item", args)
+    assert mock_gorelo.calls("PATCH")[0].json == {"SubItems": [{"ItemId": PRODUCT_A, "Quantity": 2.0}]}
+
+
+async def test_only_the_dropped_one_that_is_not_named_is_reported(server, mock_gorelo):
+    mock_gorelo.on("GET", ITEM_PATH, envelope(bundle_with(PRODUCT_A, PRODUCT_B)))
+    args = {"item_id": ITEM_ID, "sub_items": [{"item_id": PRODUCT_C, "quantity": 1}], "remove_sub_item_ids": [PRODUCT_A]}
+    text = await call_tool_error(server, "update_item", args)
+    assert "leaves out 1 current sub-item(s): 'Product 2'" in text and PRODUCT_A not in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+@pytest.mark.parametrize(
+    "remove, fragment",
+    [
+        pytest.param([PRODUCT_C], f"remove_sub_item_ids[0]: {PRODUCT_C} is not a current sub-item of this bundle (get_item lists them)", id="not-a-current-sub-item"),
+        pytest.param([PRODUCT_A], f"remove_sub_item_ids[0]: {PRODUCT_A} is also in sub_items; leave it out of sub_items to drop it", id="also-in-the-new-list"),
+    ],
+)
+async def test_remove_sub_item_ids_must_name_a_current_sub_item_that_is_not_kept(server, mock_gorelo, remove, fragment):
+    mock_gorelo.on("GET", ITEM_PATH, envelope(bundle_with(PRODUCT_A, PRODUCT_B)))
+    args = {"item_id": ITEM_ID, "sub_items": [{"item_id": PRODUCT_A, "quantity": 1}], "remove_sub_item_ids": remove}
+    assert await call_tool_error(server, "update_item", args) == fragment
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_remove_sub_item_ids_alone_or_empty_or_not_a_guid_is_refused_with_no_request(server, mock_gorelo):
+    only = await call_tool_error(server, "update_item", {"item_id": ITEM_ID, "remove_sub_item_ids": [PRODUCT_A], "unit_price": 1})
+    assert only.startswith("remove_sub_item_ids: only valid together with sub_items")
+    empty = await call_tool_error(server, "update_item", {"item_id": ITEM_ID, "sub_items": [{"item_id": PRODUCT_A, "quantity": 1}], "remove_sub_item_ids": []})
+    assert empty.startswith("remove_sub_item_ids: must not be an empty list")
+    bad = await call_tool_error(
+        server, "update_item",
+        {"item_id": ITEM_ID, "sub_items": [{"item_id": PRODUCT_A, "quantity": 1}], "remove_sub_item_ids": ["nope"]},
+    )
+    assert bad.startswith("remove_sub_item_ids[0]: expected a GUID such as 3f2b8c1e-0d4a-4b7e-9a51-2c6d8e9f0a1b, got ")
+    assert mock_gorelo.requests == []
+
+
+async def test_clear_fields_sub_items_stays_the_way_to_empty_a_bundle_and_reads_nothing(server, mock_gorelo):
+    route_update(mock_gorelo, bundle_with())
+    await call_tool(server, "update_item", {"item_id": ITEM_ID, "clear_fields": ["sub_items"]})
+    assert [r.method for r in mock_gorelo.requests] == ["PATCH", "GET"]
+    assert mock_gorelo.requests[0].json == {"SubItems": []}
+
+
+async def test_an_update_without_sub_items_does_not_read_the_item_first(server, mock_gorelo):
+    route_update(mock_gorelo)
+    await call_tool(server, "update_item", {"item_id": ITEM_ID, "unit_price": 3})
+    assert [r.method for r in mock_gorelo.requests] == ["PATCH", "GET"]
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param("none", id="not-a-list"),
+        pytest.param([{"Name": "x", "Quantity": 1}], id="no-item-id"),
+        pytest.param([{"ItemId": "12", "Name": "x"}], id="item-id-not-a-guid"),
+        pytest.param(["text"], id="entry-not-an-object"),
+    ],
+)
+async def test_a_stored_sub_item_list_that_cannot_be_read_stops_the_update_before_the_patch(server, mock_gorelo, stored):
+    detail = item_detail(bundle=True)
+    detail["SubItems"] = stored
+    mock_gorelo.on("GET", ITEM_PATH, envelope(detail))
+    text = await call_tool_error(server, "update_item", {"item_id": ITEM_ID, "sub_items": [{"item_id": PRODUCT_A, "quantity": 1}]})
+    assert text.startswith("Gorelo returned an unexpected response for update_item: GET /v1/items/{itemId}: ")
+    assert text.endswith("refusing to guess. Nothing was changed")
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_a_failed_read_before_the_patch_stops_the_sub_item_update(server, mock_gorelo):
+    mock_gorelo.on("GET", ITEM_PATH, error_envelope(404, [("070601", "Item not found.", "itemId")]))
+    text = await call_tool_error(server, "update_item", {"item_id": ITEM_ID, "sub_items": [{"item_id": PRODUCT_A, "quantity": 1}]})
+    assert "Item not found." in text
+    assert mock_gorelo.calls("PATCH") == []
+
+
+async def test_the_docstring_and_the_schema_say_the_sub_item_list_is_replaced(server):
+    doc = " ".join(inspect.getdoc(catalog.update_item).split())
+    assert "sub_items REPLACES the whole sub-item list: the item is read first; one left out is refused unless in remove_sub_item_ids" in doc
+    tools = {tool.name: tool for tool in await list_tools(server)}
+    assert "remove_sub_item_ids" in tools["update_item"].inputSchema["properties"]
+    assert "remove_sub_item_ids" not in tools["create_item"].inputSchema["properties"]

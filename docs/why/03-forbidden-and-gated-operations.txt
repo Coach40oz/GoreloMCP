@@ -2,25 +2,31 @@
 
 WHAT
   Three levels, from strictest to loosest.
-  1. Forbidden: never callable. DELETE on clients, contacts, tickets, agent assets, custom assets
+  1. Forbidden: never callable. DELETE on clients, tickets, agent assets, custom assets
      and contracts, and the API key operations: creating a key (POST /v1/api-keys) and revoking one
      (DELETE /v1/api-keys/{apiKeyId}). No tool may declare them and the client refuses them with no
      HTTP call.
   2. Gated: the delete and void tools (comments, time entries, uptime checks, items, invoices,
-     project tasks and comments), remove_document_related_item, create_approved_invoice and
-     share_document. They are not registered at all unless the operator sets
+     project tasks and comments, contacts, asset types, client locations, client domains and
+     product charges), remove_document_related_item, create_approved_invoice,
+     approve_invoice, create_contract, update_contract and share_document. They are not registered at all unless the operator sets
      GORELO_ENABLE_DESTRUCTIVE (1 for all of them, or a list of tool names for just those).
      Even then, each call needs confirm=true
      (a real boolean; the text "true" or the number 1 do not count) and the refusal says what
      would happen. The AI model is told to ask the user before setting confirm.
   3. Everything else: ordinary reads and writes.
+  A contact can be deleted (delete_contact, since 1.5.2) only by this gated tool. Gorelo marks
+  the contact inactive, keeps its ticket history and lets it leave every list at once, and it
+  answers "deleted" again for an id that is already gone, so the tool reads the contact first,
+  checks that the answer names the same contact and reports what it deleted.
   Not exposed: POST and DELETE /v1/payments (no tool; the live guard refuses them). They are
   accounting data that reaches the connected system.
   Invoices get extra care. create_invoice can only make a Draft (it has no status or recipient
   parameter). An Approved invoice is pushed to the connected accounting system at once, and
-  voiding it later through the Gorelo API does not reach that system. On 2026-10-04 the copy in
-  Xero was still open minutes after a void. So creating an approved invoice is its own gated
-  tool, and the delete_invoice text says the user must void the accounting copy by hand.
+  Gorelo may email it to the client's contacts. Gorelo's description says a void is sent to the
+  accounting system too. A void reached it in one test, and in another the copy in Xero was
+  still open minutes after a void. So creating an approved invoice is its own gated tool, and the
+  delete_invoice text tells the user to check the accounting system.
   Documents get the same care. A public link (anyone who has it can read the document without
   a login) and publishing to the client portal make a document readable outside the business.
   That effect leaves Gorelo, like an Approved invoice, so turning it on is its own gated tool,

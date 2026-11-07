@@ -72,7 +72,7 @@ def _api_host(client: GoreloClient) -> str | None:
 @gorelo_tool(toolset="core", kind="read", ops=[CLIENTS_OP])
 async def health_check(ctx: Context) -> dict:
     """Check the Gorelo API answers and this server understands it; returns {ok, api, api_host, total_clients, toolsets, destructive, gated_tools, spec_sha256}.
-    Call it first when other tools fail. total_clients is the number of clients Gorelo lists by default (Archived clients are not counted). gated_tools lists the delete, void, approved-invoice and sharing tools switched on ([] means none).
+    Call it first when other tools fail. total_clients is the number of clients Gorelo lists by default (Archived clients are not counted). gated_tools names the gated tools switched on ([] means none).
     api_host is the Gorelo host this server calls (GORELO_BASE_URL). A Gorelo failure or unexpected response returns {ok: false, error, status} instead of a tool error.
     """
     client = client_of(ctx)

@@ -16,7 +16,7 @@ Tools (21):
     get_structured_document_submission    read  GET .../submissions/{submissionId}
     create_document               write        POST /v1/documents
     update_document               write        GET + PATCH /v1/documents/{documentId}
-    move_document                 write        PATCH /v1/documents/{documentId}
+    move_document                 write        GET (the document, the new parent, shared documents) + PATCH /v1/documents/{documentId}
     archive_document              write        PATCH /v1/documents/{documentId}
     restore_document              write        GET + PATCH /v1/documents/{documentId}
     unshare_document              write        PATCH /v1/documents/{documentId}
@@ -68,9 +68,21 @@ PATCH, that the token sits in the query string (if it sat in the path, an update
 locally), what the POST of related items answers (add_document_related_items reads the full list after it instead), and
 that a title or body change keeps the attachments of the new version (the tool checks the answer for it).
 
-Documents cannot be deleted through the API; archive_document is the closest thing. Gorelo's texts disagree on what an
-archive reaches ("the documents directly under it" on the PATCH, "every document below it" on the list), so the texts say
-the documents under it and do not promise more.
+Documents cannot be deleted through the API; archive_document is the closest thing. Contract 6c30770dffc0 made Gorelo's
+texts agree (the PATCH and the list): an archive reaches every document below it, at any depth; a restore (StatusId 1) puts
+the document at the top level and the documents below it stay archived (each one restored lands at the top level).
+list_documents updated_since: "A document never edited since it was created counts as updated at its creation time", so a new
+document is included and one call is enough for a sync. Move puts the document "last among its new siblings" and gives
+everything nested under it the same client.
+
+move_document and shared documents. A move to another client takes the document and every document under it into that
+client's tree, and a document that is published to the client portal (or has its public link on) keeps those flags: it would
+be readable by the new client's portal contacts without anyone having decided so. The tool is not gated (counts do not
+change); it reads the document first, and when the move changes the client (a client_id or internal move, or a parent that
+belongs to another client) it refuses, with no PATCH, while the document or any document under it (found through
+list_documents with is_published_to_portal and is_public_link_enabled, archived ones included) is shared, and says to
+unshare_document first. A strict opt-in parameter was considered and not chosen: a flag the model can set in the same call
+bypasses the check without a separate, visible step, while unshare_document is its own call that the user sees.
 """
 
 import re
@@ -620,7 +632,7 @@ async def list_documents(
     ] = None,
     is_public_link_enabled: Annotated[bool | None, Field(description="true: public link on; false: off.")] = None,
     query: Annotated[str | None, Field(description=f"Keyword in the title, at most {QUERY_MAX} characters.")] = None,
-    updated_since: Annotated[str | None, Field(description="Updated at or after this instant. Never-updated documents are left out.")] = None,
+    updated_since: Annotated[str | None, Field(description="Updated at or after this instant. A document never edited counts as updated when it was created, so new ones are included.")] = None,
     updated_before: Annotated[str | None, Field(description="Updated strictly before this instant.")] = None,
     created_since: Annotated[
         str | None, Field(description="Created at or after this instant. Restoring a version resets a document's created time.")
@@ -637,7 +649,7 @@ async def list_documents(
         Field(description="next_cursor from the previous call; same filters and sort; repeat until has_more is false."),
     ] = None,
 ) -> dict:
-    """List documents (client and internal), one page at a time. Active ones only unless status_ids includes 2; archiving a document archives the documents under it. Rows carry Id, Title, ParentDocumentId, ClientId, Status and the sharing flags, not the body: get_document returns that. To pick up only what changed, make two calls, one with updated_since and one with created_since. sort_by documentOrder is the order the app shows siblings in; use it with parent_document_id.
+    """List documents (client and internal), one page at a time. Active ones only unless status_ids includes 2; archiving a document archives every document below it. Rows carry Id, Title, ParentDocumentId, ClientId, Status and the sharing flags, not the body: get_document returns that. To pick up what changed or is new since a date, pass updated_since (a new, never-edited document counts as updated when created, so one call is enough). sort_by documentOrder is the order the app shows siblings in; use it with parent_document_id.
     Resolve ids first: client_ids -> list_clients; parent_document_id -> a row Id of this tool.
     Side effects: None (read-only).
     Paging: pass next_cursor back as cursor with the SAME filters until has_more is false.
@@ -1116,7 +1128,130 @@ async def update_document(
 # --------------------------------------------------------------------------
 
 
-@gorelo_tool(toolset=TOOLSET, kind="write", ops=[UPDATE_OP], field_map=MOVE_MAP, destructive_hint=True)
+HTTP_NOT_FOUND = 404
+SHARED_SCAN_MAX = 1000  # shared documents of one client that move_document reads before it gives up checking
+SHARED_WALK_MAX = 20  # extra document reads to place a shared document of the same tree under or beside the moved one
+SHARED_IDS_SHOWN = 10
+
+
+def _client_of_record(record: Mapping[str, Any], who: str) -> int | None:
+    """The ClientId of a document read from Gorelo: a whole number, or null for an internal document."""
+    if "ClientId" in record:
+        value = record["ClientId"]
+        if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+            return value
+    raise GoreloAPIError(
+        f"{GET_OP}: {who} has no readable ClientId, so it cannot be told whether the move changes the client; "
+        "refusing to guess. Nothing was changed",
+        status=200,
+        op_key=GET_OP,
+        kind="shape",
+    )
+
+
+def _sharing_of_record(record: Mapping[str, Any]) -> list[str]:
+    """What the record says is on: 'its public link' and/or 'publishing to the client portal'. Both must be booleans."""
+    shown = []
+    for name, label in (("PublicLinkEnabled", "its public link"), ("PublishToPortalEnabled", "publishing to the client portal")):
+        value = record.get(name)
+        if not isinstance(value, bool):
+            raise GoreloAPIError(
+                f"{GET_OP}: the document has no readable {name}, so it cannot be told whether it is shared; "
+                "refusing to guess. Nothing was changed",
+                status=200,
+                op_key=GET_OP,
+                kind="shape",
+            )
+        if value:
+            shown.append(label)
+    return shown
+
+
+async def _is_below(
+    client: Any, row: Mapping[str, Any], doc: str, doc_depth: int, known: dict[str, Mapping[str, Any]], budget: list[int], tool: str
+) -> bool | None:
+    """Whether `row` is nested (at any depth) under document `doc`; None when it could not be told within the read budget.
+
+    Walks up the ParentDocumentId chain, using rows already read and reading an ancestor only when needed."""
+    current: Mapping[str, Any] = row
+    while True:
+        parent = current.get("ParentDocumentId")
+        depth = current.get("Depth")
+        if not isinstance(parent, str):
+            return False
+        if _same_id(parent, doc):
+            return True
+        if not isinstance(depth, int) or isinstance(depth, bool):
+            return None
+        if depth - 1 <= doc_depth:  # the parent is as shallow as the moved document and is not it
+            return False
+        info = known.get(parent.lower())
+        if info is None:
+            if budget[0] <= 0:
+                return None
+            budget[0] -= 1
+            info = expect_object(
+                await client.get_one(GET_OP, path_params={"documentId": parent}, tool=tool), GET_OP, tool=tool
+            )
+            known[parent.lower()] = info
+        current = info
+
+
+async def _shared_below(client: Any, record: Mapping[str, Any], doc: str, tool: str) -> tuple[list[str], int]:
+    """(ids of the documents under `record` that are shared, how many shared documents of its tree could not be placed).
+
+    Shared means published to the client portal or with the public link on; archived documents count (Gorelo does not
+    say whether an archived one stays readable). One list read per flag, for the documents of the moved document's client
+    (or the internal ones), keeping the rows of its tree below it."""
+    root, depth = record.get("RootDocumentId"), record.get("Depth")
+    if not isinstance(root, str) or not isinstance(depth, int) or isinstance(depth, bool):
+        raise GoreloAPIError(
+            f"{GET_OP}: the document has no readable RootDocumentId and Depth, so the documents under it cannot be "
+            "checked for sharing; refusing to guess. Nothing was changed",
+            status=200,
+            op_key=GET_OP,
+            kind="shape",
+        )
+    owner = _client_of_record(record, "the document")
+    where: dict[str, Any] = {"IsInternal": True} if owner is None else {"ClientIds": str(owner)}
+    rows: dict[str, Mapping[str, Any]] = {}
+    for flag in ("IsPublishedToPortal", "IsPublicLinkEnabled"):
+        scan = await client.get_all(
+            LIST_OP,
+            query={**where, "StatusIds": "1,2", flag: True},
+            page_size=200,
+            max_items=SHARED_SCAN_MAX,
+            tool=tool,
+        )
+        if not scan.complete:
+            raise ValueError(
+                "document_id: too many shared documents to check one by one (more than "
+                f"{SHARED_SCAN_MAX} for this {'client' if owner is not None else 'set of internal documents'}), so the "
+                "move cannot be shown to be safe. Nothing was changed. Unshare the shared documents under it with "
+                "unshare_document first"
+            )
+        for item in scan.items:
+            if isinstance(item, Mapping) and isinstance(item.get("Id"), str):
+                rows[item["Id"].lower()] = item
+    candidates = [
+        item
+        for key, item in rows.items()
+        if key != doc and _same_id(item.get("RootDocumentId"), root) and not (isinstance(item.get("Depth"), int) and item["Depth"] <= depth)
+    ]
+    known = dict(rows)
+    budget = [SHARED_WALK_MAX]
+    below: list[str] = []
+    unplaced = 0
+    for item in candidates:
+        answer = True if depth == 0 else await _is_below(client, item, doc, depth, known, budget, tool)
+        if answer is True:
+            below.append(item["Id"])
+        elif answer is None:
+            unplaced += 1
+    return below, unplaced
+
+
+@gorelo_tool(toolset=TOOLSET, kind="write", ops=[GET_OP, LIST_OP, UPDATE_OP], field_map=MOVE_MAP, destructive_hint=True)
 async def move_document(
     ctx: Context,
     document_id: Annotated[str, Field(description=DOCUMENT_ID_TEXT)],
@@ -1128,9 +1263,9 @@ async def move_document(
     ] = None,
     internal: Annotated[StrictBool, Field(description="true: move to the top level as an internal document (no client).")] = False,
 ) -> dict:
-    """Move a document under another document, or to the top level of a client or of the internal documents, and return its updated record. The document and everything under it take the new client; its position among its new siblings is unchanged. Give exactly one of parent_document_id, client_id or internal=true.
+    """Move a document under another document, or to the top level of a client or of the internal documents, and return its updated record. The document and everything under it take the new client, and it goes last among its new siblings. Give exactly one of parent_document_id, client_id or internal=true.
     Resolve ids first: document_id and parent_document_id -> list_documents, client_id -> list_clients.
-    Side effects: changes where the document and its sub-documents live and which client they belong to. If it or a document under it is shared, check who can now see it: the result says so for this document and names the check for the documents under it.
+    Side effects: the tool reads the document first. A move to ANOTHER client is refused, with nothing sent, while the document or a document under it is published to the client portal or has its public link on: ask the user, unshare_document each one, then move. A move within the same client is not checked.
     """
     doc = guid("document_id", document_id)
     places = [name for name, value in (("parent_document_id", parent_document_id), ("client_id", client_id)) if value is not None]
@@ -1142,6 +1277,7 @@ async def move_document(
             "client_id = the top level of that client, internal=true = the top level, internal); "
             f"got {', '.join(places) if places else 'none'}"
         )
+    parent: str | None = None
     if parent_document_id is not None:
         parent = guid("parent_document_id", parent_document_id)
         if parent == doc:
@@ -1151,14 +1287,56 @@ async def move_document(
         move = {"ParentDocumentId": None, "ClientId": positive_id("client_id", client_id)}
     else:
         move = {"ParentDocumentId": None, "ClientId": None}
-    answer = await client_of(ctx).patch(
+    client = client_of(ctx)
+    # The read before the write: a move to another client takes the document and everything under it into that client's
+    # tree with the sharing flags it has, so its sharing is checked first (nothing is sent while anything is shared).
+    before = expect_object(
+        await client.get_one(GET_OP, path_params={"documentId": doc}, tool="move_document"), GET_OP, tool="move_document"
+    )
+    here = _client_of_record(before, "the document")
+    if parent is not None:
+        try:
+            parent_record = expect_object(
+                await client.get_one(GET_OP, path_params={"documentId": parent}, tool="move_document"),
+                GET_OP,
+                tool="move_document",
+            )
+        except GoreloAPIError as err:
+            if err.kind == "http" and err.status == HTTP_NOT_FOUND:
+                raise ValueError(
+                    "parent_document_id: Gorelo has no document with this id (HTTP 404). Nothing was changed"
+                ) from None
+            raise
+        there = _client_of_record(parent_record, "the new parent")
+    else:
+        there = move["ClientId"]
+    if here != there:
+        shown = _sharing_of_record(before)
+        count = before.get("ChildCount")
+        has_children = not (isinstance(count, int) and not isinstance(count, bool) and count == 0)
+        below, unplaced = await _shared_below(client, before, doc, "move_document") if has_children else ([], 0)
+        if shown or below or unplaced:
+            parts = []
+            if shown:
+                parts.append(f"the document itself has {' and '.join(shown)} on")
+            if below:
+                listed = ", ".join(below[:SHARED_IDS_SHOWN]) + (", ..." if len(below) > SHARED_IDS_SHOWN else "")
+                parts.append(f"{len(below)} document(s) under it are shared (ids: {listed})")
+            if unplaced:
+                parts.append(f"{unplaced} shared document(s) of the same tree could not be placed under or beside it")
+            raise ValueError(
+                f"{places[0]}: this move changes the client, and it would put shared content in front of the new client "
+                f"({'; '.join(parts)}). Nothing was changed. Ask the user; then turn sharing off with unshare_document "
+                "(public_link=true and publish_to_portal=true as needed) on each of them, and call move_document again"
+            )
+    answer = await client.patch(
         UPDATE_OP, path_params={"documentId": doc}, json_body={"Move": move}, tool="move_document"
     )
     record = _document_answer(answer, UPDATE_OP, doc, "move_document")
     problems = _move_problems(record, move)
     if problems:
         raise _unconfirmed(UPDATE_OP, f"the answer does not show the move ({'; '.join(problems)})", "get_document")
-    return _with_exposure_note(record, _moved_children_note(record))
+    return _with_exposure_note(record)
 
 
 def _move_problems(record: Mapping[str, Any], move: Mapping[str, Any]) -> list[str]:
@@ -1175,32 +1353,12 @@ def _move_problems(record: Mapping[str, Any], move: Mapping[str, Any]) -> list[s
     return problems
 
 
-def _moved_children_note(record: Mapping[str, Any]) -> str | None:
-    """A sentence when the moved document has documents under it: they moved with it, and this answer does not show their
-    sharing, so the checks name the client the record now shows (or the internal documents)."""
-    count = record.get("ChildCount")
-    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
-        return None
-    client = record.get("ClientId")
-    if client is None:
-        return (
-            "The documents under it moved with it and now belong to the internal documents; this answer does not show their "
-            "sharing: check list_documents(is_internal=true, is_published_to_portal=true) and "
-            "list_documents(is_internal=true, is_public_link_enabled=true), and tell the user."
-        )
-    return (
-        f"The documents under it moved with it and now belong to client {client}; this answer does not show their "
-        f"sharing: check list_documents(client_ids=[{client}], is_published_to_portal=true) and "
-        f"list_documents(client_ids=[{client}], is_public_link_enabled=true), and tell the user."
-    )
-
-
 @gorelo_tool(toolset=TOOLSET, kind="write", ops=[UPDATE_OP], field_map=ID_MAP, destructive_hint=True)
 async def archive_document(
     ctx: Context,
     document_id: Annotated[str, Field(description=DOCUMENT_ID_TEXT)],
 ) -> dict:
-    """Archive a document and the documents under it, and return its updated record (Status 2 Archived). Gorelo's texts disagree on how far it reaches (the direct children, or every level), so assume the whole tree. Documents cannot be deleted through this server; restore_document brings one back at the TOP level, not where it was, so note ParentDocumentId from get_document first if it may have to go back.
+    """Archive a document and every document below it, at any depth, and return its updated record (Status 2 Archived). Documents cannot be deleted through this server; restore_document brings one back at the TOP level, not where it was, so note ParentDocumentId from get_document first if it may have to go back.
     Resolve ids first: document_id -> list_documents.
     Side effects: the document and its sub-documents leave the default list and can no longer be duplicated. Archiving is not unsharing: unshare_document turns sharing off; Gorelo does not say whether an archived document stays readable through its link or the portal.
     """
@@ -1219,7 +1377,7 @@ async def restore_document(
     ctx: Context,
     document_id: Annotated[str, Field(description="Document id: the Id of an archived list_documents row (status_ids [2]).")],
 ) -> dict:
-    """Restore an ARCHIVED document and return its updated record (Status 1 Active). Gorelo puts it back at the TOP level, as the app does, not under its old parent: check ParentDocumentId in the result and use move_document to put it back. It does not say what happens to the documents that were archived under it: check with list_documents.
+    """Restore an ARCHIVED document and return its updated record (Status 1 Active). Gorelo puts it back at the TOP level, not under its old parent: check ParentDocumentId in the result and use move_document to put it back (it goes last among its new siblings). The documents below it stay archived: restore each one you need (each lands at the top level).
     Resolve ids first: document_id -> list_documents with status_ids [2].
     Side effects: the tool reads the document first and refuses one that is not archived (Gorelo's text does not say what restoring an active document does).
     """

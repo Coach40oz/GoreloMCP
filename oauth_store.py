@@ -56,6 +56,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -337,11 +338,26 @@ def _read_document(path: Path) -> dict[str, Any] | None:
     """The parsed file, or None when there is no file. Anything else that is wrong raises StateFileError, and the file is
     not touched. The messages carry no value from the file (a JSONDecodeError holds the whole document: it is dropped)."""
     try:
-        raw = path.read_bytes()
+        # Never through a symbolic link, and only a regular file (a planted link or a FIFO would read something else).
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NOCTTY | os.O_NONBLOCK)
     except FileNotFoundError:
         return None
     except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise StateFileError(
+                f"the OAuth state file {path} is a symbolic link; refusing to read it (do not chown or chmod it; "
+                "look at it, then remove it while the service is stopped)"
+            ) from None
         raise StateFileError(f"cannot read the OAuth state file {path}: {exc.strerror or _describe(exc)}") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise StateFileError(f"cannot read the OAuth state file {path}: it is not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            raw = handle.read()
+    except OSError as exc:
+        raise StateFileError(f"cannot read the OAuth state file {path}: {exc.strerror or _describe(exc)}") from None
+    finally:
+        os.close(fd)
     try:
         document = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -643,11 +659,9 @@ class StateLock:
                 ) from None
         elif not self.state_dir.is_dir():
             raise StateFileError(f"the OAuth state directory {self.state_dir} does not exist")
-        try:
-            fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, FILE_MODE)
-        except OSError as exc:
-            raise StateFileError(f"cannot open the OAuth state lock file {self.path}: {exc.strerror or _describe(exc)}") from None
-        _adopt_directory_owner(fd, self.state_dir)
+        fd, created = self._open_lock_file()
+        if created:
+            _adopt_directory_owner(fd, self.state_dir)  # only a file this call made: never an existing one
         deadline = time.monotonic() + timeout
         while True:
             try:
@@ -665,6 +679,54 @@ class StateLock:
                 time.sleep(0.05)
         self._fd = fd
         return self
+
+    def _open_lock_file(self) -> tuple[int, bool]:
+        """Open `.lock` without following a symbolic link and return (fd, created). The file is made with O_EXCL first, so
+        that only a file this call created is ever handed to the directory owner; an existing one is opened without
+        O_CREAT. The opened file must be a regular file with one link: whoever can write the state directory (the service
+        itself) could plant a symbolic link or a hard link to a root-owned file, and a script run as root must not lock,
+        chown or write through it."""
+        flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NOCTTY
+        fd = -1
+        created = False
+        for _ in range(3):  # the file can vanish between the two opens; a few rounds settle that
+            try:
+                fd = os.open(self.path, flags | os.O_CREAT | os.O_EXCL, FILE_MODE)
+                created = True
+                break
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise self._lock_open_error(exc) from None
+            try:
+                fd = os.open(self.path, flags)
+                break
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise self._lock_open_error(exc) from None
+        if fd < 0:
+            raise StateFileError(f"cannot open the OAuth state lock file {self.path}: it keeps changing")
+        try:
+            info = os.fstat(fd)
+        except OSError as exc:
+            os.close(fd)
+            raise StateFileError(f"cannot open the OAuth state lock file {self.path}: {exc.strerror or _describe(exc)}") from None
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            os.close(fd)
+            raise StateFileError(
+                f"the OAuth state lock file {self.path} is not a plain file with one link; refusing to use it "
+                "(look at it, then remove it while the service is stopped)"
+            )
+        return fd, created
+
+    def _lock_open_error(self, exc: OSError) -> StateFileError:
+        if exc.errno == errno.ELOOP:
+            return StateFileError(
+                f"the OAuth state lock file {self.path} is a symbolic link; refusing to use it "
+                "(look at it, then remove it while the service is stopped)"
+            )
+        return StateFileError(f"cannot open the OAuth state lock file {self.path}: {exc.strerror or _describe(exc)}")
 
     def release(self) -> None:
         fd, self._fd = self._fd, None

@@ -1342,25 +1342,55 @@ async def test_the_body_text_never_reaches_the_logs_on_update(server, mock_gorel
 # --------------------------------------------------------------------------
 
 
-async def test_a_move_under_a_parent_sends_the_parent_and_no_client(server, mock_gorelo):
-    patch_route(mock_gorelo, detail(ParentDocumentId=PARENT, RootDocumentId=PARENT, Depth=1))
+def move_routes(mock, before=None, parent=None, portal=(), link=(), patch=None):
+    """The requests move_document makes: the document (GET), the new parent (GET, only for parent_document_id), the shared
+    documents of the client (one list read per flag) and the PATCH."""
+    get_route(mock, before if before is not None else detail())
+    if parent is not None:
+        get_route(mock, parent, doc=PARENT)
+    mock.on("GET", DOCS, paged_envelope(list(portal)), query={"IsPublishedToPortal": "true"})
+    mock.on("GET", DOCS, paged_envelope(list(link)), query={"IsPublicLinkEnabled": "true"})
+    if patch is not None:
+        patch_route(mock, patch)
+
+
+def methods(mock):
+    return [(r.method, r.path) for r in mock.requests]
+
+
+async def test_a_move_under_a_parent_of_the_same_client_reads_both_documents_and_sends_the_parent_and_no_client(server, mock_gorelo):
+    move_routes(mock_gorelo, parent=detail(PARENT), patch=detail(ParentDocumentId=PARENT, RootDocumentId=PARENT, Depth=1))
     result = await call_tool(server, "move_document", {"document_id": DOC, "parent_document_id": PARENT.upper()})
     request = mock_gorelo.last
     assert (request.method, request.path, request.query) == ("PATCH", DOC_PATH, {})
     assert request.json == {"Move": {"ParentDocumentId": PARENT}}
-    assert result["ParentDocumentId"] == PARENT and len(mock_gorelo.requests) == 1
+    assert result["ParentDocumentId"] == PARENT
+    # the same client on both sides: nothing changes for who can read it, so there is no scan for shared documents
+    assert methods(mock_gorelo) == [("GET", DOC_PATH), ("GET", f"{DOCS}/{PARENT}"), ("PATCH", DOC_PATH)]
 
 
-async def test_a_move_to_the_top_level_of_a_client_sends_a_null_parent_and_the_client(server, mock_gorelo):
-    patch_route(mock_gorelo, detail(ClientId=77))
+async def test_a_move_to_the_top_level_of_another_client_checks_the_sharing_of_the_tree_then_sends_the_client(server, mock_gorelo):
+    move_routes(mock_gorelo, patch=detail(ClientId=77))  # the default document has one document under it
     await call_tool(server, "move_document", {"document_id": DOC, "client_id": 77})
     assert mock_gorelo.last.json == {"Move": {"ParentDocumentId": None, "ClientId": 77}}
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "GET", "GET", "PATCH"]
+    scans = mock_gorelo.calls("GET", DOCS)
+    assert [r.query for r in scans] == [
+        {"ClientIds": str(CLIENT), "StatusIds": "1,2", "IsPublishedToPortal": "true", "PageSize": "200"},
+        {"ClientIds": str(CLIENT), "StatusIds": "1,2", "IsPublicLinkEnabled": "true", "PageSize": "200"},
+    ]  # archived documents are read too
 
 
 async def test_a_move_to_the_internal_top_level_sends_two_nulls(server, mock_gorelo):
-    patch_route(mock_gorelo, detail(ClientId=None))
+    move_routes(mock_gorelo, patch=detail(ClientId=None))
     await call_tool(server, "move_document", {"document_id": DOC, "internal": True})
     assert mock_gorelo.last.json == {"Move": {"ParentDocumentId": None, "ClientId": None}}
+
+
+async def test_a_move_without_documents_under_it_reads_no_list(server, mock_gorelo):
+    move_routes(mock_gorelo, before=detail(ChildCount=0), patch=detail(ClientId=77, ChildCount=0))
+    await call_tool(server, "move_document", {"document_id": DOC, "client_id": 77})
+    assert methods(mock_gorelo) == [("GET", DOC_PATH), ("PATCH", DOC_PATH)]
 
 
 @pytest.mark.parametrize(
@@ -1403,15 +1433,16 @@ async def test_the_destination_is_validated_locally(server, mock_gorelo, extra, 
     ],
 )
 async def test_an_answer_that_does_not_show_the_move_is_an_unconfirmed_write(server, mock_gorelo, extra, answer, said):
-    patch_route(mock_gorelo, answer)
+    move_routes(mock_gorelo, parent=detail(PARENT), patch=answer)
     text = await call_tool_error(server, "move_document", {"document_id": DOC, **extra})
     assert text.startswith("Gorelo returned an unexpected response for move_document") and said in text
     assert "verify it with a read before repeating it (get_document)" in text
 
 
-async def test_a_moved_document_that_is_shared_carries_a_note(server, mock_gorelo):
-    patch_route(mock_gorelo, detail(ClientId=77, ChildCount=0, PublicLinkEnabled=True, PublicLinkUrl="https://share.example.test/d/x", PublishToPortalEnabled=True))
-    result = await call_tool(server, "move_document", {"document_id": DOC, "client_id": 77})
+async def test_a_moved_document_that_is_shared_and_stays_with_its_client_carries_a_note(server, mock_gorelo):
+    shared = dict(PublicLinkEnabled=True, PublicLinkUrl="https://share.example.test/d/x", PublishToPortalEnabled=True)
+    move_routes(mock_gorelo, before=detail(ClientId=77, ChildCount=0, **shared), patch=detail(ClientId=77, ChildCount=0, **shared))
+    result = await call_tool(server, "move_document", {"document_id": DOC, "client_id": 77})  # 77 to the top level of 77
     assert result["note"] == (
         "The answer shows that its public link is on (anyone with PublicLinkUrl can read it without a login) and it is "
         "published to the client portal. Tell the user; unshare_document turns it off."
@@ -1419,62 +1450,14 @@ async def test_a_moved_document_that_is_shared_carries_a_note(server, mock_gorel
 
 
 async def test_a_moved_document_that_is_not_shared_has_no_note(server, mock_gorelo):
-    patch_route(mock_gorelo, detail(ClientId=77, ChildCount=0))
+    move_routes(mock_gorelo, patch=detail(ClientId=77, ChildCount=0))
     assert "note" not in await call_tool(server, "move_document", {"document_id": DOC, "client_id": 77})
 
 
-@pytest.mark.parametrize("child_count", [0, None, True], ids=["zero", "null", "boolean"])
-async def test_a_move_whose_answer_shows_no_documents_under_it_has_no_child_note(server, mock_gorelo, child_count):
-    patch_route(mock_gorelo, detail(ClientId=77, ChildCount=child_count))
-    assert "note" not in await call_tool(server, "move_document", {"document_id": DOC, "client_id": 77})
-
-
-async def test_a_move_whose_answer_has_no_child_count_has_no_child_note(server, mock_gorelo):
-    answer = detail(ClientId=77)
-    del answer["ChildCount"]
-    patch_route(mock_gorelo, answer)
-    assert "note" not in await call_tool(server, "move_document", {"document_id": DOC, "client_id": 77})
-
-
-async def test_a_move_to_a_client_says_the_documents_under_it_moved_and_names_the_client_checks(server, mock_gorelo):
-    patch_route(mock_gorelo, detail(ClientId=77, ChildCount=2))
+async def test_the_old_after_the_fact_note_about_the_documents_under_it_is_gone_because_the_tool_checked_before(server, mock_gorelo):
+    move_routes(mock_gorelo, patch=detail(ClientId=77, ChildCount=2))
     result = await call_tool(server, "move_document", {"document_id": DOC, "client_id": 77})
-    assert result["note"] == (
-        "The documents under it moved with it and now belong to client 77; this answer does not show their sharing: check "
-        "list_documents(client_ids=[77], is_published_to_portal=true) and list_documents(client_ids=[77], "
-        "is_public_link_enabled=true), and tell the user."
-    )
-
-
-async def test_a_move_under_a_parent_names_the_client_the_answer_shows_for_the_documents_under_it(server, mock_gorelo):
-    patch_route(mock_gorelo, detail(ParentDocumentId=PARENT, RootDocumentId=PARENT, Depth=1, ChildCount=2))
-    result = await call_tool(server, "move_document", {"document_id": DOC, "parent_document_id": PARENT})
-    assert result["note"] == (
-        f"The documents under it moved with it and now belong to client {CLIENT}; this answer does not show their sharing: "
-        f"check list_documents(client_ids=[{CLIENT}], is_published_to_portal=true) and "
-        f"list_documents(client_ids=[{CLIENT}], is_public_link_enabled=true), and tell the user."
-    )
-
-
-async def test_a_move_to_the_internal_top_level_names_the_internal_checks_for_the_documents_under_it(server, mock_gorelo):
-    patch_route(mock_gorelo, detail(ClientId=None, ChildCount=2))
-    result = await call_tool(server, "move_document", {"document_id": DOC, "internal": True})
-    assert result["note"] == (
-        "The documents under it moved with it and now belong to the internal documents; this answer does not show their "
-        "sharing: check list_documents(is_internal=true, is_published_to_portal=true) and "
-        "list_documents(is_internal=true, is_public_link_enabled=true), and tell the user."
-    )
-
-
-async def test_a_shared_document_with_documents_under_it_carries_both_notes_in_one(server, mock_gorelo):
-    patch_route(mock_gorelo, detail(ClientId=77, ChildCount=2, PublicLinkEnabled=True, PublicLinkUrl="https://share.example.test/d/x"))
-    result = await call_tool(server, "move_document", {"document_id": DOC, "client_id": 77})
-    assert result["note"] == (
-        "The answer shows that its public link is on (anyone with PublicLinkUrl can read it without a login). Tell the user; "
-        "unshare_document turns it off. The documents under it moved with it and now belong to client 77; this answer does "
-        "not show their sharing: check list_documents(client_ids=[77], is_published_to_portal=true) and "
-        "list_documents(client_ids=[77], is_public_link_enabled=true), and tell the user."
-    )
+    assert "note" not in result
 
 
 @pytest.mark.parametrize(
@@ -1482,9 +1465,191 @@ async def test_a_shared_document_with_documents_under_it_carries_both_notes_in_o
     [("Move.ParentDocumentId", "parent_document_id"), ("ParentDocumentId", "parent_document_id"), ("Move.ClientId", "client_id"), ("ClientId", "client_id")],
 )
 async def test_a_gorelo_400_names_the_snake_case_param_on_move(server, mock_gorelo, property_name, mapped):
+    move_routes(mock_gorelo)
     mock_gorelo.on("PATCH", DOC_PATH, error_envelope(400, [("070101", "rejected", property_name)]))
     text = await call_tool_error(server, "move_document", {"document_id": DOC, "client_id": 77})
     assert text == f"Gorelo rejected move_document (HTTP 400, code 070101): {mapped}: rejected [trace {TEST_TRACE_ID}]"
+
+
+# --- the check before a move to another client: shared content must not reach the new client by a move
+
+SHARED_LINK = dict(PublicLinkEnabled=True, PublicLinkUrl="https://share.example.test/d/x")
+SHARED_PORTAL = dict(PublishToPortalEnabled=True)
+CHILD = uid(5)
+GRANDCHILD = uid(6)
+SIBLING_BRANCH = uid(7)
+ELSEWHERE_CLIENT = 77
+
+
+def refusal_asserts(text, place="client_id"):
+    assert text.startswith(f"{place}: this move changes the client, and it would put shared content in front of the new client (")
+    assert "Nothing was changed. Ask the user; then turn sharing off with unshare_document" in text
+    assert "call move_document again" in text
+
+
+@pytest.mark.parametrize("flags", [SHARED_LINK, SHARED_PORTAL, {**SHARED_LINK, **SHARED_PORTAL}], ids=["public-link", "portal", "both"])
+@pytest.mark.parametrize("extra", [{"client_id": 77}, {"internal": True}], ids=["to-a-client", "to-internal"])
+async def test_a_shared_document_is_not_moved_to_another_client_and_nothing_is_sent(server, mock_gorelo, flags, extra):
+    move_routes(mock_gorelo, before=detail(ChildCount=0, **flags))
+    text = await call_tool_error(server, "move_document", {"document_id": DOC, **extra})
+    refusal_asserts(text, next(iter(extra)))
+    assert "the document itself has" in text
+    assert mock_gorelo.calls("PATCH") == []
+    assert methods(mock_gorelo) == [("GET", DOC_PATH)]  # childless: no list read either
+
+
+@pytest.mark.parametrize(
+    "flags, said",
+    [(SHARED_LINK, "the document itself has its public link on"), (SHARED_PORTAL, "the document itself has publishing to the client portal on"),
+     ({**SHARED_LINK, **SHARED_PORTAL}, "the document itself has its public link and publishing to the client portal on")],
+)
+async def test_the_refusal_names_what_is_on(server, mock_gorelo, flags, said):
+    move_routes(mock_gorelo, before=detail(ChildCount=0, **flags))
+    assert said in await call_tool_error(server, "move_document", {"document_id": DOC, "client_id": 77})
+
+
+async def test_a_move_under_a_parent_of_another_client_is_refused_for_a_shared_document(server, mock_gorelo):
+    move_routes(mock_gorelo, before=detail(ChildCount=0, **SHARED_PORTAL), parent=detail(PARENT, ClientId=ELSEWHERE_CLIENT))
+    text = await call_tool_error(server, "move_document", {"document_id": DOC, "parent_document_id": PARENT})
+    refusal_asserts(text, "parent_document_id")
+    assert mock_gorelo.calls("PATCH") == []
+
+
+async def test_an_internal_shared_document_moved_to_a_client_is_refused(server, mock_gorelo):
+    move_routes(mock_gorelo, before=detail(ChildCount=0, ClientId=None, **SHARED_LINK))
+    refusal_asserts(await call_tool_error(server, "move_document", {"document_id": DOC, "client_id": 77}))
+
+
+async def test_a_shared_document_moved_within_its_own_client_is_allowed(server, mock_gorelo):
+    move_routes(
+        mock_gorelo, before=detail(ChildCount=0, **SHARED_PORTAL), parent=detail(PARENT),
+        patch=detail(ChildCount=0, ParentDocumentId=PARENT, RootDocumentId=PARENT, Depth=1, **SHARED_PORTAL),
+    )
+    result = await call_tool(server, "move_document", {"document_id": DOC, "parent_document_id": PARENT})
+    assert result["PublishToPortalEnabled"] is True and "published to the client portal" in result["note"]
+    assert len(mock_gorelo.calls("PATCH")) == 1
+
+
+async def test_a_shared_document_under_a_top_level_folder_blocks_the_move_of_the_folder(server, mock_gorelo):
+    below = row(CHILD, RootDocumentId=DOC, ParentDocumentId=DOC, Depth=1, **SHARED_PORTAL)
+    move_routes(mock_gorelo, portal=[below])
+    text = await call_tool_error(server, "move_document", {"document_id": DOC, "client_id": 77})
+    refusal_asserts(text)
+    assert f"1 document(s) under it are shared (ids: {CHILD})" in text and "the document itself has" not in text
+    assert mock_gorelo.calls("PATCH") == []
+
+
+async def test_a_document_that_is_in_both_lists_is_counted_once_and_an_archived_one_counts(server, mock_gorelo):
+    both = row(CHILD, RootDocumentId=DOC, ParentDocumentId=DOC, Depth=1, Status=dict(STATUS_ARCHIVED), **SHARED_LINK, **SHARED_PORTAL)
+    move_routes(mock_gorelo, portal=[both], link=[both])
+    text = await call_tool_error(server, "move_document", {"document_id": DOC, "client_id": 77})
+    assert f"1 document(s) under it are shared (ids: {CHILD})" in text
+
+
+async def test_the_ids_of_many_shared_documents_are_cut_to_ten(server, mock_gorelo):
+    rows = [row(uid(100 + n), RootDocumentId=DOC, ParentDocumentId=DOC, Depth=1, **SHARED_PORTAL) for n in range(12)]
+    move_routes(mock_gorelo, portal=rows)
+    text = await call_tool_error(server, "move_document", {"document_id": DOC, "client_id": 77})
+    assert "12 document(s) under it are shared (ids: " in text and text.count(uid(100)) == 1 and ", ...)" in text
+    assert uid(111) not in text
+
+
+async def test_a_shared_document_of_another_tree_is_not_below_the_moved_one(server, mock_gorelo):
+    other_tree = row(CHILD, RootDocumentId=OTHER, ParentDocumentId=OTHER, Depth=1, **SHARED_PORTAL)
+    move_routes(mock_gorelo, portal=[other_tree], patch=detail(ClientId=77))
+    await call_tool(server, "move_document", {"document_id": DOC, "client_id": 77})
+    assert len(mock_gorelo.calls("PATCH")) == 1
+
+
+async def test_a_nested_folder_is_checked_by_walking_up_from_each_shared_document(server, mock_gorelo):
+    # DOC is at depth 1 under ROOT. Below it: CHILD (depth 2), GRANDCHILD (depth 3, shared). A shared document in the
+    # same tree but in the other branch must not count.
+    root = uid(8)
+    inside = row(GRANDCHILD, RootDocumentId=root, ParentDocumentId=CHILD, Depth=3, **SHARED_PORTAL)
+    elsewhere = row(SIBLING_BRANCH, RootDocumentId=root, ParentDocumentId=uid(9), Depth=3, **SHARED_PORTAL)
+    nested = detail(RootDocumentId=root, ParentDocumentId=root, Depth=1)
+    move_routes(mock_gorelo, before=nested, portal=[inside, elsewhere])
+    get_route(mock_gorelo, detail(CHILD, RootDocumentId=root, ParentDocumentId=DOC, Depth=2), doc=CHILD)
+    get_route(mock_gorelo, detail(uid(9), RootDocumentId=root, ParentDocumentId=root, Depth=2), doc=uid(9))
+    text = await call_tool_error(server, "move_document", {"document_id": DOC, "client_id": 77})
+    assert f"1 document(s) under it are shared (ids: {GRANDCHILD})" in text and SIBLING_BRANCH not in text
+    assert mock_gorelo.calls("PATCH") == []
+
+
+async def test_a_nested_folder_with_only_a_shared_document_in_another_branch_moves(server, mock_gorelo):
+    root = uid(8)
+    elsewhere = row(SIBLING_BRANCH, RootDocumentId=root, ParentDocumentId=uid(9), Depth=3, **SHARED_PORTAL)
+    nested = detail(RootDocumentId=root, ParentDocumentId=root, Depth=1)
+    move_routes(mock_gorelo, before=nested, portal=[elsewhere], patch=detail(ClientId=77))
+    get_route(mock_gorelo, detail(uid(9), RootDocumentId=root, ParentDocumentId=root, Depth=2), doc=uid(9))
+    await call_tool(server, "move_document", {"document_id": DOC, "client_id": 77})
+    assert len(mock_gorelo.calls("PATCH")) == 1
+
+
+async def test_a_shared_document_that_cannot_be_placed_in_the_read_budget_stops_the_move(server, mock_gorelo, monkeypatch):
+    monkeypatch.setattr(documents, "SHARED_WALK_MAX", 0)
+    root = uid(8)
+    deep = row(GRANDCHILD, RootDocumentId=root, ParentDocumentId=CHILD, Depth=3, **SHARED_PORTAL)
+    move_routes(mock_gorelo, before=detail(RootDocumentId=root, ParentDocumentId=root, Depth=1), portal=[deep])
+    text = await call_tool_error(server, "move_document", {"document_id": DOC, "client_id": 77})
+    refusal_asserts(text)
+    assert "1 shared document(s) of the same tree could not be placed under or beside it" in text
+    assert mock_gorelo.calls("PATCH") == []
+
+
+async def test_more_shared_documents_than_the_scan_reads_stops_the_move(server, mock_gorelo, monkeypatch):
+    monkeypatch.setattr(documents, "SHARED_SCAN_MAX", 2)
+    rows = [row(uid(100 + n), RootDocumentId=OTHER, ParentDocumentId=OTHER, Depth=1, **SHARED_PORTAL) for n in range(3)]
+    move_routes(mock_gorelo, portal=rows)
+    text = await call_tool_error(server, "move_document", {"document_id": DOC, "client_id": 77})
+    assert text.startswith("document_id: too many shared documents to check one by one (more than 2 for this client)")
+    assert "Nothing was changed" in text and mock_gorelo.calls("PATCH") == []
+
+
+async def test_an_internal_tree_is_scanned_with_is_internal(server, mock_gorelo):
+    move_routes(mock_gorelo, before=detail(ClientId=None), patch=detail(ClientId=77))
+    await call_tool(server, "move_document", {"document_id": DOC, "client_id": 77})
+    assert [r.query for r in mock_gorelo.calls("GET", DOCS)][0] == {
+        "IsInternal": "true", "StatusIds": "1,2", "IsPublishedToPortal": "true", "PageSize": "200",
+    }
+
+
+@pytest.mark.parametrize("name", ["PublicLinkEnabled", "PublishToPortalEnabled"])
+@pytest.mark.parametrize("bad", [None, "false", 0], ids=["null", "text", "number"])
+async def test_a_document_whose_sharing_flag_cannot_be_read_stops_the_move(server, mock_gorelo, name, bad):
+    move_routes(mock_gorelo, before=detail(ChildCount=0, **{name: bad}))
+    text = await call_tool_error(server, "move_document", {"document_id": DOC, "client_id": 77})
+    assert text.startswith("Gorelo returned an unexpected response for move_document: GET /v1/documents/{documentId}: ")
+    assert f"no readable {name}" in text and text.endswith("refusing to guess. Nothing was changed")
+    assert mock_gorelo.calls("PATCH") == []
+
+
+@pytest.mark.parametrize("bad", ["x", True, 1.5], ids=["text", "boolean", "decimal"])
+async def test_a_document_whose_client_cannot_be_read_stops_the_move(server, mock_gorelo, bad):
+    move_routes(mock_gorelo, before=detail(ClientId=bad))
+    text = await call_tool_error(server, "move_document", {"document_id": DOC, "client_id": 77})
+    assert "the document has no readable ClientId" in text and mock_gorelo.calls("PATCH") == []
+
+
+async def test_a_parent_that_does_not_exist_is_named_and_nothing_is_sent(server, mock_gorelo):
+    get_route(mock_gorelo, detail())
+    mock_gorelo.on("GET", f"{DOCS}/{PARENT}", error_envelope(404, [("070401", "Document not found.", "documentId")]))
+    text = await call_tool_error(server, "move_document", {"document_id": DOC, "parent_document_id": PARENT})
+    assert text == "parent_document_id: Gorelo has no document with this id (HTTP 404). Nothing was changed"
+    assert mock_gorelo.calls("PATCH") == []
+
+
+async def test_a_document_that_does_not_exist_is_a_404_on_the_document_id(server, mock_gorelo):
+    mock_gorelo.on("GET", DOC_PATH, error_envelope(404, [("070401", "Document not found.", "documentId")]))
+    text = await call_tool_error(server, "move_document", {"document_id": DOC, "client_id": 77})
+    assert text == f"Gorelo rejected move_document (HTTP 404, code 070401): document_id: Document not found. [trace {TEST_TRACE_ID}]"
+    assert mock_gorelo.calls("PATCH") == []
+
+
+async def test_move_document_is_not_gated_and_not_confirm_driven(server):
+    tools = {t.name: t for t in await list_tools(server)}
+    assert "confirm" not in tools["move_document"].inputSchema["properties"]
+    assert set(tools["move_document"].inputSchema["properties"]) == {"document_id", "parent_document_id", "client_id", "internal"}
 
 
 # --------------------------------------------------------------------------
@@ -1580,6 +1745,8 @@ ARCHIVED_LINK_NOTE = (
 )
 async def test_a_write_whose_answer_is_an_archived_document_gets_the_archive_sentence(server, mock_gorelo, tool, args, answer, note):
     patch_route(mock_gorelo, answer)
+    if tool == "move_document":
+        move_routes(mock_gorelo)  # the reads before the move
     result = await call_tool(server, tool, {"document_id": DOC, **args})
     assert result["note"] == note
     assert "anyone with PublicLinkUrl can read it" not in result["note"]
@@ -1835,6 +2002,7 @@ async def test_a_timeout_sharing_is_not_retried_and_says_to_verify(server, mock_
 async def test_no_request_of_any_other_tool_can_carry_a_true_sharing_flag(server, mock_gorelo):
     """Only share_document may turn sharing on: run every write tool and read every request body it sent."""
     get_route(mock_gorelo, detail(Status=dict(STATUS_ARCHIVED), Attachments=[PLAN]))
+    get_route(mock_gorelo, detail(PARENT), doc=PARENT)  # move_document reads the new parent
     patch_route(mock_gorelo, detail(Status=dict(STATUS_ACTIVE), Title="T2", Attachments=[PLAN], ParentDocumentId=PARENT))
     mock_gorelo.on("POST", DOCS, envelope(detail(NEW, Title="T")))
     mock_gorelo.on("POST", f"{DOC_PATH}/duplicate", envelope(detail(NEW, Title="Backup runbook clone")))
@@ -1868,8 +2036,10 @@ def test_only_the_two_sharing_tools_use_the_sharing_helpers_and_no_other_functio
         "share_document", "unshare_document",
     }
     # the flag names appear in the helpers that build and read a sharing request, and in the exposure note that only reads
+    # (_sharing_of_record only READS the two flags of a document, and _shared_below only filters list reads on the filter
+    # names IsPublishedToPortal and IsPublicLinkEnabled, before move_document decides to refuse; neither writes a flag)
     named = {name for name, text in texts.items() if "PublicLinkEnabled" in text or "PublishToPortalEnabled" in text or "SHARE_MAP" in text}
-    assert named <= {"_sharing_flags", "_sharing_answer", "_exposure_note"}, named
+    assert named <= {"_sharing_flags", "_sharing_answer", "_exposure_note", "_sharing_of_record", "_shared_below"}, named
 
 
 # --------------------------------------------------------------------------
@@ -2392,7 +2562,7 @@ EXPECTED_TOOLS = {
     ),
     "create_document": ("write", ["POST /v1/documents"], False),
     "update_document": ("write", ["GET /v1/documents/{documentId}", "PATCH /v1/documents/{documentId}"], True),
-    "move_document": ("write", ["PATCH /v1/documents/{documentId}"], True),
+    "move_document": ("write", ["GET /v1/documents/{documentId}", "GET /v1/documents", "PATCH /v1/documents/{documentId}"], True),
     "archive_document": ("write", ["PATCH /v1/documents/{documentId}"], True),
     "restore_document": ("write", ["GET /v1/documents/{documentId}", "PATCH /v1/documents/{documentId}"], True),
     "unshare_document": ("write", ["PATCH /v1/documents/{documentId}"], True),
@@ -2567,7 +2737,9 @@ async def test_the_docstrings_state_the_facts_the_model_must_know(server):
     assert "time-limited token" in tools["get_document"]
     assert "10 MB cap" in tools["export_document_pdf"] and "no export event" in tools["export_document_pdf"]
     assert "Active ones only unless status_ids includes 2" in tools["list_documents"]
-    assert "Gorelo's texts disagree" in tools["archive_document"] and "assume the whole tree" in tools["archive_document"]
+    assert "every document below it, at any depth" in tools["archive_document"] and "disagree" not in tools["archive_document"]
+    assert "The documents below it stay archived: restore each one you need (each lands at the top level)" in tools["restore_document"]
+    assert "does not say what happens" not in tools["restore_document"]
     assert "TOP level" in tools["archive_document"] and "TOP level" in tools["restore_document"]
     assert "refuses one that is not archived" in tools["restore_document"]
     assert "Give exactly one place" in tools["create_document"] and "added to its related items" in tools["create_document"]
@@ -2583,9 +2755,12 @@ async def test_the_docstrings_state_the_facts_the_model_must_know(server):
     assert "publish_to_portal=true: the client portal no longer shows it" in tools["unshare_document"]
     assert "the result names one that is still on" in tools["unshare_document"]
     assert "Archiving is not unsharing: unshare_document turns sharing off" in tools["archive_document"]
-    assert "If it or a document under it is shared, check who can now see it" in tools["move_document"]
+    assert "it goes last among its new siblings" in tools["move_document"] and "position among its new siblings is unchanged" not in tools["move_document"]
+    assert "A move to ANOTHER client is refused, with nothing sent, while the document or a document under it is published to the client portal or has its public link on" in tools["move_document"]
+    assert "unshare_document each one, then move" in tools["move_document"]
     assert "takes one out of the default list" in tools["create_document"]
-    assert "make two calls, one with updated_since and one with created_since" in tools["list_documents"]
+    assert "pass updated_since (a new, never-edited document counts as updated when created, so one call is enough)" in tools["list_documents"]
+    assert "make two calls" not in tools["list_documents"] and "archiving a document archives every document below it" in tools["list_documents"]
     for name in GATED:
         assert "Ask the user first; needs confirm=true." in tools[name]
 

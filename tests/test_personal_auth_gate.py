@@ -920,6 +920,37 @@ async def test_a_valid_request_gets_the_consent_page_with_the_headers_and_one_lo
     ]
 
 
+async def test_the_deny_button_submits_with_an_empty_password_and_approve_does_not(state_dir, make_provider, serve):
+    """The password input is `required`, so a browser blocks a submit while it is empty. Deny must carry formnovalidate,
+    or the documented way to refuse a sign-in only works once something is typed into the password field."""
+    from html.parser import HTMLParser
+
+    class Page(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.password = None
+            self.buttons = {}
+
+        def handle_starttag(self, tag, attrs):
+            attributes = dict(attrs)
+            if tag == "input" and attributes.get("name") == "password":
+                self.password = attributes
+            if tag == "button" and attributes.get("name") == "decision":
+                self.buttons[attributes.get("value")] = attributes
+
+    provider = make_provider(state_dir)
+    client = await make_client(provider)
+    async with serve(provider) as gate:
+        reply = await gate.at().get("/authorize", params=params(client))
+    page = Page()
+    page.feed(reply.text)
+    assert page.password is not None and "required" in page.password
+    assert set(page.buttons) == {"approve", "deny"}
+    assert "formnovalidate" in page.buttons["deny"]
+    assert "formnovalidate" not in page.buttons["approve"]
+    assert page.buttons["deny"]["type"] == "submit" and page.buttons["approve"]["type"] == "submit"
+
+
 async def test_optional_fields_that_are_empty_count_as_absent_the_way_the_form_always_carried_them(state_dir, make_provider, serve):
     provider = make_provider(state_dir)
     client = await make_client(provider)
@@ -2987,6 +3018,9 @@ async def test_garbage_sent_to_the_token_and_revoke_endpoints_is_a_4xx_and_never
         ({"content-type": f"multipart/form-data; boundary={boundary}"}, b"\xc0\x80garbage"),
         ({"content-type": f"multipart/form-data; boundary={boundary}"}, b"hello world"),
         ({"content-type": f"multipart/form-data; boundary={boundary}"}, b"--bnd\r\nno colon header\r\n\r\ndata\r\n--bnd--\r\n"),
+        ({"content-type": "multipart/form-data=; boundary=x"}, b"hello world"),
+        ({"content-type": "MULTIPART/FORM-DATA=1;boundary=x"}, b"hello world"),
+        ({"content-type": 'multipart/form-data =abc; boundary="x"'}, b"hello world"),
     ]
     async with serve(provider) as gate:
         for headers, body in bodies:
@@ -3053,6 +3087,60 @@ async def test_a_multipart_request_with_credentials_is_read_by_the_handler_throu
         assert reply.status_code == 401 and reply.json() == {"error": "invalid_grant", "error_description": "refresh token does not exist"}
     else:  # RFC 7009: a token that is not known is a success
         assert reply.status_code == 200 and reply.content == b""
+
+
+# Content-Type values that python-multipart's parse_options_header (what Starlette asks) reads as multipart/form-data although a
+# plain split at ';' does not: the guard used to pass them on unread and the handler then answered with an unhandled 500.
+ODD_MULTIPART_TYPES = [
+    "multipart/form-data=; boundary=x",
+    "MULTIPART/FORM-DATA=1;boundary=x",
+    'multipart/form-data =abc; boundary="x"',
+]
+
+
+@pytest.mark.parametrize("path", ["/token", "/revoke"])
+@pytest.mark.parametrize("content_type", ODD_MULTIPART_TYPES)
+async def test_a_content_type_that_only_starlette_reads_as_multipart_is_a_clean_400_not_a_500(
+    state_dir, make_provider, serve, monkeypatch, caplog, path, content_type
+):
+    capture(caplog)
+    provider = make_provider(state_dir)
+    ran = handler_spies(provider, monkeypatch)
+    async with serve(provider) as gate:
+        reply = await gate.at().post(path, content=b"hello world", headers={"content-type": content_type})
+    assert reply.status_code == 400 and reply.json() == {"error": "invalid_request", "error_description": "The request is not valid."}
+    assert ran == [] and lines(caplog, "oauth-guard") == [f"body outcome=bad_form path={path} ip={OPERATOR_IP}"]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR or r.exc_info]
+
+
+@pytest.mark.parametrize("content_type", ODD_MULTIPART_TYPES)
+def test_the_guard_and_starlette_agree_on_what_a_multipart_form_is(content_type):
+    from python_multipart.multipart import parse_options_header
+
+    scope = {"type": "http", "headers": [(b"content-type", content_type.encode())]}
+    assert parse_options_header(content_type)[0] == b"multipart/form-data"
+    assert oauth_guard._is_multipart_form(scope) is True
+
+
+def test_the_guard_decides_like_starlette_for_every_type_in_a_list_and_fails_closed_when_it_cannot_read_the_header(monkeypatch):
+    from python_multipart.multipart import parse_options_header
+
+    for value in (
+        "multipart/form-data", "multipart/form-data; boundary=x", "Multipart/Form-Data;boundary=x", "multipart/mixed; boundary=x",
+        "application/x-www-form-urlencoded", "application/json", "text/plain", "multipart/form-data-x; boundary=x", "",
+        "multipart", ";multipart/form-data", " multipart/form-data ; boundary=x",
+    ):
+        scope = {"type": "http", "headers": [(b"content-type", value.encode())]}
+        assert oauth_guard._is_multipart_form(scope) is (parse_options_header(value)[0] == b"multipart/form-data"), value
+    assert oauth_guard._is_multipart_form({"type": "http", "headers": []}) is False
+    monkeypatch.setattr(oauth_guard, "_parse_options_header", None)
+    assert oauth_guard._is_multipart_form({"type": "http", "headers": [(b"content-type", b"text/plain")]}) is True
+
+    def broken(value):
+        raise ValueError("unreadable")
+
+    monkeypatch.setattr(oauth_guard, "_parse_options_header", broken)
+    assert oauth_guard._is_multipart_form({"type": "http", "headers": [(b"content-type", b"text/plain")]}) is True
 
 
 async def test_the_form_guard_hands_a_body_that_parses_on_unchanged_and_passes_other_bodies_by_without_reading_them():

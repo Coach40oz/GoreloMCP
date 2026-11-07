@@ -16,15 +16,15 @@ A self-hosted server that lets Claude (on claude.ai) work with your Gorelo PSA. 
 - "Find the backup procedure document for Acme and show me its last three versions." (needs the optional `documents` toolset)
 - "Run health_check and tell me if the Gorelo connection is fine."
 
-## What's new in 1.3.0
+## What's new in 1.6.0
 
-Version 1.3.0 follows Gorelo's API description of 2026-10-17. It adds the optional `documents` toolset (list, read, create, edit, move, archive and restore documents, their versions and related items, and a PDF export), `list_deletions` (a feed of records deleted in Gorelo), `get_custom_asset`, and moving a custom asset to another client. Two settings fix problems reported by a user of the public repository: `GORELO_BASE_URL` for a Gorelo account hosted in Australia, and `MCP_EXTRA_REDIRECT_DOMAINS` so that Microsoft Copilot Studio (and ChatGPT) can sign in. `GORELO_ENABLE_DESTRUCTIVE` can now list just the gated tools you want. Status ids are checked against Gorelo's scales, a custom field that Gorelo hides from the API is handled, and `create_project_comment` no longer takes `body_text`. The documents tools, hidden custom fields and the sign-in of ChatGPT and Copilot Studio have not been tested against a live Gorelo account or the real services yet. Version 1.2.0 added custom fields (read with `get_client` and `get_agent`, set and cleared with `update_client`) and version 1.1.0 added custom assets. See [CHANGELOG.md](CHANGELOG.md).
+Version 1.6.0 follows Gorelo's API description of 2026-11-05 (170 operations). It adds `list_sla_policies`, which turns the SLA policy id on a ticket into a policy name and its targets, and the ticket reads now show the SLA fields. `create_contract` and `update_contract` are available again as gated tools: they were tried against a live Gorelo account on 2026-11-03 (a contract created with and without dates, and archived) and worked. The server now has 162 tools, 144 regular and 18 gated. This release also fixes many smaller problems: safer sign-in handling and idle sessions, stricter checks of numbers and yes/no values in the uptime and catalog tools, a document move that refuses to hand a shared document to another client, an `update_item` that does not drop sub-items by mistake, clearer texts about contact tags, voids and emails of invoices, deleting a contact, and a check of `PUBLIC_BASE_URL` at the start. See [CHANGELOG.md](CHANGELOG.md) for the list by area. Earlier releases added documents (1.3.0), custom fields (1.2.0) and custom assets (1.1.0). Sharing a document, hidden custom fields and the sign-in of ChatGPT and Copilot Studio have not been tested against a live Gorelo account or the real services yet.
 
 ## What it does not do, and how it stays safe
 
-- The gated tools (deletes, voids, document sharing and approved invoices) are switched off by default. If you switch them on, every call still needs an explicit `confirm=true`. You can switch on only some of them, by name, and switch them off again at any time ([docs/INSTALL.md](docs/INSTALL.md), step 8.2).
+- The gated tools (deletes, voids, approved invoices, contract writes and document sharing) are switched off by default. If you switch them on, every call still needs an explicit `confirm=true`. You can switch on only some of them, by name, and switch them off again at any time ([docs/INSTALL.md](docs/INSTALL.md), step 8.2).
 - Making a document readable outside Gorelo (a public link, or publishing to the client portal) is also one of the switched-off tools: `share_document`. The tool that edits documents cannot change sharing, and a document body is treated as data, never as instructions.
-- Some operations can never be called, even with everything switched on: deleting clients, contacts, tickets, agent assets, custom assets and contracts, and creating or revoking API keys.
+- Some operations can never be called, even with everything switched on: deleting clients, tickets, agent assets, custom assets and contracts, and creating or revoking API keys. Deleting a contact is possible only through the gated `delete_contact`.
 - Ticket comments are private by default and email nobody. Claude is told to say who will be emailed before it posts anything public.
 - Invoices created by the normal tool are always Drafts. Creating an Approved invoice is one of the switched-off tools.
 - Every request is checked against Gorelo's published API description before it is sent, so a mistyped field is refused locally.
@@ -59,17 +59,15 @@ You run this software at your own risk. It is provided "as is", without warranty
 | Toolset | In the default set | Covers |
 |---|---|---|
 | `core` | yes | clients and their locations and custom fields, contacts, agent assets and custom assets (get, list, create, update, move), the feed of deleted records, groups and users, alerts, `health_check` |
-| `tickets` | yes | tickets, comments, side conversations, approvals, attachments (`upload_attachment`) |
+| `tickets` | yes | tickets, SLA policies, comments, side conversations, approvals, attachments (`upload_attachment`) |
 | `time` | yes | time entries, billing roles, work types |
-| `billing` | yes | invoices (Drafts), items, categories, taxes, contracts (read only) |
+| `billing` | yes | invoices (Drafts), items, categories, taxes, contracts |
 | `uptime` | yes | uptime checks and maintenance windows |
 | `projects` | no | projects, sections, tasks, comments and approvals; needs the `Project` scope |
 | `forms` | no | forms, responses, submission links; needs the `Forms` scope |
 | `documents` | no | documents: list, read, create, update, move, archive, restore, duplicate, versions, related items and a PDF export; needs the `Documents` scope. `share_document` and `remove_document_related_item` are gated |
 
-[docs/tool-catalog.md](docs/tool-catalog.md) lists every tool. The delete and void tools, `create_approved_invoice`, `approve_invoice`, `share_document` and `remove_document_related_item` are the gated tools: they do not exist unless `GORELO_ENABLE_DESTRUCTIVE` switches them on (`1` for all of them, or a comma list of tool names for just those, such as `delete_time_entry,delete_item`), and every call still needs `confirm=true`. They are off by default; [docs/GATED-TOOLS.md](docs/GATED-TOOLS.md) lists all 15 with what each one does and shows how to turn them on and back off ([docs/INSTALL.md](docs/INSTALL.md), step 8.2, too).
-
-Creating and changing contracts (`create_contract` and `update_contract`) is held back since 1.5.1: Gorelo has not released contract writes yet, so those two tools are not registered under any setting, and a `GORELO_ENABLE_DESTRUCTIVE` list that names them is ignored with a warning in the journal. `list_contracts` and `get_contract` work as before.
+The registry holds 162 tools: 144 regular tools (read and write) and 18 gated tools. With the default toolsets a server registers 99 tools, or 113 with the flag; with `all` it registers 144, or 162 with the flag. [docs/tool-catalog.md](docs/tool-catalog.md) lists every tool. The delete and void tools, `create_approved_invoice`, `approve_invoice`, `create_contract`, `update_contract`, `share_document` and `remove_document_related_item` are the gated tools: they do not exist unless `GORELO_ENABLE_DESTRUCTIVE` switches them on (`1` for all of them, or a comma list of tool names for just those, such as `delete_time_entry,delete_item`), and every call still needs `confirm=true`. They are off by default; [docs/GATED-TOOLS.md](docs/GATED-TOOLS.md) lists all 18 with what each one does and shows how to turn them on and back off ([docs/INSTALL.md](docs/INSTALL.md), step 8.2, too).
 
 ## Settings you may need
 

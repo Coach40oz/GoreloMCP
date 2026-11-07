@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import shlex
+import errno
 import stat
 import subprocess
 import sys
@@ -487,29 +488,32 @@ def make_unreadable(patched, path: Path) -> None:
     """Make reading `path` fail with PermissionError, as the operating system does for a user who may not read it. Root can read
     any file, so a test that must behave the same for every user patches the read instead of the mode. `patched` is a MonkeyPatch
     (use it inside `with monkeypatch.context() as patched:`, so that the patch is gone before the test looks at the directory)."""
-    real = Path.read_bytes
+    real = os.open
 
-    def read_bytes(self):
-        if self == path:
+    def open_it(file, *args, **kwargs):
+        if str(file) == str(path):
             raise PermissionError(13, "Permission denied")
-        return real(self)
+        return real(file, *args, **kwargs)
 
-    patched.setattr(Path, "read_bytes", read_bytes)
+    patched.setattr(os, "open", open_it)
 
 
 def make_owned_by(patched, path: Path, uid: int) -> None:
     """Make `path` report another owner to stat: what a copy made as root leaves, seen by the service user, without needing root."""
-    real = Path.stat
+    for name in ("stat", "lstat"):  # check looks at the state file with lstat
 
-    def stat_of(self, *args, **kwargs):
-        info = real(self, *args, **kwargs)
-        if self == path:
-            fields = list(info)[:10]
-            fields[stat.ST_UID] = uid
-            return os.stat_result(fields)
-        return info
+        def make(real):
+            def stat_of(self, *args, **kwargs):
+                info = real(self, *args, **kwargs)
+                if self == path:
+                    fields = list(info)[:10]
+                    fields[stat.ST_UID] = uid
+                    return os.stat_result(fields)
+                return info
 
-    patched.setattr(Path, "stat", stat_of)
+            return stat_of
+
+        patched.setattr(Path, name, make(getattr(Path, name)))
 
 
 def refused_file(state_dir: Path, content: bytes = b"not json at all", mode: int = 0o600) -> Path:
@@ -1219,16 +1223,18 @@ def test_a_token_that_expires_exactly_now_is_still_live(state_dir):
     builder.pair(cid, "edge", access_exp=NOW, issued=NOW - 800 * DAY)  # the service refuses it only when expires_at < now
     builder.write(state_dir, version=2)
     assert oauth_state.plan_stale(loaded(state_dir).state, NOW).empty
-    assert [p.client_id for p in oauth_state.plan_stale(loaded(state_dir).state, NOW + 1).pairs] == [cid]
+    # one second after it ended it is no longer valid, but it ended just now: the session is not stale (see the next tests)
+    assert oauth_state.plan_stale(loaded(state_dir).state, NOW + 1).empty
+    assert [p.client_id for p in oauth_state.plan_stale(loaded(state_dir).state, NOW + 1 + oauth_state.STALE_AFTER_SECONDS + 1).pairs] == [cid]
 
 
-def test_the_age_of_the_refresh_token_decides_for_a_pair_without_a_valid_access_token(state_dir):
+def test_the_newest_of_the_issue_time_and_the_last_access_expiry_decides_for_a_pair_without_a_valid_access_token(state_dir):
     limit = oauth_state.STALE_AFTER_SECONDS
     builder = Builder()
     edge = builder.client(1, registered=NOW - 900 * DAY)
-    builder.pair(edge, "exactly-at-the-limit", access_exp=NOW - 5 * DAY, issued=NOW - limit)
+    builder.pair(edge, "exactly-at-the-limit", access_exp=NOW - limit, issued=NOW - limit - 5 * DAY)
     over = builder.client(2, registered=NOW - 900 * DAY)
-    builder.pair(over, "one-second-over", access_exp=NOW - 5 * DAY, issued=NOW - limit - 1)
+    builder.pair(over, "one-second-over", access_exp=NOW - limit - 1, issued=NOW - limit - 5 * DAY)
     recent = builder.client(3, registered=NOW - 900 * DAY)
     builder.pair(recent, "recent", access_exp=NOW - 1 * DAY, issued=NOW - 2 * DAY)
     future = builder.client(4, registered=NOW - 900 * DAY)
@@ -1238,6 +1244,69 @@ def test_the_age_of_the_refresh_token_decides_for_a_pair_without_a_valid_access_
     assert [pair.client_id for pair in plan.pairs] == [over]
     assert plan.clients == [over]
     assert {edge, recent, future} <= set(plan.kept) and plan.kept[recent] == "has tokens that are not stale"
+
+
+def test_a_session_that_signed_in_30_days_ago_and_never_refreshed_is_not_stale_when_its_access_token_has_just_expired(state_dir):
+    """The sign-in access token lives exactly STALE_AFTER_SECONDS, so judging by the issue time alone once called an
+    actively used session stale (and removed its client) in the minute after its token ended."""
+    limit = oauth_state.STALE_AFTER_SECONDS
+    builder = Builder()
+    cid = builder.client(1, registered=NOW - 900 * DAY)
+    builder.pair(cid, "signin", access_exp=NOW - 60, issued=NOW - 60 - limit)
+    builder.write(state_dir, version=2)
+    plan = oauth_state.plan_stale(loaded(state_dir).state, NOW)
+    assert plan.pairs == [] and plan.clients == [] and plan.kept[cid] == "has tokens that are not stale"
+    later = oauth_state.plan_stale(loaded(state_dir).state, NOW - 60 + limit)  # exactly 30 days after its token ended
+    assert later.pairs == [] and later.clients == []
+    much_later = oauth_state.plan_stale(loaded(state_dir).state, NOW - 60 + limit + 1)
+    assert [pair.client_id for pair in much_later.pairs] == [cid] and "for 30 days" in much_later.pairs[0].why
+
+
+def test_the_stale_clock_survives_the_stores_prune_of_the_expired_access_token(state_dir):
+    """prune() drops an access token that expired more than a week ago, the refresh token stays, and the plan once
+    measured from the issue time alone, so a session whose token ended 8 days ago read stale on day 38, not day 60."""
+    limit = oauth_state.STALE_AFTER_SECONDS
+    builder = Builder()
+    cid = builder.client(1, registered=NOW - 900 * DAY)
+    builder.pair(cid, "signin", access_exp=NOW - 60, issued=NOW - 60 - limit)
+    builder.write(state_dir, version=2)
+    later = NOW + 8 * DAY  # the service saves 8 days later; its prune drops the access token that ended 8 days ago
+    state = oauth_store.load_state(state_dir, now=later, prune_expired=False).state
+    oauth_store.prune(state, later)
+    oauth_store.write_state(state_dir, state)
+    after = loaded(state_dir).state
+    assert len(after.refresh_tokens) == 1 and after.access_tokens == {}  # the refresh token is still there and usable
+    assert oauth_state.plan_stale(after, later).pairs == []  # day 38 after sign-in, 8 days after its access token ended
+    end = NOW - 60  # the access token ended here and the pair is stale 30 days after that
+    assert oauth_state.plan_stale(after, end + limit).pairs == []
+    judged = oauth_state.plan_stale(after, end + limit + 1)
+    assert [pair.client_id for pair in judged.pairs] == [cid]
+    assert "for 30 days" in judged.pairs[0].why and "its access token is gone" in judged.pairs[0].why
+    assert judged.pairs[0].last_access_expiry is None  # nothing is invented for the inventory column
+
+
+def test_a_refresh_origin_pair_without_an_access_token_is_judged_by_the_one_hour_lifetime(state_dir):
+    limit = oauth_state.STALE_AFTER_SECONDS
+    builder = Builder()
+    cid = builder.client(1, registered=NOW - 900 * DAY)
+    _, refresh = builder.pair(cid, "rotated", access_exp=NOW - 20 * DAY, issued=NOW - 40 * DAY)
+    builder.meta[refresh]["origin"] = "refresh"
+    builder.access.clear()
+    builder.a2r.clear()
+    builder.r2a.clear()
+    builder.write(state_dir, version=2)
+    plan = oauth_state.plan_stale(loaded(state_dir).state, NOW)
+    assert [pair.client_id for pair in plan.pairs] == [cid]  # issued 40 days ago + 1 hour: well over 30 days
+    assert oauth_state.plan_stale(loaded(state_dir).state, NOW - 40 * DAY + limit + 3600).pairs == []
+    assert oauth_state.plan_stale(loaded(state_dir).state, NOW - 40 * DAY + limit + 3601).pairs != []
+
+
+def test_the_script_lifetimes_are_the_ones_the_provider_issues():
+    import personal_auth
+
+    assert oauth_state.SIGN_IN_ACCESS_SECONDS == personal_auth.DEFAULT_ACCESS_TOKEN_EXPIRY
+    assert oauth_state.REFRESH_ACCESS_SECONDS == personal_auth.DEFAULT_REFRESH_ACCESS_TOKEN_EXPIRY
+    assert set(oauth_state.ACCESS_SECONDS_BY_ORIGIN) == set(oauth_store.ORIGINS)
 
 
 def test_a_pair_whose_refresh_token_has_expired_is_stale_even_when_it_is_recent(state_dir):
@@ -1261,7 +1330,7 @@ def test_a_legacy_pair_is_dated_from_its_access_token_as_the_store_estimates_it(
     builder.write(state_dir, version=1)
     plan = oauth_state.plan_stale(loaded(state_dir).state, NOW)
     assert [pair.client_id for pair in plan.pairs] == [old]  # the other two cannot be shown to be old: they stay
-    assert "issued 70 days ago" in plan.pairs[0].why
+    assert "for 40 days" in plan.pairs[0].why  # its access token ended 40 days ago (the issue time, 70 days ago, is older)
 
 
 def test_a_client_named_to_keep_loses_nothing_and_a_keep_list_typo_is_refused(typical, state_dir):
@@ -1827,3 +1896,77 @@ def test_the_thresholds_are_the_ones_the_docs_say():
     assert oauth_state.NEW_CLIENT_GRACE_SECONDS == DAY
     assert oauth_state.EXPIRED_SECONDS_AGO == 1
     assert (oauth_state.EXIT_OK, oauth_state.EXIT_FAILED, oauth_state.EXIT_REFUSED, oauth_state.EXIT_LOCKED) == (0, 1, 2, 3)
+
+
+# --------------------------------------------------------------------------
+# check: symbolic links and a lock file the service could not open
+# --------------------------------------------------------------------------
+
+
+def test_check_reports_a_state_file_that_is_a_symlink_as_that_and_gives_no_repair_hint(state_dir, tmp_path):
+    target = tmp_path / "root-owned-elsewhere"
+    target.write_text("{}")
+    os.chmod(target, 0o644)
+    state_dir.mkdir(mode=0o700)
+    (state_dir / STATE_FILE).symlink_to(target)
+    run = invoke("check", state_dir=state_dir)
+    assert run.code == oauth_state.EXIT_FAILED
+    assert "problem: the state file is a symbolic link; do not chown or chmod it" in run.out
+    assert "hint:" not in run.out and "can be read by other users" not in run.out and "mode=" not in run.out
+    assert "result: problems" in run.out
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644 and target.read_text() == "{}"
+
+
+def test_check_reports_a_lock_file_that_is_a_symlink_and_does_not_open_it(state_dir, tmp_path):
+    typical_state().write(state_dir)
+    target = tmp_path / "elsewhere"
+    target.write_text("")
+    (state_dir / oauth_state.oauth_store.LOCK_FILE_NAME).symlink_to(target)
+    run = invoke("check", state_dir=state_dir)
+    assert run.code == oauth_state.EXIT_FAILED
+    assert "lock: unknown" in run.out
+    assert "problem: the lock file is a symbolic link, has more than one link or is not a regular file" in run.out
+    assert "result: problems" in run.out and "result: ok" not in run.out
+
+
+def test_check_with_a_lock_file_owned_by_another_user_is_a_problem(state_dir, monkeypatch):
+    typical_state().write(state_dir)
+    lock = state_dir / oauth_state.oauth_store.LOCK_FILE_NAME
+    lock.write_text("")
+    os.chmod(lock, 0o600)
+    with monkeypatch.context() as patched:
+        make_owned_by(patched, lock, OTHER_UID)
+        run = invoke("check", state_dir=state_dir)
+    assert run.code == oauth_state.EXIT_FAILED
+    assert "problem: the lock file is owned by another user than its directory" in run.out
+    assert "result: problems" in run.out
+
+
+def test_check_with_a_lock_file_this_user_cannot_open_is_a_problem_not_ok(state_dir, monkeypatch):
+    typical_state().write(state_dir)
+    lock = state_dir / oauth_state.oauth_store.LOCK_FILE_NAME
+    lock.write_text("")
+    os.chmod(lock, 0o600)
+    real_access = os.access
+    monkeypatch.setattr(os, "access", lambda p, mode, *a, **k: False if str(p) == str(lock) else real_access(p, mode, *a, **k))
+    real_open = os.open
+
+    def deny(path, *args, **kwargs):
+        if str(path) == str(lock):
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", deny)
+    run = invoke("check", state_dir=state_dir)
+    assert run.code == oauth_state.EXIT_FAILED
+    assert "lock: unknown" in run.out
+    assert "problem: this user cannot open the lock file for reading and writing" in run.out
+    assert "result: ok" not in run.out
+
+
+def test_a_plain_lock_file_and_a_plain_state_file_are_still_ok(state_dir):
+    typical_state().write(state_dir)
+    (state_dir / oauth_state.oauth_store.LOCK_FILE_NAME).write_text("")
+    os.chmod(state_dir / oauth_state.oauth_store.LOCK_FILE_NAME, 0o600)
+    run = invoke("check", state_dir=state_dir)
+    assert "lock: free" in run.out and "result: ok" in run.out and "problem:" not in run.out

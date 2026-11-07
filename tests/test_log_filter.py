@@ -599,7 +599,7 @@ def not_confirmed_flow(patch_answer, how, name):
 
 NOT_CONFIRMED_FLOWS = [
     not_confirmed_flow(httpx.ReadTimeout("slow"), "timeout", "the-patch-times-out"),
-    not_confirmed_flow(httpx.ConnectError("down"), "connection error", "the-connection-fails"),
+    not_confirmed_flow(httpx.ReadError("down"), "connection error", "the-connection-fails"),  # a connection that never opened is a plain refusal
     not_confirmed_flow(error_envelope(500, [("070101", "Boom.")]), "HTTP 500", "the-patch-answers-500"),
     not_confirmed_flow(BAD_GATEWAY_PAGE, "HTTP 502", "the-patch-answers-a-502-page"),
 ]

@@ -739,6 +739,7 @@ CASES: tuple[Case, ...] = (
     Case("list_ticket_tags", "list"),
     Case("list_ticket_priorities", "list", nonempty=True),
     Case("list_ticket_sources", "list", nonempty=True),
+    Case("list_sla_policies", "list"),  # contract b0850edb962d: a tenant may define no SLA policy, so an empty list is a good answer
     Case("list_tickets", "paged", args=lambda found: {"page_size": 50}, provides="ticket", pick=_pick_ticket),
     Case("search_tickets", "search", args=_search_args),
     Case("get_ticket", "record", label="get_ticket (guid)", args=_ticket_guid, same_id="ticket"),

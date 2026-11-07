@@ -2,6 +2,139 @@
 
 All notable changes to this project are listed here, newest first, in the plain style of Keep a Changelog.
 
+## 1.6.0 (2026-11-06)
+
+Follows Gorelo's new API description of 2026-11-05 (170 operations, 435 schemas): a new read for SLA policies and more SLA fields on
+tickets. Contract writes are back. They answered HTTP 500 on 2026-10-30 and 2026-10-31 and worked when tried on 2026-11-03, so
+`create_contract` and `update_contract`, which 1.5.1 held back, are registered again. This release also fixes many smaller
+problems, listed below by area. The server goes from 159 to 162 tools: 144 regular and 18 gated. With the default settings it goes
+from 98 to 99 tools (113 with the gated switch).
+
+### Added
+
+- `list_sla_policies` (toolset `tickets`, read): the SLA policies (Id, Name, Order and the per-priority targets), so the
+  `Sla.PolicyId` of a ticket can be turned into a policy name. Policies are managed in the Gorelo app.
+- `get_ticket` and `list_tickets` name the new SLA fields of a ticket (`Sla.PolicyId`, and the first response and resolution
+  status, 1 to 4). The records pass through unchanged.
+
+### Changed
+
+- Contracts: `create_contract` and `update_contract` (toolset `billing`, gated) are registered again. They exist only when
+  `GORELO_ENABLE_DESTRUCTIVE` switches them on (`1`, or a list that names them), and every call needs `confirm=true`. They were
+  tried against Gorelo on 2026-11-03 and worked: a contract was created with and without dates, read back and archived with
+  `update_contract`. The start line `gorelo-mcp held tools ignored: ...` is gone for now, because the server holds no tool back;
+  the mechanism stays in the code.
+  - A contract that leaves out `start_date` gets today in your account's time zone, which can differ from the UTC date by a day
+    in either direction. A line item's `start_date` defaults to that day, or to the contract's start if that is later.
+    `update_contract` leaves the dates of line items alone.
+  - Work types and roles are accepted on every labor terms except No Labor Terms. Gorelo shows them back only on Unlimited
+    Hours lines, so the read-back compares them only there. A read-back that cannot be checked is reported as a write that
+    could not be confirmed (with the reason), never as a crash.
+  - A repeated id in `contact_ids`, `location_ids`, `work_type_ids` or `work_role_ids` is refused before any request.
+  - Server rule 6 (the instructions every client receives) names the contract writes again among the tools that exist only
+    when the operator has enabled them and that need `confirm=true`.
+  - The texts say that a mistaken contract is archived with `update_contract` when that tool is enabled, else in the Gorelo app.
+- Contact tags: the texts of the approval tools no longer say the API cannot set a contact's tags. The approver mark on a tag
+  is set in the Gorelo app (ask the user which tag it is), and `update_contact` with the complete tag list, including that tag,
+  gives a contact the tag. Whether that alone makes the contact an eligible approver has not been tried live.
+- Invoices: Gorelo's description says a void is sent to the accounting system. A void reached it in one test and in another the
+  copy was still open minutes later, so the texts of `delete_invoice`, `approve_invoice` and `create_approved_invoice` now
+  tell the user to check the accounting system, instead of saying the copy always stays open. They also say that Gorelo may
+  email an Approved invoice to the client's contacts. An omitted `tax_id` is Gorelo's default (the item's tax, else the tenant's).
+  `update_invoice` on an invoice with more than 100 lines no longer advises removing billed lines.
+- Contacts: the text and the 409 error of `delete_contact` follow Gorelo's description. Gorelo marks the contact inactive and
+  keeps its ticket and conversation history; it leaves every list and a read answers 404. A 409 means the contact is the
+  primary or a secondary contact of a ticket that is not closed: reassign it there or close the tickets.
+- Clients: `update_client` can clear the alternate name with `clear_alternate_name=true`, as Gorelo's description says. It has
+  not been tried live on the current form of the operation, so the tool says to check the result. The old claim that Gorelo
+  cannot clear client fields is gone.
+- Documents: `move_document` now reads the document first and refuses, with nothing sent, a move to another client while the
+  document or any document under it has a public link or is published to the client portal. The error says to ask the
+  user, turn sharing off with `unshare_document` on each, and move again. A move within the same client is not checked. The texts
+  follow Gorelo's description: a moved document goes last among its new siblings, an archive reaches every level, a restore
+  leaves the documents below it archived, and `updated_since` finds a new document without a second filter.
+- Catalog: `update_item` with `sub_items` reads the item first and refuses a list that leaves out a current sub-item unless the
+  new `remove_sub_item_ids` names it (Gorelo replaces the whole list). Prices, costs and sub-item quantities are strict numbers
+  and the two display flags strict booleans, so a JSON `true` or a text no longer turns into a price.
+- Time: `actual_hours` and `distance` of `create_time_entry` and `update_time_entry` are strict numbers with bounds
+  (`actual_hours` above 0, `distance` 0 or more), so text or JSON `true` is refused instead of becoming 1.0 or 0.0.
+- Server instructions: the projects rule says that `update_contact(tag_ids=...)` replaces the whole tag list, so the tag list
+  of `get_contact` plus the new tag has to be sent to add a tag.
+- Uptime: frequency, port, retries and duration are strict whole numbers, and `adopt_client_assets` and `clear_tags` strict
+  booleans, so `duration_minutes=false` can no longer start a window that never ends. A reason is required to start a
+  maintenance window, as Gorelo requires. An ICMP check accepts a host name; a TCP check still needs a literal address.
+- Tickets: the `description` of `create_ticket` and the comment tools say that the text is HTML, so a literal `<` or `>` is
+  written as `&lt;` or `&gt;` (text in angle brackets is read as a tag and lost). `upload_attachment` names the project and task
+  comment edits as ways to attach a file.
+- Requests: a connection that could not be made on a write, an upload or the invoice PDF export is reported as a connection
+  error that says nothing was sent, so repeating it is safe (it is still never sent again on its own). The rate limiter no
+  longer lets more than a burst of requests leave at once after requests waited for a slot. A Gorelo notification whose
+  property name or message is not text no longer crashes the error text.
+- Request checks: an object that declares no fields and allows no others (the details of an Unlimited Hours line) now takes
+  only `{}`.
+- `health_check` says `gated_tools` names the gated tools that are switched on (`[]` means none).
+- Settings: `PUBLIC_BASE_URL` is checked at the start. It must be one `https` address with no path (so no `/mcp`), no query
+  and no user name or password; the service refuses to start otherwise, with one line that names the setting.
+
+### Security and hardening
+
+- The sign-in page: Deny works with an empty password field. A body at `/token` or `/revoke` that is not a valid form is
+  refused with 400 `invalid_request` and logged as `body outcome=bad_form`.
+- An MCP session that has been idle for 6 hours is freed, and the update check of the MCP framework is switched off, so the
+  start no longer looks for a newer version on the internet.
+- The sign-in state: the lock file is opened without following a symbolic link, and a state file or lock that is a symbolic
+  link, not a regular file or has several hard links is refused. `scripts/oauth_state.py check` reports these cases, a lock the
+  service cannot open and an unknown lock state as problems. `purge --stale` removes a pair only when it has no valid access token and more than 30 days have passed since the newer of its issue and the end of its last access token (or its refresh token has expired). When the service has already dropped that access token (it keeps an expired one for a week), the end is taken as the issue time plus the token's lifetime, 30 days for a sign-in and 1 hour for a refresh, so a session is not judged stale a month too early.
+- The service unit may write only `.oauth-state` (it no longer lists `.state`, the watcher's directory). Install the new unit as
+  in `docs/INSTALL.md` step 4.1 and run `systemctl daemon-reload` before the restart.
+- The changelog watcher writes its files through a temporary file and refuses a symbolic link as the target.
+- Dependency: `certifi` 2026.10.23, which no longer trusts the emSign ECC Root CA - G3 (GHSA-6q48-6c7w-9gw2). Run
+  `uv sync --frozen` when you update.
+
+### Documents and tests
+
+- `docs/INSTALL.md` step 9.2 warns that a `GORELO_ENABLE_DESTRUCTIVE` list naming a tool the older version lacks stops that version
+  from starting, and lists which tools are new in which release. The README, the guides and the notes under `docs/why/` name the
+  contract writes wherever they list the gated tools, and carry the new counts. `docs/API-OBSERVED-BEHAVIOR.md` records the
+  contract write failures of 2026-10-30 and 2026-10-31, the updated void, tag and contact delete entries, and the entries that
+  later text of Gorelo has superseded in part.
+- The live test harness: its guard matches nested keys case-insensitively and fails closed, its cleanup reports only what its own
+  call added and names stranded alert-stack members, and the export check refuses symbolic links and binary files unless listed.
+
+### Notes
+
+- A name list in `GORELO_ENABLE_DESTRUCTIVE` registers `create_contract` and `update_contract` only when it names them. Add the
+  two names if you want them. Rolling back to 1.5.2 or 1.5.1 with them in the list still starts (those versions ignore the two
+  names with a warning); a version older than 1.5.0 refuses a list that names tools it lacks, so check the list first
+  (`docs/INSTALL.md` step 9.2).
+- Sharing a document, hidden custom fields and the sign-in of ChatGPT and Copilot Studio have not been tested live yet.
+
+## 1.5.2 (2026-10-31)
+
+Adds `delete_contact`, a gated tool that deletes a contact. The server goes from 158 to 159 tools: 143 regular and 16 gated.
+It is off by default, like the other gated tools, and always needs `confirm=true`.
+
+### Added
+
+- `delete_contact` (toolset `core`, gated): deletes one contact. Gorelo removes the contact at once (it is not set
+  inactive: a read of it answers 404 afterwards and the client's contact list no longer holds it), and this server cannot
+  bring it back. The tool reads the contact first, so an id that does not exist is a clear not-found error, then deletes, checks
+  that Gorelo's answer names the same contact and returns what it deleted: `Id`, `FirstName`, `LastName`, `PrimaryEmail`,
+  `ClientId` and `deleted: true`. Gorelo answers "deleted" for a contact that is already gone, which is why it reads first.
+  When Gorelo refuses (HTTP 409, for example a contact that is still in use as a client's primary or billing contact) the error
+  says so and nothing is deleted. Claude is told to name the contact and ask you before it sets `confirm=true`.
+  (Corrected in 1.6.0: Gorelo's description says the contact is marked inactive and keeps its ticket history, and a 409 means it is
+  the primary or a secondary contact of a ticket that is not closed, not a client's primary or billing contact.)
+
+### Changed
+
+- `DELETE /v1/contacts/{contactId}` is no longer one of the operations the server can never call. Deleting a client, a
+  ticket, an agent asset, a custom asset or a contract, and creating or revoking API keys, are still blocked in the code.
+- The `create_contact` text no longer says that this server cannot delete contacts: a mistaken contact is removed with
+  `delete_contact`, when deletes are enabled, or in the Gorelo app.
+- `docs/GATED-TOOLS.md` (16 gated tools), `docs/tool-catalog.md`, the README, `docs/OVERVIEW.md`, `docs/INSTALL.md` and
+  `docs/TROUBLESHOOTING.md` carry the new counts.
+
 ## 1.5.1 (2026-10-31)
 
 Holds back the two contract write tools until Gorelo releases contract writes (every `POST /v1/contracts` answers HTTP 500,

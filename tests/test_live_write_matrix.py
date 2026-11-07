@@ -54,7 +54,6 @@ from scripts.live import _env, cleanup, write_matrix
 from scripts.live.guard import _CREATES, GuardViolation, LiveGuard
 from scripts.live.manifest import Manifest, Record
 from spec import load_spec_index
-from tools import _common
 from tools._common import format_gorelo_error
 
 pytestmark = pytest.mark.anyio
@@ -81,14 +80,6 @@ CONTACT_FIELDS = (
 def _never_read_the_real_env(monkeypatch, tmp_path):
     """Whatever a test does, the service's .env is not the file that gets opened."""
     monkeypatch.setattr(_env, "ENV_FILE", tmp_path / "no-such-dir" / ".env")
-
-
-@pytest.fixture(autouse=True)
-def _contract_writes_released(monkeypatch):
-    """create_contract and update_contract are held back (tools._common.HELD_TOOLS, since 1.5.1). These tests exercise the code of the
-    contracts area and of the cleanup of a contract as they will run once Gorelo releases contract writes, so the set is emptied here;
-    a test of the held state sets it again (`monkeypatch.setattr(_common, "HELD_TOOLS", frozenset({...}))`)."""
-    monkeypatch.setattr(_common, "HELD_TOOLS", frozenset())
 
 
 def now_text() -> str:
@@ -1542,10 +1533,13 @@ GOLDEN_DOCUMENTS = [
     "GET /v1/documents/{documentId}/related-items",
     "DELETE /v1/documents/{documentId}/related-items/{relatedItemId}",
     "GET /v1/documents/{documentId}/related-items",
+    "GET /v1/documents/{documentId}",  # move_document under the copy: the document first
+    "GET /v1/documents/{documentId}",  # and the new parent (its client is compared)
     "PATCH /v1/documents/{documentId}",
-    "GET /v1/documents/{documentId}",
+    "GET /v1/documents/{documentId}",  # the area: the copy lists it as a child
+    "GET /v1/documents/{documentId}",  # move_document back to the top level: the document first (same client, no scan)
     "PATCH /v1/documents/{documentId}",
-    "GET /v1/documents/{documentId}",
+    "GET /v1/documents/{documentId}",  # the area: the copy has no child any more
     "PATCH /v1/documents/{documentId}",
     "PATCH /v1/documents/{documentId}",
     "GET /v1/documents/{documentId}",
@@ -6440,7 +6434,7 @@ async def test_documents_with_the_flag_the_area_passes_archives_both_documents_a
     found = results(report)["documents"]
     assert found.status == "pass" and report.ok and report.exit_code == 0, "\n".join(lines)
     assert area_ops(fake, report) == {"documents": GOLDEN_DOCUMENTS, "cleanup": []}  # the cleanup sends nothing: both are archived already
-    assert found.requests == 37 and report.refused == 0 and not fake.mock.unmatched
+    assert found.requests == 40 and report.refused == 0 and not fake.mock.unmatched
     first, copy = the_documents(fake)
     assert first["Title"] == f"{RUN} document" and copy["Title"] == f"{RUN} document copy"
     assert first["StatusId"] == copy["StatusId"] == 2 and first["ClientId"] == copy["ClientId"] == TEST_CLIENT
@@ -6687,7 +6681,7 @@ async def test_documents_a_list_that_lags_behind_the_create_is_asked_again(run):
     fake.handlers["GET /v1/documents"] = lagging
     report = await run(fake, areas=["documents"], with_documents=True)
     found = results(report)["documents"]
-    assert found.status == "pass" and found.requests == 37 + 2
+    assert found.status == "pass" and found.requests == 40 + 2
     assert "list_documents (both documents) showed the expected documents on attempt 3" in found.notes
 
 

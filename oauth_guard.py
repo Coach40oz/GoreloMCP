@@ -108,6 +108,57 @@ class VersionGuardError(GateError):
 
 
 # --------------------------------------------------------------------------
+# Two settings of the framework that FastMCP does not expose in a way that fits this server
+# --------------------------------------------------------------------------
+
+# A stateful MCP session that has had no request for this long is dropped. mcp's StreamableHTTPSessionManager keeps every
+# session for the life of the process otherwise (CVE-2026-59951, fixed in mcp 1.30.0; the gate is checked against 1.27.x
+# only). A client that comes back with a dropped session id gets HTTP 404 "Session not found" and starts a new session, as
+# it already does after every restart of the service. Six hours is long enough for a conversation left open over a break and
+# short enough that memory cannot grow for weeks.
+SESSION_IDLE_TIMEOUT_SECONDS = 6 * 60 * 60
+
+
+def limit_idle_sessions(seconds: float) -> None:
+    """Make FastMCP's HTTP app give its session manager `session_idle_timeout=seconds`. FastMCP 3.2.x builds the manager
+    inside its lifespan with a fixed argument list and no way to pass a timeout, so the class it looks up is replaced by a
+    subclass that adds the argument. Stateful mode stays as it is (stateless_http is not used); a manager built in stateless
+    mode is left alone, because mcp refuses a timeout there. Calling it again sets a new limit. Raises GateError when the
+    installed mcp has no such argument. It does not check that FastMCP still builds its manager from that name: the
+    framework versions are pinned by check_framework_versions, and the end-to-end test in tests/test_main.py (a session with
+    no request is freed and gets 404) is the guard against a FastMCP that stops using it."""
+    import inspect
+
+    import fastmcp.server.http as fastmcp_http
+
+    base = getattr(fastmcp_http, "StreamableHTTPSessionManager", None)
+    if base is not None and getattr(base, "_gorelo_idle_limited", False):
+        base = base.__mro__[1]  # a second call replaces the first limit, it does not stack on it
+    if base is None or "session_idle_timeout" not in inspect.signature(base.__init__).parameters:
+        raise GateError("the installed mcp cannot free idle sessions (no session_idle_timeout), so they would pile up")
+
+    class IdleLimitedSessionManager(base):  # type: ignore[valid-type, misc]
+        _gorelo_idle_limited = True
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            if not kwargs.get("stateless"):
+                kwargs.setdefault("session_idle_timeout", seconds)
+            super().__init__(*args, **kwargs)
+
+    fastmcp_http.StreamableHTTPSessionManager = IdleLimitedSessionManager
+
+
+def harden_framework() -> None:
+    """Called once by main() before anything is built: turn off FastMCP's update check (the banner asks pypi.org on every
+    start; this server has no business there. The documented setting, FASTMCP_CHECK_FOR_UPDATES, set here so it holds
+    whatever the environment of the unit says) and free idle MCP sessions (see limit_idle_sessions)."""
+    import fastmcp
+
+    fastmcp.settings.check_for_updates = "off"
+    limit_idle_sessions(SESSION_IDLE_TIMEOUT_SECONDS)
+
+
+# --------------------------------------------------------------------------
 # Fail closed: framework versions and the password
 # --------------------------------------------------------------------------
 
@@ -988,9 +1039,31 @@ class RegistrationGate:
             REQUEST_IP.reset(token)
 
 
+try:  # the function that starlette.requests uses to decide how to read a body, so that this guard decides the same way
+    from python_multipart.multipart import parse_options_header as _parse_options_header
+except ModuleNotFoundError:  # pragma: no cover
+    try:
+        from multipart.multipart import parse_options_header as _parse_options_header
+    except ModuleNotFoundError:
+        _parse_options_header = None  # type: ignore[assignment]
+
+
 def _is_multipart_form(scope: Scope) -> bool:
+    """True for every body that Starlette's `Request.form()` would hand to its multipart parser. It asks the same function
+    about the same header (a plain split at ';' disagreed with it: 'multipart/form-data=; boundary=x' is a multipart body
+    to Starlette), and fails closed: a header that function cannot read, or no such function, counts as multipart, so
+    the body is parsed here and a body that does not parse is a 400."""
     headers = Headers(raw=list(scope.get("headers") or []))
-    return (headers.get("content-type") or "").split(";", 1)[0].strip().lower() == "multipart/form-data"
+    value = headers.get("content-type")
+    if value is None:
+        return False  # Starlette reads no form from a request without a content type
+    if _parse_options_header is None:
+        return True
+    try:
+        content_type, _ = _parse_options_header(value)
+    except Exception:
+        return True
+    return content_type == b"multipart/form-data"
 
 
 class FormGuard:
@@ -1002,8 +1075,8 @@ class FormGuard:
     answered it). A multipart body is therefore parsed here first, with the same parser, and one that does not parse gets
     HTTP 400 and never reaches the handler; one that does is handed on unchanged. Any exception of that parse is the
     body's, since the parse is a function of the body alone, and the wrapper stands outside the handler, so a fault of the
-    handler's own still comes out as one. A body that is not multipart (an urlencoded form is always readable) passes
-    through without being read here. The body was held to its limit by BodyLimit, which stands in front of this wrapper;
+    handler's own still comes out as one. A body that is not multipart by Starlette's own reading of the content type (see _is_multipart_form; an urlencoded
+    form is always readable) passes through without being read here. The body was held to its limit by BodyLimit, which stands in front of this wrapper;
     this one holds it to the same limit itself. `path` is for the log line."""
 
     def __init__(self, app: ASGIApp, *, path: str, max_bytes: int = MAX_BODY_BYTES) -> None:

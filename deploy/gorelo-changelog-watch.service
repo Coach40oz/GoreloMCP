@@ -9,7 +9,8 @@ Type=oneshot
 User=gorelo-mcp
 Group=gorelo-mcp
 WorkingDirectory=/opt/gorelo-mcp/app
-# Only what the watcher needs: GORELO_API_KEY (see watcher.env.example). Root-owned, mode 0600, outside the app tree;
+# Only what the watcher needs: GORELO_API_KEY and, optionally, GORELO_BASE_URL for a region other than the US (see
+# watcher.env.example). Root-owned, mode 0600, outside the app tree;
 # systemd reads it as root. The app .env (MCP_AUTH_PASSWORD, PUBLIC_BASE_URL) is deliberately not given to the watcher.
 EnvironmentFile=/etc/gorelo-mcp/watcher.env
 # The code tree is root-owned and read-only to the unit, so Python must not try to write bytecode into it.

@@ -12,8 +12,9 @@ Two paths, both behind ONE write-mode LiveGuard with cleanup=True (and allow_app
   delete_client_location, delete_client_domain and delete_product_charge (the contract and the alert are not deleted: see below);
 * raw soft deletes through a minimal httpx.AsyncClient
   (X-API-Key, the base URL of the settings: https://api.usw.gorelo.io/v1 unless GORELO_BASE_URL says otherwise) for the
-  records that deliberately have no tool: tickets, contacts, the temporary client and projects (and, as the
-  backstop for an invoice that has no Number or that delete_invoice cannot find by it, the invoice itself).
+  records that have no tool by design: tickets, the temporary client and projects; and contacts (delete_contact exists since 1.5.2,
+  but the raw DELETE is kept here, and it removes the contact for good: a later GET answers 404, so it is not a soft delete); and, as
+  the backstop for an invoice that has no Number or that delete_invoice cannot find by it, the invoice itself.
 
 Sections, side conversations and approvals have no delete of their own; they go with their parent. Comments,
 project comments and tasks that could not be deleted on their own are also counted as removed when their ticket
@@ -84,17 +85,19 @@ The records of the 1.5.0 areas (contract 6c30770dffc0), each recorded in the man
                    delete_client_domain with the client_id of the record's details, delete_product_charge), confirm=true, behind the cleanup
                    guard (a run-created record only; a location or domain only on the test client). A 404 is "already gone". Gorelo marks a
                    deleted location inactive instead of removing it, which counts as deleted
-    contract       a contract cannot be deleted through the API and the guard refuses the DELETE, so it is a KNOWN RESIDUE from the moment it
-                   exists, like a document. The area archives it (StatusId 3) and records the outcome (CONTRACT_RESIDUE_TAIL). For a contract a
+    contract       this harness and this server never delete a contract (the API has DELETE /v1/contracts/{contractId}; FORBIDDEN_OPS and
+                   the guard refuse it), so it is a KNOWN RESIDUE from the moment it exists, like a document. The area archives it (StatusId 3) and records the outcome (CONTRACT_RESIDUE_TAIL). For a contract a
                    STOPPED run left active the cleanup reads it (get_contract), archives it with update_contract status=archived (the cleanup
                    guard allows exactly the body {"StatusId": 3}), checks Status.Id 3 in the answer and records the same outcome; it is
                    reported apart as known undeletable (neither cleaned nor a leftover, never alone a failure). A 404 is "already gone".
-                   While update_contract is held back (tools._common.HELD_TOOLS, since 1.5.1) the cleanup does not call it: an Active
-                   contract is a LEFTOVER that says to archive it in the Gorelo app (get_contract still reads it first)
+                   While update_contract is in tools._common.HELD_TOOLS (empty since 1.5.3; the tool was held back in 1.5.1 and 1.5.2) the
+                   cleanup does not call it: an Active contract is a LEFTOVER that says to archive it in the Gorelo app (get_contract still
+                   reads it first)
     alert          not a create: an EXISTING alert of the test client that the alert_status area dismissed (the record is written BEFORE the
                    first change). The cleanup reads it (get_alert); New needs nothing, a Dismissed one is restored with set_alert_status
                    (the cleanup guard allows StatusId 1 for a recorded alert only) and the answer must list it in UpdatedIds; a Ticketed or
-                   unreadable one is a LEFTOVER that says to check it in the Gorelo app. Gorelo moves the whole stack of an alert with it
+                   unreadable one is a LEFTOVER that says to check it in the Gorelo app. Gorelo moves the whole stack of an alert with it;
+                   an alert the run recorded as dismissed (dismissed_ids) that still reads Dismissed is a LEFTOVER that names it
     invoice        the Drafts of the invoice_update area and the Draft that approve_invoice approves are ordinary invoice records: a Draft is
                    deleted, an invoice recorded as Approved (5) is voided only with --void-approved; a temporary catalog item of the tax probe is
                    an item record (delete_item)
@@ -134,7 +137,7 @@ A record counts as cleaned when the delete succeeded or Gorelo says it is gone (
 the run id, counts, kinds, ids, labels, invoice numbers and status names, and its outcomes, which are the script's own
 words, the run's own text and Gorelo's messages, which can quote a name or a value: never the API key. The exit status is 0 when
 nothing is left over (no leftover record, no create announced without an id, no listed leftover that failed to
-delete; one skipped because its name does not match is fine, and so is a known undeletable record: an uploaded file
+delete in this run of the cleanup; one skipped because its name does not match is fine, and so is a known undeletable record: an uploaded file
 or a voided invoice, or a custom asset), 1 otherwise, 2 for a usage or setup error.
 """
 
@@ -206,9 +209,11 @@ def document_residue(how: str) -> str:
     """The outcome of an archived document: `how` ("archived by the write matrix (archive_document)"), then that it stays in Gorelo.
     It ends with DOCUMENT_RESIDUE_TAIL, which is_known_undeletable reads."""
     return f"{how}, stays in Gorelo {DOCUMENT_RESIDUE_TAIL}"
-# A contract cannot be deleted through the API (and this harness never sends the DELETE, which the guard refuses): the run archives it
-# (StatusId 3) and it stays in Gorelo, a known residue from the moment it exists. Every outcome of one ends like this.
-CONTRACT_RESIDUE_TAIL = "until removed in the Gorelo app (a contract cannot be deleted through the API)"
+# This harness and server never delete a contract (the API has DELETE /v1/contracts/{contractId}; FORBIDDEN_OPS and the guard refuse it):
+# the run archives it (StatusId 3) and it stays in Gorelo, a known residue from the moment it exists. Every outcome of one ends like this.
+CONTRACT_RESIDUE_TAIL = "until removed in the Gorelo app (this harness and server never delete a contract: DELETE /v1/contracts/{contractId} is forbidden)"
+# the wording before 1.6.0 (a manifest of an older run may carry it): still a known residue
+LEGACY_CONTRACT_RESIDUE_TAIL = "until removed in the Gorelo app (a contract cannot be deleted through the API)"
 CONTRACT_ARCHIVED = 3  # Contract StatusId 3 Archived (1 Active, 2 Expired)
 ALERT_NEW, ALERT_DISMISSED = 1, 2  # Alert StatusId (3 Ticketed is final)
 
@@ -311,7 +316,7 @@ def is_known_undeletable(record: Record) -> bool:
     if record.kind == "document":
         return outcome.endswith(DOCUMENT_RESIDUE_TAIL)
     if record.kind == "contract":
-        return outcome.endswith(CONTRACT_RESIDUE_TAIL)
+        return outcome.endswith((CONTRACT_RESIDUE_TAIL, LEGACY_CONTRACT_RESIDUE_TAIL))
     return record.kind == "invoice" and outcome.endswith(VOID_RESIDUE)
 
 
@@ -560,7 +565,7 @@ class _Cleaner:
     # -- contracts ---------------------------------------------------------------
 
     def _note_contract(self, ident: Any, how: str) -> None:
-        """The contract is archived and stays in Gorelo: a known residue, not cleaned (a contract cannot be deleted through the API)."""
+        """The contract is archived and stays in Gorelo: a known residue, not cleaned (this harness never deletes a contract)."""
         self.manifest.cleanup_failed("contract", ident, contract_residue(how))
 
     async def _clean_contract(self, record: Record) -> None:
@@ -588,11 +593,11 @@ class _Cleaner:
         if raw_id == CONTRACT_ARCHIVED:
             self._note_contract(ident, "already archived")
             return
-        if REGISTRY.is_held("update_contract"):  # held back (1.5.1): the server has no such tool, so the contract is left for the Gorelo app
+        if REGISTRY.is_held("update_contract"):  # held back (HELD_TOOLS, empty since 1.5.3): the server has no such tool, so the contract is left for the Gorelo app
             self.manifest.cleanup_failed(
                 "contract",
                 ident,
-                self._safe(f"left over: contract {ident} is not archived, update_contract is held back until Gorelo releases contract writes; archive it in the Gorelo app"),
+                self._safe(f"left over: contract {ident} is not archived, update_contract is held back; archive it in the Gorelo app"),
             )
             return
         archived = await self._tool("update_contract", {"contract_id": ident, "status": "archived", "confirm": True})
@@ -618,7 +623,9 @@ class _Cleaner:
         alert with it, so two limits keep the cleanup from reopening an alert the run did not dismiss: the alert is restored only when its
         DismissedOn is not before the run's start (the run id is a UTC timestamp; a Dismissed alert with an older or unreadable DismissedOn was
         dismissed by somebody else and is a leftover that says so), and the restore may move only the ids the run recorded (details
-        dismissed_ids; the alert itself when none were recorded): any other id in UpdatedIds is a leftover that names it."""
+        dismissed_ids; the alert itself when none were recorded): any other id in UpdatedIds is a leftover that names it. The other recorded ids are
+        read afterwards (get_alert): one that still reads Dismissed inside the run's window is a leftover that names it (the guard allows a
+        restore of the recorded alert only, so the cleanup cannot restore it)."""
         ident = record.id
         read = await self._tool("get_alert", {"alert_id": ident})
         if read.gone:
@@ -635,6 +642,10 @@ class _Cleaner:
             )
             return
         if raw_id == ALERT_NEW:
+            stranded = await self._stack_still_dismissed(record, already_moved=())
+            if stranded:
+                self._alert_stack_left_over(ident, stranded)
+                return
             self.manifest.cleaned("alert", ident, "already New, nothing to restore")
             return
         if raw_id != ALERT_DISMISSED:
@@ -680,7 +691,47 @@ class _Cleaner:
                 ),
             )
             return
+        stranded = await self._stack_still_dismissed(record, already_moved=updated)
+        if stranded:
+            self._alert_stack_left_over(ident, stranded)
+            return
         self.manifest.cleaned("alert", ident, f"restored to New by the cleanup (set_alert_status; {len(updated)} alert(s) of its stack changed)")
+
+    async def _stack_still_dismissed(self, record: Record, *, already_moved: Any) -> list[str]:
+        """The ids the run recorded as dismissed (details dismissed_ids) other than the alert itself and the ones just restored, that still
+        read Dismissed with a DismissedOn inside the run's window (or whose read failed: fail closed). Each is read with get_alert; the
+        cleanup guard allows a restore only for the recorded alert, so these are named for the user, not restored."""
+        recorded = record.details.get("dismissed_ids")
+        if not isinstance(recorded, list):
+            return []
+        skip = {str(record.id).lower(), *(str(item).lower() for item in already_moved)}
+        started = run_started(self.manifest.run_id)
+        stranded: list[str] = []
+        for other in recorded:
+            if str(other).lower() in skip:
+                continue
+            read = await self._tool("get_alert", {"alert_id": other})
+            if read.gone:
+                continue
+            status = read.data.get("Status") if read.ok and isinstance(read.data, dict) else None
+            raw_id = status.get("Id") if isinstance(status, dict) else status
+            if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+                stranded.append(str(other))  # unreadable: nothing says it is New
+            elif raw_id == ALERT_DISMISSED:
+                moment = parse_moment(read.data.get("DismissedOn")) if isinstance(read.data, dict) else None
+                if started is not None and moment is not None and moment >= started:
+                    stranded.append(str(other))
+        return stranded
+
+    def _alert_stack_left_over(self, ident: Any, stranded: list[str]) -> None:
+        self.manifest.cleanup_failed(
+            "alert",
+            ident,
+            self._safe(
+                f"left over: alert {ident} is New, but {len(stranded)} alert(s) of its stack that the run dismissed still read Dismissed or "
+                f"could not be read ({', '.join(stranded)}); restore them to New in the Gorelo app"
+            ),
+        )
 
     # -- custom properties -------------------------------------------------------
 
@@ -1271,7 +1322,9 @@ async def run_cleanup(
 ) -> CleanupReport:
     """Delete everything `manifest` says its run created (see the module docstring) and report what is left.
 
-    leftovers:  also delete the leftovers listed in site.local.toml [leftovers], after checking their names.
+    leftovers:  also delete the leftovers listed in site.local.toml [leftovers], after checking their names. The report holds what THIS call
+                did with them: the manifest keeps every earlier call's outcome too, but a failure of an earlier call (a delete that
+                answered 409, fixed since) must not keep every later run failing.
     void_approved: also void an Approved invoice that the run recorded with status_id 5 (it is read first and must still
                 read as Approved). Without it such an invoice is a leftover for the user; the write matrix never sets it.
                 The void is in Gorelo only: the report names every invoice this call voided (`voided`) and says so for each
@@ -1300,6 +1353,7 @@ async def run_cleanup(
     if any(record.kind == "custom_property" and not record.cleaned for record in manifest.all_created()):
         guard_options["allow_custom_properties"] = True  # the clear of the custom field value the run set (null Value only)
     guard = LiveGuard("write", manifest, **guard_options)
+    already_reported = len(manifest.approved_leftover_outcomes())  # outcomes of earlier --leftovers calls stay in the file, not in this report
     pacer = Pacer(pace)
     hooks = {"request": [guard, pacer]}
     with _quiet_logs():
@@ -1322,7 +1376,7 @@ async def run_cleanup(
         cleaned=[record for record in manifest.all_created() if record.cleaned],
         leftovers=[record for record in remaining if not is_known_undeletable(record)],
         unresolved=manifest.unresolved_intents(),
-        approved=manifest.approved_leftover_outcomes() if leftovers else [],
+        approved=manifest.approved_leftover_outcomes()[already_reported:] if leftovers else [],
         undeletable=[record for record in remaining if is_known_undeletable(record)],
         voided=list(cleaner.voided),
     )

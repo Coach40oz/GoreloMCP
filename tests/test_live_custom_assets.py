@@ -53,7 +53,11 @@ LOCATION, HARDWARE = 9001, 42
 TOOLS_REGISTERED = {"list_custom_asset_hardware_types", "create_custom_asset", "update_custom_asset", "get_custom_asset"} <= {
     spec.name for spec in REGISTRY.specs
 }
-needs_tools = pytest.mark.skipif(not TOOLS_REGISTERED, reason="the custom asset tools are not registered yet")
+
+
+def test_the_four_custom_asset_tools_are_registered():
+    """The end-to-end tests below run the real tools; a missing tool fails here instead of skipping them."""
+    assert TOOLS_REGISTERED
 PASCAL = {
     "name": "Name", "client_id": "ClientId", "location_id": "LocationId", "hardware_type_id": "HardwareTypeId",
     "description": "Description", "contact_id": "ContactId", "warranty_end_date": "WarrantyEndDate",
@@ -540,6 +544,48 @@ async def test_a_move_that_gorelo_refuses_leaves_the_asset_at_the_test_client_an
     assert len([c for c in session.calls if c[0] == "update_custom_asset"]) == 3 + 1  # three before the move, the refused move, no way back
 
 
+def read_after_the_way_out_fails(session, text):
+    """The first get_custom_asset after the move to the second client was answered raises `text` (a ToolFailed that was sent)."""
+    original, state = session.call, {"moved": False}
+
+    async def flaky(name, arguments=None):
+        if name == "get_custom_asset" and state["moved"]:
+            state["moved"] = False
+            raise ToolFailed(name, text, sent=True)
+        row = await original(name, arguments)
+        if name == "update_custom_asset" and arguments.get("client_id") == SECOND:
+            state["moved"] = True
+        return row
+
+    session.call = flaky
+
+
+@pytest.mark.parametrize("text", [
+    "Gorelo rejected get_custom_asset (HTTP 404, code 070404): custom asset not found",
+    "Gorelo rejected get_custom_asset (HTTP 429, code 1): too many requests",
+])
+async def test_a_4xx_on_the_read_after_the_move_is_not_taken_for_the_asset_never_leaving(tmp_path, text):
+    matrix, session, manifest = matrix_for(tmp_path, with_asset_move=True)
+    read_after_the_way_out_fails(session, text)
+    with pytest.raises(ToolFailed, match="HTTP 4"):
+        await write_matrix.area_custom_assets(matrix)
+    moves = [arguments for name, arguments in session.calls if name == "update_custom_asset"][3:]
+    assert [m["client_id"] for m in moves] == [SECOND, TEST_CLIENT]  # the way back was sent although the read failed
+    assert session.asset["ClientId"] == TEST_CLIENT
+    assert manifest.all_created()[0].details == {"client_id": TEST_CLIENT}  # confirmed home by the way back
+
+
+async def test_a_4xx_on_the_read_after_the_move_and_a_way_back_that_fails_records_the_asset_as_unknown(tmp_path):
+    matrix, session, manifest = matrix_for(tmp_path, with_asset_move=True, back="refuse")
+    read_after_the_way_out_fails(session, "Gorelo rejected get_custom_asset (HTTP 429, code 1): too many requests")
+    with pytest.raises(ToolFailed):
+        await write_matrix.area_custom_assets(matrix)
+    # not "the test client": the move was answered, so the asset is on the second client or unknown, never recorded as at home
+    assert manifest.all_created()[0].details != {"client_id": TEST_CLIENT}
+    assert manifest.all_created()[0].details == {"client_id": cleanup.CUSTOM_ASSET_CLIENT_UNKNOWN}
+    assert session.asset["ClientId"] == SECOND
+
+
 @pytest.mark.parametrize("mode", ["server", "timeout", "unconfirmed", "ignored"])
 @pytest.mark.parametrize("applied", [False, True])
 async def test_a_move_with_an_unknown_outcome_is_followed_by_the_way_back_and_ends_at_the_test_client(tmp_path, mode, applied):
@@ -905,7 +951,6 @@ class AssetsFake(FakeGorelo):
         return envelope({"Id": asset["Id"]})
 
 
-@needs_tools
 async def test_end_to_end_the_area_passes_leaves_one_residue_and_the_run_still_passes(run, lines):
     fake = AssetsFake()
     report = await run(fake, areas=["custom_assets"], with_custom_assets=True)
@@ -925,7 +970,6 @@ async def test_end_to_end_the_area_passes_leaves_one_residue_and_the_run_still_p
     assert not fake.mock.unmatched and not any(r.method == "DELETE" for r in fake.mock.requests)
 
 
-@needs_tools
 async def test_end_to_end_the_updates_name_no_client_the_current_client_and_never_the_second_one_without_the_move_flag(run):
     fake = AssetsFake()
     report = await run(fake, areas=["custom_assets"], with_custom_assets=True)
@@ -938,7 +982,6 @@ async def test_end_to_end_the_updates_name_no_client_the_current_client_and_neve
     assert not any(r.path == f"/v1/clients/{SECOND}/locations" for r in fake.mock.requests)  # the second client was not even read
 
 
-@needs_tools
 async def test_end_to_end_with_the_move_flag_the_asset_goes_to_the_second_client_and_comes_back(run, lines):
     fake = AssetsFake()
     report = await run(fake, areas=["custom_assets"], with_custom_assets=True, with_asset_move=True)
@@ -955,7 +998,6 @@ async def test_end_to_end_with_the_move_flag_the_asset_goes_to_the_second_client
     assert f"reminder: custom asset {asset['Id']} {cleanup.CUSTOM_ASSET_RESIDUE}" in lines  # back home: the residue is on the test client
 
 
-@needs_tools
 async def test_end_to_end_a_gorelo_that_refuses_the_move_fails_the_area_and_the_asset_stays(run, lines):
     fake = AssetsFake()
     fake.clients[SECOND]["Status"] = {"Id": 4, "Name": "Archived"}  # the second client is archived: Gorelo refuses the move
@@ -972,7 +1014,6 @@ async def test_end_to_end_a_gorelo_that_refuses_the_move_fails_the_area_and_the_
     assert report.summary["undeletable"] == 1 and not report.ok and lines[-1] == "result: FAILED"
 
 
-@needs_tools
 async def test_end_to_end_a_gorelo_that_ignores_the_move_is_reported_and_the_way_back_still_goes_out(run):
     fake = AssetsFake()
     original = fake.patch_asset
@@ -990,7 +1031,6 @@ async def test_end_to_end_a_gorelo_that_ignores_the_move_is_reported_and_the_way
     assert next(iter(fake.assets.values()))["ClientId"] == TEST_CLIENT
 
 
-@needs_tools
 @pytest.mark.parametrize("status_id, status_name", [(4, "Archived"), (3, "Credit hold")])
 async def test_end_to_end_a_second_client_that_is_not_active_is_never_read_or_written_by_the_move(run, lines, monkeypatch, status_id, status_name):
     fake = AssetsFake()
@@ -1008,7 +1048,6 @@ async def test_end_to_end_a_second_client_that_is_not_active_is_never_read_or_wr
     assert asset["ClientId"] == TEST_CLIENT
 
 
-@needs_tools
 async def test_end_to_end_the_area_is_skipped_by_default_in_a_full_run(run):
     fake = AssetsFake()
     report = await run(fake)
@@ -1016,7 +1055,6 @@ async def test_end_to_end_the_area_is_skipped_by_default_in_a_full_run(run):
     assert not any("/assets/custom" in r.path for r in fake.mock.requests)
 
 
-@needs_tools
 async def test_end_to_end_a_run_with_every_optional_area_but_the_approved_invoice_passes(run, lines):
     fake = AssetsFake()
     report = await run(fake, with_items=True, with_invoices=True, with_custom_assets=True, with_asset_move=True, with_documents=True)

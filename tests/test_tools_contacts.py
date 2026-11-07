@@ -1,4 +1,4 @@
-"""tools/contacts.py: list_contacts, get_contact, create_contact, update_contact."""
+"""tools/contacts.py: list_contacts, get_contact, create_contact, update_contact and the gated delete_contact."""
 
 import json
 import re
@@ -366,7 +366,9 @@ async def test_the_update_parameters_explain_clear_fields_and_secondary_email(se
 def test_the_create_docstring_says_nothing_is_inferred():
     doc = flat(contacts_module.create_contact.__doc__)
     assert "nothing else is inferred or defaulted" in doc and "creates a real contact" in doc
-    assert "cannot delete contacts" in doc
+    # 1.5.2: a mistaken contact is removed with the gated delete_contact (the condition sits right next to the name) or in the app
+    assert "a mistaken one is removed with delete_contact, when deletes are enabled, or in the Gorelo app" in doc
+    assert "cannot delete contacts" not in doc
 
 
 async def test_the_contact_status_texts_are_the_new_scale_in_every_contacts_tool(server):
@@ -2205,3 +2207,228 @@ async def test_the_tag_and_location_ids_name_the_tool_that_resolves_them(server)
 def test_list_contact_tags_docstring_names_what_it_resolves():
     doc = flat(contacts_module.list_contact_tags.__doc__)
     assert "tag_ids" in doc and "create_contact" in doc and "update_contact" in doc
+
+
+# --------------------------------------------------------------------------
+# delete_contact (gated, 1.5.2)
+# --------------------------------------------------------------------------
+
+DELETE_ARGS = {"contact_id": 5, "confirm": True}
+DELETED_KEYS = ["Id", "FirstName", "LastName", "PrimaryEmail", "ClientId", "deleted"]
+
+
+@pytest.fixture
+def gated_server(server_factory):
+    """core toolset with the gated tools registered."""
+    return server_factory(toolsets={"core"}, destructive=True)
+
+
+NO_ANSWER = object()
+
+
+def routed_delete(mock, record=None, answer=NO_ANSWER):
+    """GET /v1/contacts/5 returns the record, DELETE /v1/contacts/5 answers {"Id": 5} (Gorelo's DeleteContactResult) unless told."""
+    mock.on("GET", CONTACT_5, envelope(contact_record() if record is None else record))
+    mock.on("DELETE", CONTACT_5, envelope({"Id": 5} if answer is NO_ANSWER else answer))
+
+
+def sent(mock):
+    return [(r.method, r.path, r.query) for r in mock.requests]
+
+
+async def test_delete_contact_does_not_exist_unless_deletes_are_enabled(server, server_factory, mock_gorelo):
+    assert "delete_contact" not in {t.name for t in await list_tools(server)}
+    assert "unknown tool" in (await call_tool_error(server, "delete_contact", DELETE_ARGS)).lower()
+    assert mock_gorelo.requests == []
+    enabled = {t.name for t in await list_tools(server_factory(toolsets={"core"}, destructive=True))}
+    assert "delete_contact" in enabled
+    only = {
+        t.name
+        for t in await list_tools(server_factory(toolsets={"core"}, destructive=True, destructive_tools=frozenset({"delete_contact"})))
+    }
+    assert "delete_contact" in only and "delete_client_location" not in only
+
+
+def test_delete_contact_is_declared_core_destructive_with_the_read_and_the_delete(spec_index):
+    spec = next(s for s in REGISTRY.specs if s.name == "delete_contact")
+    assert (spec.toolset, spec.kind, spec.ops) == ("core", "destructive", ["GET /v1/contacts/{contactId}", "DELETE /v1/contacts/{contactId}"])
+    assert all(op in spec_index.ops for op in spec.ops) and not set(spec.ops) & FORBIDDEN_OPS
+    assert spec_index.op("DELETE /v1/contacts/{contactId}").method == "DELETE"
+
+
+def test_only_the_delete_of_a_contact_left_the_forbidden_operations():
+    from gorelo_client import is_forbidden_op
+
+    assert not is_forbidden_op("DELETE /v1/contacts/{contactId}") and not is_forbidden_op("DELETE /v1/contacts/{id}")
+    for op in (
+        "DELETE /v1/clients/{clientId}", "DELETE /v1/tickets/{ticketId}", "DELETE /v1/assets/agents/{agentAssetId}",
+        "DELETE /v1/assets/custom/{customAssetId}", "DELETE /v1/contracts/{contractId}", "POST /v1/api-keys",
+        "DELETE /v1/api-keys/{apiKeyId}",
+    ):
+        assert is_forbidden_op(op), op
+
+
+async def test_delete_contact_exposes_exactly_contact_id_and_a_false_confirm(gated_server):
+    tool = next(t for t in await list_tools(gated_server) if t.name == "delete_contact")
+    props = tool.inputSchema["properties"]
+    assert list(props) == ["contact_id", "confirm"] and tool.inputSchema.get("required", []) == ["contact_id"]
+    assert props["confirm"]["type"] == "boolean" and props["confirm"]["default"] is False
+    assert props["confirm"]["description"] == "Must be true to delete; ask the user first."
+    assert props["contact_id"]["description"] == "Contact id (list_contacts)."
+    assert tool.annotations.destructiveHint is True and tool.annotations.readOnlyHint is False
+
+
+def test_delete_contact_text_says_what_was_measured_and_what_the_contract_says_names_the_409_and_tells_the_model_to_ask():
+    doc = flat(contacts_module.delete_contact.__doc__)
+    assert doc.startswith("Delete one contact; returns {deleted: true, Id, FirstName, LastName, PrimaryEmail, ClientId}")
+    assert "read first, so an unknown id is a clear not-found error" in doc
+    # the published DELETE contract: a contact on an unclosed ticket (primary or secondary) is refused with 409; the fix is on the tickets
+    assert (
+        "Gorelo refuses (409) while the contact is the primary or a secondary contact of a ticket that is not closed "
+        "(its message counts them): reassign it on those tickets or close them, then retry."
+    ) in doc
+    assert "primary or billing contact" not in doc and "still in use" not in doc and "linked records" not in doc
+    assert "Resolve ids first: contact_id -> list_contacts." in doc
+    # measured: a get answers 404 right after the delete; published: marked inactive, history kept; neither claim of the old text
+    assert (
+        "Gorelo marks the contact inactive and keeps its ticket and conversation history; it leaves every "
+        "list and a get answers 404. This server cannot undo it."
+    ) in doc
+    assert "not set inactive" not in doc and "for good" not in doc and "gone from the API" not in doc
+    assert "Name the contact (its name and client) to the user before asking." in doc
+    assert doc.endswith("Ask the user first; needs confirm=true.")
+    assert len(doc) <= 700  # the typical cap of a core tool text (tests/test_tools_meta.py)
+
+
+@pytest.mark.parametrize("arguments", [{}, {"confirm": False}])
+async def test_delete_contact_refuses_without_confirm_and_makes_no_http_call(gated_server, mock_gorelo, arguments):
+    text = await call_tool_error(gated_server, "delete_contact", {"contact_id": 5, **arguments})
+    assert text.startswith("confirm: refusing to delete contact 5 without confirm=true.")
+    assert "Gorelo marks the contact inactive (its ticket and conversation history stays)" in text and "cannot undo it" in text
+    assert "primary or a secondary contact of a ticket that is not closed" in text
+    assert "not set inactive" not in text and "still in use" not in text
+    assert "Nothing has been sent to Gorelo." in text
+    assert "Call again with confirm=true if you really want to delete contact 5." in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("bad", ["true", 1, "yes", None])
+async def test_delete_contact_refuses_a_confirm_that_is_not_a_json_boolean(gated_server, mock_gorelo, bad):
+    await call_tool_error(gated_server, "delete_contact", {"contact_id": 5, "confirm": bad})
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("bad", [0, -2, True, "5", 1.5])
+async def test_delete_contact_rejects_an_id_that_cannot_exist_before_any_http_even_with_confirm(gated_server, mock_gorelo, bad):
+    text = await call_tool_error(gated_server, "delete_contact", {"contact_id": bad, "confirm": True})
+    assert "contact_id" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_delete_contact_reads_then_deletes_and_returns_what_was_deleted(gated_server, mock_gorelo):
+    routed_delete(mock_gorelo)
+    result = await call_tool(gated_server, "delete_contact", DELETE_ARGS)
+    assert result == {
+        "Id": 5, "FirstName": "Jane", "LastName": "Doe", "PrimaryEmail": "jane.doe@example.invalid", "ClientId": 9101,
+        "deleted": True,
+    }
+    assert list(result) == DELETED_KEYS
+    assert sent(mock_gorelo) == [("GET", CONTACT_5, {}), ("DELETE", CONTACT_5, {})]
+    assert mock_gorelo.requests[1].content == b""  # the DELETE has no body
+
+
+async def test_delete_contact_reports_what_the_read_showed_not_what_the_delete_answered(gated_server, mock_gorelo):
+    routed_delete(mock_gorelo, record=contact_record(FirstName="Ann", LastName="Lee", PrimaryEmail="ann@example.invalid", ClientId=77))
+    result = await call_tool(gated_server, "delete_contact", DELETE_ARGS)
+    assert (result["FirstName"], result["LastName"], result["PrimaryEmail"], result["ClientId"]) == ("Ann", "Lee", "ann@example.invalid", 77)
+    assert "JobTitle" not in result and "SecondaryEmail" not in result  # only the five fields and the flag
+
+
+async def test_delete_contact_of_a_missing_contact_is_a_clear_not_found_error_and_never_sends_the_delete(gated_server, mock_gorelo):
+    mock_gorelo.on("GET", CONTACT_5, error_envelope(404, [("070202", "The requested resource was not found.")]))
+    text = await call_tool_error(gated_server, "delete_contact", DELETE_ARGS)
+    assert text == trace(
+        "contact_id: no contact has the id 5 (Gorelo answered HTTP 404), so nothing was deleted; it may be deleted already. "
+        "Find the contact with list_contacts."
+    )
+    assert sent(mock_gorelo) == [("GET", CONTACT_5, {})]  # the DELETE would have answered 200 anyway
+
+
+async def test_delete_contact_maps_other_errors_of_the_read_and_stops(gated_server, mock_gorelo):
+    mock_gorelo.on("GET", CONTACT_5, error_envelope(400, [("070101", "The id is not valid.", "contactId")]))
+    text = await call_tool_error(gated_server, "delete_contact", DELETE_ARGS)
+    assert text == trace("Gorelo rejected delete_contact (HTTP 400, code 070101): contact_id: The id is not valid.")
+    assert sent(mock_gorelo) == [("GET", CONTACT_5, {})]
+
+
+@pytest.mark.parametrize("record", [None, {}, [], True, contact_record(5, Id=6), only(contact_record(), "Id"), contact_record(Id=True)])
+async def test_delete_contact_does_not_delete_when_the_read_is_not_the_contact(gated_server, mock_gorelo, record):
+    mock_gorelo.on("GET", CONTACT_5, envelope(record))
+    text = await call_tool_error(gated_server, "delete_contact", DELETE_ARGS)
+    assert "nothing was deleted" in text or "refusing to guess" in text
+    assert sent(mock_gorelo) == [("GET", CONTACT_5, {})]
+
+
+async def test_delete_contact_409_names_the_unclosed_tickets_as_the_cause_and_the_tickets_as_the_fix(gated_server, mock_gorelo):
+    # shaped like the published contract: "the 409 message says how many tickets are holding it"
+    message = "The contact is still attached to 3 unclosed tickets."
+    mock_gorelo.on("GET", CONTACT_5, envelope(contact_record()))
+    mock_gorelo.on("DELETE", CONTACT_5, error_envelope(409, [("070409", message)]))
+    text = await call_tool_error(gated_server, "delete_contact", DELETE_ARGS)
+    assert text == trace(
+        f"Gorelo rejected delete_contact (HTTP 409, code 070409): {message[:-1]}. Gorelo refused to delete contact 5: it is "
+        "still the primary contact, or one of the secondary contacts, of a ticket that is not closed (Gorelo's message says "
+        "how many tickets). Nothing was deleted. Reassign the contact on those tickets, or close them, then try again."
+    )
+    assert "billing contact" not in text and "client's primary" not in text  # never measured, not in the contract
+    assert sent(mock_gorelo) == [("GET", CONTACT_5, {}), ("DELETE", CONTACT_5, {})]  # not repeated
+
+
+@pytest.mark.parametrize("status, expected", [(400, "HTTP 400"), (403, "HTTP 403"), (404, "HTTP 404")])
+async def test_delete_contact_other_refusals_of_the_delete_are_gorelos_own_text(gated_server, mock_gorelo, status, expected):
+    mock_gorelo.on("GET", CONTACT_5, envelope(contact_record()))
+    mock_gorelo.on("DELETE", CONTACT_5, error_envelope(status, [("070101", "No.")]))
+    text = await call_tool_error(gated_server, "delete_contact", DELETE_ARGS)
+    assert text.startswith(f"Gorelo rejected delete_contact ({expected}") and "still the primary contact" not in text
+
+
+@pytest.mark.parametrize("answer", [None, {}, True, [], "5"])
+async def test_delete_contact_with_no_record_in_the_answer_is_a_write_unconfirmed_error(gated_server, mock_gorelo, answer):
+    routed_delete(mock_gorelo, answer=answer)
+    text = await call_tool_error(gated_server, "delete_contact", DELETE_ARGS)
+    assert "verify it with a read before repeating it" in text
+    assert len(mock_gorelo.requests) == 2
+
+
+@pytest.mark.parametrize("answer, shown", [({"Id": 6}, "6"), ({"Id": "5"}, "a string"), ({"Id": None}, "null"), ({"Id": True}, "a boolean"), ({"Name": "x"}, "missing")])
+async def test_delete_contact_whose_answer_carries_another_id_is_a_write_unconfirmed_shape_error(gated_server, mock_gorelo, answer, shown):
+    routed_delete(mock_gorelo, answer=answer)
+    text = await call_tool_error(gated_server, "delete_contact", DELETE_ARGS)
+    assert text.startswith("Gorelo returned an unexpected response for delete_contact: DELETE /v1/contacts/{contactId}: ")
+    assert f"the answer's Id is {shown}, expected 5; the delete may have been applied" in text
+    assert "verify it with a read before repeating it (get_contact: a 404 means the contact is gone)" in text
+    assert "may or may not have been applied" not in text  # the message says it once, in its own words
+    assert len(mock_gorelo.requests) == 2
+
+
+async def test_delete_contact_that_times_out_is_not_repeated(gated_server, mock_gorelo):
+    mock_gorelo.on("GET", CONTACT_5, envelope(contact_record()))
+    mock_gorelo.on("DELETE", CONTACT_5, httpx.ReadTimeout("slow"))
+    text = await call_tool_error(gated_server, "delete_contact", DELETE_ARGS)
+    assert text.startswith("Gorelo did not confirm delete_contact")
+    assert sent(mock_gorelo) == [("GET", CONTACT_5, {}), ("DELETE", CONTACT_5, {})]
+
+
+async def test_delete_contact_5xx_is_write_unconfirmed_and_not_retried(gated_server, mock_gorelo):
+    mock_gorelo.on("GET", CONTACT_5, envelope(contact_record()))
+    mock_gorelo.on("DELETE", CONTACT_5, error_envelope(502, [("070500", "bad gateway")]))
+    text = await call_tool_error(gated_server, "delete_contact", DELETE_ARGS)
+    assert "may have applied the change" in text or "Gorelo may have applied" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "DELETE"]
+
+
+async def test_delete_contact_cannot_reach_any_other_operation(gated_server, mock_gorelo):
+    routed_delete(mock_gorelo)
+    await call_tool(gated_server, "delete_contact", DELETE_ARGS)
+    assert {r.method for r in mock_gorelo.requests} == {"GET", "DELETE"}
+    assert {r.path for r in mock_gorelo.requests} == {CONTACT_5}

@@ -34,17 +34,20 @@ What the Gorelo key can do. Every tool call uses the one Gorelo API key in `.env
 on what a signed-in client can do are the scopes of that key, the toolsets you enable
 (`GORELO_TOOLSETS`; projects, forms and documents are off by default) and whether you enabled the
 gated tools (`GORELO_ENABLE_DESTRUCTIVE`, off by default, and each call also needs `confirm=true`):
-the delete and void tools, `create_approved_invoice`, `remove_document_related_item`, which removes
+the delete and void tools (`delete_contact` among them), `create_approved_invoice`, `approve_invoice`, `create_contract` and `update_contract` (a contract can make Gorelo approve and email recurring invoices on its own), `remove_document_related_item`, which removes
 a related item from a document, and `share_document`, which makes a document readable outside Gorelo. You can enable them one by one by listing their names. Scope the key
 minimally: give it only the areas you use, and do not grant Project, Forms or Documents unless you
 enable those toolsets. Some operations can never be called whatever the key allows (client,
-contact, ticket, asset and contract deletes, and creating or revoking API keys (`POST /v1/api-keys`
+ticket, asset and contract deletes, and creating or revoking API keys (`POST /v1/api-keys`
 and `DELETE /v1/api-keys/{apiKeyId}`); see `docs/why/03-forbidden-and-gated-operations.txt`).
+Deleting a contact is possible only through the gated `delete_contact`.
 
 Where the key goes. The key is sent only to the Gorelo host named by `GORELO_BASE_URL` (the US host
 when it is blank). The setting must be https on `gorelo.io` or a subdomain of it, with no user name,
 port, query or fragment, or the server refuses to start, so a typo or a pasted foreign address
-cannot send the key elsewhere. The server never follows a redirect, so the key cannot be sent on to another host.
+cannot send the key elsewhere. The server never follows a redirect, so the key cannot be sent on to another host. The
+server's own start makes no other outbound request: the update check of its MCP framework is switched off, so it does not
+look up a newer version on a package index.
 
 The redirect allowlist. After a client signs in, the server sends an authorization code to the
 redirect address the client registered, and only to claude.ai, claude.com, localhost and the domains
@@ -60,7 +63,8 @@ started. But anyone who can receive a code on an allowed host (on the Copilot St
 Power Platform tenant) could register a client there and wait for you or another user to approve
 it. The entries are listed in the start line of the journal,
 and removing an entry blocks new sign-ins from the clients that registered on it. Removing a domain stops new sign-ins
-only; sign out every session to cut off a connected client. The `resource` a client names in
+only; sign out every session to cut off a connected client. An MCP session that has been idle for 6 hours is freed by the
+server (the client opens a new one when it needs it; the sign-in itself is not affected). The `resource` a client names in
 its requests is accepted but not enforced: tokens are not bound to it, because the server has one
 resource and one password.
 
@@ -70,7 +74,10 @@ read the document. Turning either on is the gated tool `share_document`; the too
 documents cannot do it, and `unshare_document` only turns it off. Give a link only to the person
 who should have it. A document body, its attachments and its images are written by people, so the
 server tells the model to treat them as data, and the urls of attachments and images carry a
-time-limited token that must not be stored.
+time-limited token that must not be stored. `move_document` does not hand shared content to another client: when a move
+changes the client and the document, or any document under it, has a public link or is published to the client portal,
+the tool reads that first and refuses with nothing sent, and tells the model to ask you and turn sharing off with
+`unshare_document`.
 
 Several clients, one key. Every client that signs in with the password gets the same tools and
 acts with the same Gorelo key. Connect only clients you trust, and keep the toolsets and gated

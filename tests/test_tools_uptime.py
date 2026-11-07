@@ -44,6 +44,13 @@ CHECK_ID = uid(41)
 CHECK_PATH = f"/v1/uptime/{CHECK_ID}"
 GUID_ERROR = "check_id: expected a GUID such as 3f2b8c1e-0d4a-4b7e-9a51-2c6d8e9f0a1b, got "
 IP_ERROR = "ip: must be a literal IP address (IPv4 or IPv6), not a host name; ask the user for the address"
+ICMP_HOST_ERROR = (
+    "ip: must be an IP address or a host name such as router.example.com, with no scheme, path, port or spaces"
+)
+REASON_REQUIRED = (
+    "reason: required when enabled=true (Gorelo requires it to begin a window); ask the user why the check is "
+    "going into maintenance, at most 500 characters"
+)
 POSITIVE = "expected a positive whole number such as 123, got zero or a negative number"
 
 
@@ -219,9 +226,9 @@ def test_the_docstrings_state_the_facts_the_model_must_know():
     maintenance = " ".join(inspect.getdoc(uptime.set_uptime_maintenance).split())
     assert "enabled=false ends it and takes no other field" in maintenance
     # a window needs its length (0 means it never expires); live 2026-10-02: Gorelo also refuses a window
-    # without a start, so only the reason stays optional
-    assert "with enabled=true start and duration_minutes are required (0 means the window never expires)" in maintenance
-    assert "and reason is optional" in maintenance
+    # without a start; the spec (UptimeMaintenanceMode) requires the Reason as well
+    assert "with enabled=true start, duration_minutes and reason are all required (0 means the window never expires)" in maintenance
+    assert "reason is optional" not in maintenance and "only the reason stays optional" not in maintenance
     assert "Pass the current time as start only if the user wants maintenance now" in maintenance
     assert "start and reason are optional" not in maintenance and "start, duration_minutes and reason are optional" not in maintenance
     assert "the check's failures stop raising alerts" in maintenance and "one with no expiry (duration 0) hides outages" in maintenance
@@ -250,12 +257,15 @@ async def test_the_parameter_descriptions_carry_the_id_sources_target_rules_and_
     assert "list_client_locations" in text("create_uptime_check", "location_id")
     assert "icmp needs ip, http needs url, tcp needs ip and port" in text("create_uptime_check", "check_type")
     for tool in ("create_uptime_check", "update_uptime_check"):
-        assert "literal IP address, not a host name" in text(tool, "ip"), tool
+        assert text(tool, "ip") == "icmp: IP address or host name; tcp: literal IP address only.", tool
     assert "No tag lookup" in text("create_uptime_check", "tag_ids")
     assert "COMPLETE new list" in text("update_uptime_check", "tag_ids")
     assert "complete target" in text("update_uptime_check", "check_type")
     assert text("set_uptime_maintenance", "duration_minutes") == (
-        "Required with enabled=true: minutes the window lasts. 0 means no expiry: it never ends until you end it."
+        "Required with enabled=true: whole minutes the window lasts. 0 means no expiry: it never ends until you end it."
+    )
+    assert text("set_uptime_maintenance", "reason") == (
+        "Required with enabled=true: why the check is in maintenance (max 500 characters)."
     )
     assert text("set_uptime_maintenance", "start") == (
         "Required with enabled=true: when the window begins (ISO 8601 with UTC offset). Use the current time only if "
@@ -567,7 +577,7 @@ async def test_a_location_without_a_client_is_sent_as_given(server, mock_gorelo)
 BASE = {"frequency_minutes": 5, "region": "seattle"}
 
 TARGET_ERRORS = [
-    pytest.param({"check_type": "icmp"}, "ip: required for an ICMP check (ip is the IP address to ping)", id="icmp-needs-ip"),
+    pytest.param({"check_type": "icmp"}, "ip: required for an ICMP check (ip is the IP address or host name to ping)", id="icmp-needs-ip"),
     pytest.param({"check_type": "icmp", "ip": "10.0.0.1", "url": "https://x.example"}, "url: not valid for an ICMP check, which takes ip; omit it", id="icmp-refuses-url"),
     pytest.param({"check_type": "icmp", "ip": "10.0.0.1", "port": 80}, "port: not valid for an ICMP check, which takes ip; omit it", id="icmp-refuses-port"),
     pytest.param({"check_type": "icmp", "url": "https://x.example"}, "ip: required for an ICMP check", id="icmp-with-only-a-url"),
@@ -575,7 +585,7 @@ TARGET_ERRORS = [
     pytest.param({"check_type": "http", "url": "https://x.example", "ip": "10.0.0.1"}, "ip: not valid for an HTTP check, which takes url; omit it", id="http-refuses-ip"),
     pytest.param({"check_type": "http", "url": "https://x.example", "port": 443}, "port: not valid for an HTTP check, which takes url; omit it", id="http-refuses-port"),
     pytest.param({"check_type": "http", "url": "https://x.example", "ip": "10.0.0.1", "port": 443}, "ip, port: not valid for an HTTP check", id="http-refuses-ip-and-port"),
-    pytest.param({"check_type": "tcp", "port": 443}, "ip: required for a TCP check (ip is the IP address to connect to and port the TCP port)", id="tcp-needs-ip"),
+    pytest.param({"check_type": "tcp", "port": 443}, "ip: required for a TCP check (ip is the literal IP address to connect to and port the TCP port)", id="tcp-needs-ip"),
     pytest.param({"check_type": "tcp", "ip": "10.0.0.1"}, "port: required for a TCP check", id="tcp-needs-port"),
     pytest.param({"check_type": "tcp"}, "ip, port: required for a TCP check", id="tcp-needs-both"),
     pytest.param({"check_type": "tcp", "ip": "10.0.0.1", "port": 443, "url": "https://x.example"}, "url: not valid for a TCP check, which takes ip and port; omit it", id="tcp-refuses-url"),
@@ -627,13 +637,39 @@ BAD_IPS = [
     pytest.param("   ", "ip: must not be empty or whitespace only", id="blank-ip"),
 ]
 
+# What an ICMP check refuses: not a host name at all (a scheme, a path, a port, a space) or a mistyped address.
+BAD_ICMP_HOSTS = [
+    pytest.param("example.com:443", ICMP_HOST_ERROR, id="host-and-port"),
+    pytest.param("10.0.0", ICMP_HOST_ERROR, id="three-octets"),
+    pytest.param("999.1.1.1", ICMP_HOST_ERROR, id="octet-out-of-range"),
+    pytest.param("10.0.0.1/24", ICMP_HOST_ERROR, id="network-with-a-prefix"),
+    pytest.param("010.0.0.1", ICMP_HOST_ERROR, id="leading-zero"),
+    pytest.param("http://10.0.0.1", ICMP_HOST_ERROR, id="url"),
+    pytest.param("https://router.example.com/x", ICMP_HOST_ERROR, id="url-with-a-host-name"),
+    pytest.param("router.example.com/path", ICMP_HOST_ERROR, id="host-with-a-path"),
+    pytest.param("user@router.example.com", ICMP_HOST_ERROR, id="user-part"),
+    pytest.param("10.0.0 .1", ICMP_HOST_ERROR, id="space-inside-the-address"),
+    pytest.param("router .example.com", ICMP_HOST_ERROR, id="space-inside-the-name"),
+    pytest.param("10.0.0.1 ", ICMP_HOST_ERROR, id="trailing-space"),
+    pytest.param(" 10.0.0.1", ICMP_HOST_ERROR, id="leading-space"),
+    pytest.param("a" * 254, ICMP_HOST_ERROR, id="too-long"),
+    pytest.param("   ", "ip: must not be empty or whitespace only", id="blank-ip"),
+]
 
-@pytest.mark.parametrize("ip, fragment", BAD_IPS)
-async def test_an_icmp_ip_must_be_a_literal_address_never_a_host_name(server, mock_gorelo, ip, fragment):
-    # Gorelo's ICMP and TCP checks take an address, so a name is refused here naming the param
+
+@pytest.mark.parametrize("ip, fragment", BAD_ICMP_HOSTS)
+async def test_an_icmp_ip_must_look_like_an_address_or_a_host_name(server, mock_gorelo, ip, fragment):
     text = await call_tool_error(server, "create_uptime_check", {**BASE, "check_type": "icmp", "ip": ip})
-    assert fragment in text
+    assert text == fragment
     assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("name", ["router.example.com", "localhost", "ROUTER-1.Example.COM", "xn--80ak6aa92e.example", "a_b.example"])
+async def test_an_icmp_check_accepts_a_host_name_as_the_spec_says(server, mock_gorelo, name):
+    # UptimeTarget.Ip: "ICMP accepts a hostname as well as an address; TCP requires a parseable address"
+    route_create(mock_gorelo)
+    await call_tool(server, "create_uptime_check", {**BASE, "check_type": "icmp", "ip": name})
+    assert mock_gorelo.requests[0].json["Target"] == {"Ip": name}
 
 
 @pytest.mark.parametrize("ip, fragment", BAD_IPS)
@@ -1078,7 +1114,7 @@ async def test_a_read_without_data_stops_the_update_before_the_patch(server, moc
 @pytest.mark.parametrize(
     "args",
     [
-        {"ip": "router.example.com"},
+        {"ip": "router.example.com/path"},
         {"ip": "10.0.0.1 "},
         {"url": "ftp://x.example"},
         {"url": "example.com"},
@@ -1153,11 +1189,9 @@ async def test_changing_the_type_sends_the_matching_target(server, mock_gorelo, 
         pytest.param({"url": "https://x.example", "ip": "10.0.0.1", "port": 80}, "url: cannot be combined with ip and port;", id="url-ip-and-port"),
         pytest.param({"url": "example.com"}, "url: must be a full address starting with http:// or https://", id="url-without-scheme"),
         pytest.param({"port": 0}, "port: must be a whole number from 1 to 65535", id="port-zero"),
-        pytest.param({"ip": "a b"}, IP_ERROR, id="space-in-ip"),
-        pytest.param({"ip": "router.example.com"}, IP_ERROR, id="host-name-without-a-type"),
-        pytest.param({"check_type": "icmp", "ip": "router.example.com"}, IP_ERROR, id="icmp-host-name"),
+        pytest.param({"ip": "a b"}, ICMP_HOST_ERROR, id="space-in-ip"),
         pytest.param({"check_type": "tcp", "ip": "localhost", "port": 22}, IP_ERROR, id="tcp-host-name"),
-        pytest.param({"check_type": "icmp", "ip": "10.0.0.1/24"}, IP_ERROR, id="icmp-network"),
+        pytest.param({"check_type": "icmp", "ip": "10.0.0.1/24"}, ICMP_HOST_ERROR, id="icmp-network"),
         pytest.param({"frequency_minutes": 0}, "frequency_minutes: must be a whole number from 1 to 2147483647", id="frequency-zero"),
         pytest.param({"retries_after_failure": -1}, "retries_after_failure: must be a whole number from 0 to 2147483647", id="negative-retries"),
         pytest.param({"client_id": 9102}, "location_id: required together with client_id", id="client-without-location"),
@@ -1374,9 +1408,8 @@ START_REQUIRED = (
 @pytest.mark.parametrize(
     "extra",
     [
-        pytest.param({"start": START}, id="start-only"),
         pytest.param({"start": START, "reason": "Patching"}, id="start-and-reason"),
-        pytest.param({"start": START, "duration_minutes": None}, id="explicit-null-duration"),
+        pytest.param({"start": START, "reason": "Patching", "duration_minutes": None}, id="explicit-null-duration"),
     ],
 )
 async def test_beginning_a_window_without_a_duration_is_refused_and_nothing_is_sent(server, mock_gorelo, extra):
@@ -1389,10 +1422,9 @@ async def test_beginning_a_window_without_a_duration_is_refused_and_nothing_is_s
 @pytest.mark.parametrize(
     "extra",
     [
-        pytest.param({"duration_minutes": 30}, id="duration-only"),
-        pytest.param({"duration_minutes": 0}, id="zero-duration"),
         pytest.param({"duration_minutes": 30, "reason": "Patching"}, id="duration-and-reason"),
-        pytest.param({"duration_minutes": 30, "start": None}, id="explicit-null-start"),
+        pytest.param({"duration_minutes": 0, "reason": "Patching"}, id="zero-duration"),
+        pytest.param({"duration_minutes": 30, "reason": "Patching", "start": None}, id="explicit-null-start"),
     ],
 )
 async def test_beginning_a_window_without_a_start_is_refused_and_nothing_is_sent(server, mock_gorelo, extra):
@@ -1405,7 +1437,7 @@ async def test_beginning_a_window_without_a_start_is_refused_and_nothing_is_sent
 
 
 @pytest.mark.parametrize(
-    "extra", [pytest.param({}, id="enabled-alone"), pytest.param({"reason": "Patching"}, id="reason-only"), pytest.param({"start": None, "duration_minutes": None}, id="both-null")]
+    "extra", [pytest.param({"reason": "Patching"}, id="reason-only"), pytest.param({"reason": "Patching", "start": None, "duration_minutes": None}, id="both-null")]
 )
 async def test_beginning_a_window_without_a_start_or_a_duration_names_both(server, mock_gorelo, extra):
     text = await call_tool_error(server, "set_uptime_maintenance", {"check_id": CHECK_ID, "enabled": True, **extra})
@@ -1413,14 +1445,34 @@ async def test_beginning_a_window_without_a_start_or_a_duration_names_both(serve
     assert mock_gorelo.requests == []
 
 
+@pytest.mark.parametrize(
+    "extra, expected",
+    [
+        pytest.param({}, f"{START_REQUIRED}; {DURATION_REQUIRED}; {REASON_REQUIRED}", id="enabled-alone"),
+        pytest.param({"start": START, "duration_minutes": 30}, REASON_REQUIRED, id="no-reason"),
+        pytest.param({"start": START, "duration_minutes": 0}, REASON_REQUIRED, id="zero-duration-no-reason"),
+        pytest.param({"start": START, "duration_minutes": 30, "reason": None}, REASON_REQUIRED, id="explicit-null-reason"),
+        pytest.param({"start": START}, f"{DURATION_REQUIRED}; {REASON_REQUIRED}", id="start-only"),
+        pytest.param({"duration_minutes": 30}, f"{START_REQUIRED}; {REASON_REQUIRED}", id="duration-only"),
+    ],
+)
+async def test_beginning_a_window_without_a_reason_is_refused_and_nothing_is_sent(server, mock_gorelo, extra, expected):
+    # UptimeMaintenanceMode.Reason: "On update, required when Enabled is true". Refused locally, not by a Gorelo 400.
+    text = await call_tool_error(server, "set_uptime_maintenance", {"check_id": CHECK_ID, "enabled": True, **extra})
+    assert text == expected
+    assert mock_gorelo.requests == []  # no HTTP at all, not even the re-read
+
+
 @pytest.mark.parametrize("minutes", [0, 1, 90, 2**31 - 1])
-async def test_a_window_with_any_duration_from_zero_up_is_sent_and_only_the_reason_stays_optional(server, mock_gorelo, minutes):
+async def test_a_window_with_any_duration_from_zero_up_is_sent_with_its_reason(server, mock_gorelo, minutes):
     route_update(mock_gorelo)
-    await call_tool(server, "set_uptime_maintenance", {"check_id": CHECK_ID, "enabled": True, "start": START, "duration_minutes": minutes})
+    await call_tool(
+        server, "set_uptime_maintenance",
+        {"check_id": CHECK_ID, "enabled": True, "start": START, "duration_minutes": minutes, "reason": "Patching"},
+    )
     assert mock_gorelo.requests[0].json == {
-        "MaintenanceMode": {"Enabled": True, "StartDateTime": START, "DurationInMinutes": minutes}
+        "MaintenanceMode": {"Enabled": True, "StartDateTime": START, "DurationInMinutes": minutes, "Reason": "Patching"}
     }
-    assert "Reason" not in mock_gorelo.requests[0].json["MaintenanceMode"]  # nothing is invented for the reason
 
 
 async def test_the_start_and_duration_rules_leave_the_schema_alone_because_ending_a_window_needs_neither(server):
@@ -1436,22 +1488,22 @@ async def test_ending_a_window_still_refuses_a_duration_even_zero(server, mock_g
     assert mock_gorelo.requests == []
 
 
-async def test_a_window_without_a_reason_sends_none(server, mock_gorelo):
-    route_update(mock_gorelo)
-    await call_tool(server, "set_uptime_maintenance", {"check_id": CHECK_ID, "enabled": True, "start": START, "duration_minutes": 30})
-    assert mock_gorelo.requests[0].json == {
-        "MaintenanceMode": {"Enabled": True, "StartDateTime": START, "DurationInMinutes": 30}
-    }
+async def test_a_blank_reason_is_refused_like_a_missing_one(server, mock_gorelo):
+    args = {"check_id": CHECK_ID, "enabled": True, "start": START, "duration_minutes": 30}
+    assert await call_tool_error(server, "set_uptime_maintenance", {**args, "reason": ""}) == "reason: must not be empty or whitespace only"
+    assert mock_gorelo.requests == []
 
 
 async def test_only_the_maintenance_params_that_are_given_are_sent(server, mock_gorelo):
     route_update(mock_gorelo)
     await call_tool(
         server, "set_uptime_maintenance",
-        {"check_id": CHECK_ID, "enabled": True, "duration_minutes": 15, "start": "2026-10-02T22:00:00Z"},
-    )  # start and duration are required; the reason is the only optional field and is not invented
+        {"check_id": CHECK_ID, "enabled": True, "duration_minutes": 15, "start": "2026-10-02T22:00:00Z", "reason": "Patching"},
+    )  # start, duration and reason are all required with enabled=true and none is invented
     assert mock_gorelo.requests[0].json == {
-        "MaintenanceMode": {"Enabled": True, "StartDateTime": "2026-10-02T22:00:00Z", "DurationInMinutes": 15}
+        "MaintenanceMode": {
+            "Enabled": True, "StartDateTime": "2026-10-02T22:00:00Z", "DurationInMinutes": 15, "Reason": "Patching",
+        }
     }
 
 
@@ -1547,13 +1599,98 @@ async def test_the_maintenance_body_never_carries_anything_but_maintenance_mode(
     route_update(mock_gorelo)
     for args in (
         {"enabled": False},
-        {"enabled": True, "start": START, "duration_minutes": 0},
         {"enabled": True, "start": START, "duration_minutes": 0, "reason": "r"},
         {"enabled": True, "duration_minutes": 5, "reason": "r", "start": "2026-10-02T22:00:00Z"},
     ):
         await call_tool(server, "set_uptime_maintenance", {"check_id": CHECK_ID, **args})
         assert set(mock_gorelo.calls("PATCH")[-1].json) == {"MaintenanceMode"}
     assert json.dumps(mock_gorelo.calls("PATCH")[-1].json).count("Target") == 0
+
+
+# Whole-number parameters that are not ids are strict: FastMCP's lax mode would turn JSON true and false into 1 and 0
+# (duration_minutes=false would send a window that never expires). These go through the MCP schema, not the function.
+NOT_A_WHOLE_NUMBER = [
+    pytest.param(True, id="json-true"),
+    pytest.param(False, id="json-false"),
+    pytest.param("5", id="text-5"),
+    pytest.param(5.0, id="decimal-5"),
+]
+
+
+@pytest.mark.parametrize("bad", NOT_A_WHOLE_NUMBER)
+async def test_a_boolean_or_text_duration_is_refused_at_the_schema_and_sends_nothing(server, mock_gorelo, bad):
+    args = {"check_id": CHECK_ID, "enabled": True, "start": START, "duration_minutes": bad, "reason": "Patching"}
+    text = await call_tool_error(server, "set_uptime_maintenance", args)
+    assert "duration_minutes" in text and "valid integer" in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("param", ["frequency_minutes", "retries_after_failure", "port"])
+@pytest.mark.parametrize("bad", NOT_A_WHOLE_NUMBER)
+async def test_update_refuses_a_boolean_or_text_where_a_whole_number_is_expected(server, mock_gorelo, param, bad):
+    text = await call_tool_error(server, "update_uptime_check", {"check_id": CHECK_ID, param: bad})
+    assert param in text and "valid integer" in text
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("param", ["frequency_minutes", "retries_after_failure", "port"])
+@pytest.mark.parametrize("bad", NOT_A_WHOLE_NUMBER)
+async def test_create_refuses_a_boolean_or_text_where_a_whole_number_is_expected(server, mock_gorelo, param, bad):
+    args = {**BASE, "check_type": "tcp", "ip": "10.0.0.1", "port": 22, param: bad}
+    text = await call_tool_error(server, "create_uptime_check", args)
+    assert param in text and "valid integer" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_the_schema_of_every_whole_number_is_an_integer_that_a_client_cannot_fill_with_a_boolean(server):
+    tools = {tool.name: tool for tool in await list_tools(server)}
+    for tool, params in (
+        ("create_uptime_check", ("frequency_minutes", "port", "retries_after_failure")),
+        ("update_uptime_check", ("frequency_minutes", "port", "retries_after_failure")),
+        ("set_uptime_maintenance", ("duration_minutes",)),
+    ):
+        for param in params:
+            definition = tools[tool].inputSchema["properties"][param]
+            assert "integer" in json.dumps(definition), (tool, param)
+            assert "boolean" not in json.dumps(definition), (tool, param)
+
+
+@pytest.mark.parametrize("bad", ["true", "yes", 1, 0], ids=["text-true", "text-yes", "number-1", "number-0"])
+async def test_the_flags_that_move_devices_or_clear_tags_are_strict_booleans(server, mock_gorelo, bad):
+    # a lax bool would let the text "yes" or the number 1 start moving unassigned devices to another client
+    text = await call_tool_error(server, "create_uptime_check", {**BASE, "check_type": "icmp", "ip": "10.0.0.1", "adopt_client_assets": bad})
+    assert "adopt_client_assets" in text and "valid boolean" in text
+    text = await call_tool_error(server, "update_uptime_check", {"check_id": CHECK_ID, "adopt_client_assets": bad})
+    assert "adopt_client_assets" in text and "valid boolean" in text
+    text = await call_tool_error(server, "update_uptime_check", {"check_id": CHECK_ID, "clear_tags": bad})
+    assert "clear_tags" in text and "valid boolean" in text
+    assert mock_gorelo.requests == []
+
+
+# --------------------------------------------------------------------------
+# An ICMP check takes a host name
+# --------------------------------------------------------------------------
+
+
+async def test_updating_an_icmp_check_to_a_host_name_reads_the_check_and_sends_the_name(server, mock_gorelo):
+    route_target_update(mock_gorelo, check())
+    await call_tool(server, "update_uptime_check", {"check_id": CHECK_ID, "ip": "router.example.com"})
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH", "GET"]
+    assert mock_gorelo.calls("PATCH")[0].json == {"Target": {"Ip": "router.example.com"}}
+
+
+async def test_changing_the_type_to_icmp_accepts_a_host_name(server, mock_gorelo):
+    route_update(mock_gorelo)
+    await call_tool(server, "update_uptime_check", {"check_id": CHECK_ID, "check_type": "icmp", "ip": "router.example.com"})
+    assert mock_gorelo.requests[0].json == {"TypeId": 1, "Target": {"Ip": "router.example.com"}}
+
+
+async def test_a_host_name_for_a_stored_tcp_check_is_refused_after_the_read_and_before_the_patch(server, mock_gorelo):
+    # without check_type the type is only known from the read; a TCP check requires a parseable address
+    mock_gorelo.on("GET", CHECK_PATH, envelope(tcp_check()))
+    text = await call_tool_error(server, "update_uptime_check", {"check_id": CHECK_ID, "ip": "router.example.com"})
+    assert text == IP_ERROR
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
 
 
 # --------------------------------------------------------------------------

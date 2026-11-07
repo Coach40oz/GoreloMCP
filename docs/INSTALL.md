@@ -129,7 +129,7 @@ git clone https://github.com/Coach40Oz/GoreloMCP.git /opt/gorelo-mcp/app
 
 You should see `Cloning into '/opt/gorelo-mcp/app'...` and no error.
 
-The code stays owned by root, and the service can only read it. That way, a flaw in the server cannot rewrite the server. Only two folders are writable by the service. Create them:
+The code stays owned by root, and the service can only read it. That way, a flaw in the server cannot rewrite the server. The service itself writes in one folder only, `.oauth-state` (its sign-in data). `.state` belongs to the API watcher, which runs as its own unit; the service never writes there, but create both now so that the watcher works when you turn it on:
 
 ```bash
 cd /opt/gorelo-mcp/app
@@ -138,7 +138,7 @@ install -d -m 0700 -o gorelo-mcp -g gorelo-mcp /opt/gorelo-mcp/app/.oauth-state
 install -d -m 0755 -o gorelo-mcp -g gorelo-mcp /opt/gorelo-mcp/app/.state
 ```
 
-Both folders must exist before the service starts, or systemd refuses to start it (status `226/NAMESPACE`).
+`.oauth-state` must exist before the service starts, or systemd refuses to start it (status `226/NAMESPACE`); `.state` must exist before the watcher's unit runs.
 
 Use a released version, not the moving development branch. Releases are git tags; the first public release is `v1.0.0`. Check out the newest tag:
 
@@ -211,7 +211,7 @@ Fill in each value after the `=` sign. No quotes, no spaces.
 |---|---|---|
 | `GORELO_API_KEY` | yes | The raw Gorelo API key. No `Bearer ` in front. |
 | `GORELO_BASE_URL` | no | Leave blank if your Gorelo account is hosted in the US region: the server then calls `https://api.usw.gorelo.io/v1`. If it is hosted in Australia, put `https://api.aue.gorelo.io` (the `/v1` and a trailing slash are optional). It must start with `https://` and name a host under `gorelo.io`, or the service refuses to start. See 3.3. |
-| `PUBLIC_BASE_URL` | yes | The public address of this server, for example `https://mcp.example.com`. No `/mcp` and no trailing slash. It is the address Claude signs in at. If you change it later, Claude must sign in again. |
+| `PUBLIC_BASE_URL` | yes | The public address of this server, for example `https://mcp.example.com`. It must be `https` and only the address: no path (so no `/mcp`), no query, no user name or password; a trailing slash is allowed. The service refuses to start otherwise. It is the address Claude signs in at. If you change it later, Claude must sign in again. |
 | `MCP_AUTH_PASSWORD` | yes | The password from 3.1. Use 16 characters or more (the service warns if it is shorter). |
 | `GORELO_TOOLSETS` | no | Leave blank for the default: `core,tickets,time,billing,uptime`. See step 8. |
 | `GORELO_ENABLE_DESTRUCTIVE` | no | Leave blank (off). See step 8. |
@@ -265,7 +265,7 @@ You should see `Active: active (running)`.
 journalctl -u gorelo-mcp.service --since "5 minutes ago" --no-pager
 ```
 
-You should see a line like `gorelo-mcp ready: toolsets=billing,core,tickets,time,uptime destructive=False tools=98` and a line containing `oauth state loaded`. Two more lines come before the ready line: `gorelo-mcp settings: api_host=api.usw.gorelo.io extra_redirect_domains=none` (the Gorelo host this server calls, and the extra sign-in domains you added, if any) and `gorelo-mcp gated tools: none` (the gated tools that are switched on: delete, void, approved-invoice and sharing tools; none by default). If the start line's `api_host` is not the host of your region, fix `GORELO_BASE_URL` (step 3.3). If you see `refusing to start`, the line names every setting that is wrong: fix `.env` and run `systemctl restart gorelo-mcp.service`.
+You should see a line like `gorelo-mcp ready: toolsets=billing,core,tickets,time,uptime destructive=False tools=99` and a line containing `oauth state loaded`. Two more lines come before the ready line: `gorelo-mcp settings: api_host=api.usw.gorelo.io extra_redirect_domains=none` (the Gorelo host this server calls, and the extra sign-in domains you added, if any) and `gorelo-mcp gated tools: none` (the gated tools that are switched on: delete, void, approved-invoice, contract-write, sharing and related-item tools; none by default). If the start line's `api_host` is not the host of your region, fix `GORELO_BASE_URL` (step 3.3). If you see `refusing to start`, the line names every setting that is wrong: fix `.env` and run `systemctl restart gorelo-mcp.service`.
 
 ### 4.4 Check the local endpoint
 
@@ -498,7 +498,7 @@ Note: if you installed this tree from a release that is older or newer than the 
 
 | Toolset | In the default set | Covers |
 |---|---|---|
-| `core` | yes | clients, locations, contacts, assets (agent assets read only; custom assets get, list, create, update and move), the feed of deleted records, groups, users, alerts, `health_check` |
+| `core` | yes | clients, locations, contacts, assets (agent assets: read, and `update_agent` for description, asset type, contact and warranty dates, never deleted; custom assets get, list, create, update and move), the feed of deleted records, groups, users, alerts, `health_check` |
 | `tickets` | yes | tickets, comments, side conversations, approvals, attachments |
 | `time` | yes | time entries, billing roles, work types |
 | `billing` | yes | invoices (Draft), items, categories, taxes, contracts |
@@ -511,7 +511,7 @@ Examples: `GORELO_TOOLSETS=all` turns every toolset on, `documents` included (it
 
 ### 8.2 The destructive switch
 
-By default the gated tools do not exist: the delete and void tools, the tools that approve an invoice or create an Approved one, the tool that removes a related item from a document and the tool that shares a document outside Gorelo. [GATED-TOOLS.md](GATED-TOOLS.md) lists all 15 with what each one does. `GORELO_ENABLE_DESTRUCTIVE=1` adds all of them. To add only some, list their names separated by commas: `GORELO_ENABLE_DESTRUCTIVE=delete_time_entry,delete_ticket_comment` adds those two and no other gated tool. The names are in [tool-catalog.md](tool-catalog.md) (kind `destructive`). A name that is not a gated tool, or a gated tool of a toolset that `GORELO_TOOLSETS` does not enable (`share_document` and `remove_document_related_item` need `documents`), stops the service with an error that names the bad names and lists the valid ones. Two names are the exception: `create_contract` and `update_contract` are held back in 1.5.1 until Gorelo releases contract writes, so a list that names them is not an error; the names are ignored and the journal gets one `held tools ignored` warning line. Every call still needs `confirm=true`, and Claude is told to ask you first. An Approved invoice is sent to your connected accounting system at once and may email its recipients, and voiding it in Gorelo does not void the accounting system's copy. A shared document can be read by anyone who has its link. Switch on only what you need. Some operations (deleting clients, contacts, tickets, assets and contracts) can never be called, whatever you set.
+By default the gated tools do not exist: the delete and void tools (they include `delete_contact`, which makes a contact leave every list), the tools that approve an invoice or create an Approved one, the contract writes, the tool that removes a related item from a document and the tool that shares a document outside Gorelo. [GATED-TOOLS.md](GATED-TOOLS.md) lists all 18 with what each one does. `GORELO_ENABLE_DESTRUCTIVE=1` adds every gated tool of the toolsets you enabled. To add only some, list their names separated by commas: `GORELO_ENABLE_DESTRUCTIVE=delete_time_entry,delete_ticket_comment` adds those two and no other gated tool. The names are in [tool-catalog.md](tool-catalog.md) (kind `destructive`). A name that is not a gated tool, or a gated tool of a toolset that `GORELO_TOOLSETS` does not enable (`share_document` and `remove_document_related_item` need `documents`), stops the service with an error that names the bad names and lists the valid ones. Every call still needs `confirm=true`, and Claude is told to ask you first. An Approved invoice is sent to your connected accounting system at once and may email its recipients, and a void in Gorelo may not reach the accounting system: check it there. A shared document can be read by anyone who has its link. Switch on only what you need. Some operations (deleting clients, tickets, assets and contracts) can never be called, whatever you set; deleting a contact is possible only through the gated `delete_contact`.
 
 To turn the gated tools off again, make `GORELO_ENABLE_DESTRUCTIVE` blank (or `0`); to turn off only some of them, take their names out of the list. Apply the change as in 8.3: the server reads `.env` only when it starts. The start line `gorelo-mcp gated tools:` then names the gated tools that are on (`none` when all of them are off), and `health_check` lists them as `gated_tools`.
 
@@ -579,6 +579,8 @@ Then start a new conversation in Claude, since tool lists are read when a conver
 ### 9.2 Roll back
 
 Before you roll back to a version older than 1.3.0, take `documents` out of `GORELO_TOOLSETS` and make `GORELO_ENABLE_DESTRUCTIVE` blank: the older versions refuse to start on the toolset name `documents` and on a comma list of tool names, and `.env` is not changed by a checkout. Do not use `1` instead: on an older version it switches on every gated tool, including any you had left out of your list.
+
+Before you roll back to any older version, also check a `GORELO_ENABLE_DESTRUCTIVE` list of tool names against it. An older version refuses to start when the list names a tool it does not have (the error says "no tool has this name"). Take out every name the target version lacks: `delete_contact` is new in 1.5.2; `approve_invoice`, `create_contract`, `update_contract`, `delete_asset_type`, `delete_client_location`, `delete_client_domain` and `delete_product_charge` are new in 1.5.0 (1.5.1 and 1.5.2 also ignore the two contract names, with a warning). After the restart, `journalctl -u gorelo-mcp.service --since "1 minute ago" --no-pager | grep refusing` shows the line if the list still has a name the version lacks.
 
 Use the tag you wrote down before the update (`PREVIOUS_TAG` below, for example `v1.0.0`). `git tag --sort=-v:refname` lists the tags that exist.
 

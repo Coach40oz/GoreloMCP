@@ -699,11 +699,22 @@ UNCONFIRMED_LINK = (
 )
 
 
+async def test_a_link_request_whose_connection_was_never_made_says_nothing_was_sent(server, mock_gorelo):
+    # httpx.ConnectError: no link was issued, so the "may already have been issued" advice would be wrong
+    mock_gorelo.on("POST", LINK_PATH, httpx.ConnectError("refused"))
+    text = await call_tool_error(server, "create_form_submission_link", {"form_id": "aB3dE9", "ticket_id": uid(5)})
+    assert text == (
+        "Gorelo could not be reached for create_form_submission_link (the connection was never established). "
+        "Nothing was sent, so repeating it is safe."
+    )
+    assert "may already have been issued" not in text and [r.method for r in mock_gorelo.requests] == ["POST"]
+
+
 @pytest.mark.parametrize(
     "response, what, trace",
     [
         (httpx.ReadTimeout("slow"), "the request timed out", False),
-        (httpx.ConnectError("refused"), "the connection failed", False),
+        (httpx.ReadError("reset"), "the connection failed", False),  # made, then lost: a link may exist
         (error_envelope(500, [("070001", "Internal error.")]), "Gorelo answered HTTP 500 without a usable link", True),
         (
             error_envelope(503, [("070001", "Unavailable.")], trace_id=None),

@@ -418,7 +418,17 @@ async def test_an_unknown_ticket_is_a_404_that_names_ticket_id(server, mock_gore
     assert "ticket_id: Ticket not found." in await call_tool_error(server, "create_product_charge", BASE)
 
 
-@pytest.mark.parametrize("failure", [httpx.ReadTimeout("slow"), httpx.ConnectError("refused")], ids=["timeout", "connection"])
+async def test_a_post_whose_connection_was_never_made_creates_nothing(server, mock_gorelo):
+    mock_gorelo.on("POST", CHARGES, httpx.ConnectError("refused"))
+    text = await call_tool_error(server, "create_product_charge", BASE)
+    assert text == (
+        "Gorelo could not be reached for create_product_charge (the connection was never established). "
+        "Nothing was sent, so repeating it is safe."
+    )
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("POST", CHARGES)]
+
+
+@pytest.mark.parametrize("failure", [httpx.ReadTimeout("slow"), httpx.ReadError("reset")], ids=["timeout", "connection"])
 async def test_a_post_that_is_not_answered_is_never_retried_and_says_to_verify(server, mock_gorelo, failure):
     mock_gorelo.on("POST", CHARGES, failure)
     text = await call_tool_error(server, "create_product_charge", BASE)

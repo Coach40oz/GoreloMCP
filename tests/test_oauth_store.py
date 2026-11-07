@@ -1036,3 +1036,66 @@ def test_a_lock_file_that_cannot_be_opened_is_a_state_file_error(state_dir, monk
     with pytest.raises(StateFileError, match="cannot open the OAuth state lock file") as info:
         StateLock(state_dir).acquire()
     assert not isinstance(info.value, StateLockedError)
+
+
+def test_a_planted_lock_symlink_is_refused_and_its_target_is_never_touched(state_dir, tmp_path, monkeypatch):
+    target = tmp_path / "root-owned-secret"
+    target.write_text("secret")
+    os.chmod(target, 0o640)
+    before = target.stat()
+    (state_dir / oauth_store.LOCK_FILE_NAME).symlink_to(target)
+    chowned = []
+    monkeypatch.setattr(os, "fchown", lambda *a, **k: chowned.append(a))
+    monkeypatch.setattr(os, "geteuid", lambda: 0)  # as if the script were started as root
+    with pytest.raises(StateFileError, match="symbolic link") as info:
+        StateLock(state_dir).acquire()
+    assert not isinstance(info.value, StateLockedError)
+    assert chowned == []
+    after = target.stat()
+    assert (after.st_mode, after.st_uid, after.st_mtime_ns, target.read_text()) == (before.st_mode, before.st_uid, before.st_mtime_ns, "secret")
+
+
+def test_a_dangling_lock_symlink_is_refused_and_nothing_is_created_through_it(state_dir, tmp_path):
+    target = tmp_path / "does-not-exist-yet"
+    (state_dir / oauth_store.LOCK_FILE_NAME).symlink_to(target)
+    with pytest.raises(StateFileError, match="symbolic link"):
+        StateLock(state_dir).acquire()
+    assert not target.exists()
+
+
+def test_a_lock_file_with_a_second_hard_link_is_refused(state_dir, tmp_path):
+    other = tmp_path / "other-name"
+    other.write_text("x")
+    os.link(other, state_dir / oauth_store.LOCK_FILE_NAME)
+    with pytest.raises(StateFileError, match="not a plain file with one link"):
+        StateLock(state_dir).acquire()
+
+
+def test_a_lock_that_is_a_directory_is_refused(state_dir):
+    (state_dir / oauth_store.LOCK_FILE_NAME).mkdir()
+    with pytest.raises(StateFileError):
+        StateLock(state_dir).acquire()
+
+
+def test_only_a_lock_file_this_call_created_is_given_to_the_directory_owner(state_dir, monkeypatch):
+    chowned = []
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: chowned.append((uid, gid)))
+    # make the directory look like it belongs to another user so the adoption has something to do
+    real_stat = os.stat
+    fake = os.stat_result((0o40700, 1, 1, 2, 4321, 4321, 0, 0, 0, 0))
+    monkeypatch.setattr(os, "stat", lambda p, *a, **k: fake if str(p) == str(state_dir) else real_stat(p, *a, **k))
+    StateLock(state_dir).acquire().release()  # creates .lock: adopted
+    assert chowned == [(4321, 4321)]
+    StateLock(state_dir).acquire().release()  # .lock exists: left alone
+    assert chowned == [(4321, 4321)]
+
+
+def test_a_state_file_that_is_a_symlink_is_refused_not_read(state_dir, tmp_path):
+    target = tmp_path / "elsewhere.json"
+    target.write_text(json.dumps(Builder().v1_document()))
+    (state_dir / STATE_FILE).symlink_to(target)
+    with pytest.raises(StateFileError, match="symbolic link"):
+        oauth_store.load_state(state_dir)
+    assert target.exists()
+

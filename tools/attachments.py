@@ -1,9 +1,11 @@
 """Attachment upload, multipart (toolset "tickets").
 
 upload_attachment stores a file against an existing ticket, task, project or document and returns the
-{name, url} pair that a comment takes in its attachments (create_ticket_comment for a ticket,
-create_project_comment for a task or a project) or that update_document takes in its attachments (a document; the
-url can also go in an img tag in the body of the document): the note in the result names the right one. The file
+{name, url} pair that a comment takes in its attachments (create_ticket_comment for a ticket; for a task or a
+project create_project_comment makes a new comment, and update_task_comment or update_project_comment, since 1.5.0, add
+the file to a PRIVATE comment that already exists, with the complete list of its files) or that update_document takes
+in its attachments (a document; the url can also go in an img tag in the body of the document): the note in the result
+names the right one. The file
 arrives inline (base64 or UTF-8 text): the tool never fetches a URL, so it cannot be used to make the
 server request an address of the caller's choosing.
 
@@ -20,8 +22,8 @@ Two rules that only this tool can state:
 
 * A task or project upload is refused locally, with no HTTP call, unless the "projects" toolset is enabled on
   this server, and a document upload unless the "documents" toolset is (server_info_of(ctx)["toolsets"]; the
-  message names GORELO_TOOLSETS). The file can only be attached through create_project_comment, a projects tool,
-  or through update_document, a documents tool, and an uploaded file can neither be listed nor deleted through
+  message names GORELO_TOOLSETS). The file can only be attached through create_project_comment, update_project_comment
+  or update_task_comment, projects tools, or through update_document, a documents tool, and an uploaded file can neither be listed nor deleted through
   the API, so an upload that nothing can attach would stay orphaned for good.
 * An upload whose outcome is unknown (timeout, connection failure, 5xx, an unusable answer) is reported
   with upload-specific advice instead of the generic "verify with a read before retrying", which is
@@ -51,8 +53,8 @@ ITEM_TYPES = {"ticket": "Ticket", "task": "Task", "project": "Project", "documen
 # The item types whose file can only be attached through a tool of another toolset: {item_type: (toolset, how the
 # file gets attached)}. The second text completes "the file could not be attached ..." in the refusal.
 NEEDS_TOOLSET = {
-    "task": ("projects", "through a comment (create_project_comment is a projects tool)"),
-    "project": ("projects", "through a comment (create_project_comment is a projects tool)"),
+    "task": ("projects", "through a comment (create_project_comment and update_task_comment are projects tools)"),
+    "project": ("projects", "through a comment (create_project_comment and update_project_comment are projects tools)"),
     "document": ("documents", "to the document (update_document is a documents tool)"),
 }
 
@@ -66,12 +68,19 @@ UPLOAD_FIELDS = {
 }
 
 # The tool that takes the {name, url} pair for each item_type (a task and a project are commented on through the
-# project comment tool, which needs the project id, and the task id for a task; a document takes its files in the
-# attachments of update_document), and what carries the file in the last sentence of the note.
+# project comment tool, which needs the project id, and the task id for a task; an existing private comment takes the
+# file through update_project_comment or update_task_comment; a document takes its files in the attachments of
+# update_document), and what carries the file in the last sentence of the note.
 NEXT_STEP = {
     "ticket": "create_ticket_comment",
-    "task": "create_project_comment with project_id and task_id",
-    "project": "create_project_comment with project_id",
+    "task": (
+        "create_project_comment with project_id and task_id (a new comment) or update_task_comment (a private comment "
+        "that exists: send its complete list, the current files and this one)"
+    ),
+    "project": (
+        "create_project_comment with project_id (a new comment) or update_project_comment (a private comment that "
+        "exists: send its complete list, the current files and this one)"
+    ),
     "document": "update_document (that list is the complete new list: keep the current attachments in it)",
 }
 CARRIER = {"ticket": "a comment", "task": "a comment", "project": "a comment", "document": "update_document"}
@@ -107,7 +116,7 @@ def _item_type(value: Any) -> str:
 
 
 def _toolset_on(ctx: Context, item_type: str) -> None:
-    """A task or project upload needs the projects toolset (create_project_comment is the only way to attach it) and a
+    """A task or project upload needs the projects toolset (create_project_comment, update_project_comment and update_task_comment are the ways to attach it) and a
     document upload the documents toolset (update_document is).
 
     Refused locally, before the file is decoded or any HTTP call, when server_info_of(ctx) does not list the toolset

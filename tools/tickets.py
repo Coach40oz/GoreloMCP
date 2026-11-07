@@ -1,7 +1,7 @@
 """Tickets and their lookups: statuses, types, tags, priorities, sources (toolset "tickets").
 
 Tools: list_tickets, search_tickets, get_ticket, create_ticket, update_ticket, list_ticket_statuses,
-list_ticket_types, list_ticket_tags, list_ticket_priorities, list_ticket_sources.
+list_ticket_types, list_ticket_tags, list_ticket_priorities, list_ticket_sources, list_sla_policies.
 
 Ops used by this module (each tool declares every op it calls, re-read GETs included):
 
@@ -14,6 +14,11 @@ Ops used by this module (each tool declares every op it calls, re-read GETs incl
     GET /v1/tickets/tags
     GET /v1/tickets/priorities
     GET /v1/tickets/sources
+    GET /v1/tickets/sla/policies
+
+list_sla_policies (contract b0850edb962d, 2026-11-05) reads the SLA policies, unpaged, so that a ticket's Sla.PolicyId
+(a field of get_ticket and list_tickets, passed through unchanged with Sla.FirstResponse and Sla.Resolution) can be
+turned into a name and its per-priority targets. Policies are managed in the Gorelo app, not through the API.
 
 list_ticket_priorities and list_ticket_sources read the live scales (GET /v1/tickets/priorities and
 GET /v1/tickets/sources, unpaged {Id, Name}, the same for every account; they were local tables before 1.5.0).
@@ -94,6 +99,7 @@ OP_TYPES = "GET /v1/tickets/types"
 OP_TAGS = "GET /v1/tickets/tags"
 OP_PRIORITIES = "GET /v1/tickets/priorities"
 OP_SOURCES = "GET /v1/tickets/sources"
+OP_SLA_POLICIES = "GET /v1/tickets/sla/policies"
 
 # One priority scale for filters, reads and writes (since 2026-08-05). Match on Id, never on Name.
 PRIORITIES: tuple[tuple[int, str], ...] = (
@@ -678,6 +684,8 @@ async def list_tickets(
 
     Notable fields: IsWaitingOnThem (renamed from IsAwaitingClient), Sla.FirstResponse.ElapsedBusinessMinutes,
     ChecklistSummary, ContactId (null without a primary contact). Description, time and billing are only in get_ticket.
+    Sla: PolicyId (list_sla_policies), FirstResponse {Status, DueOn, AtRiskOn, RespondedOn, TargetBusinessMinutes},
+    Resolution; a status is 1 NotApplicable, 2 Pending, 3 Met, 4 Breached.
     For status or priority NAMES, or waiting, unassigned, unread or open filters, use search_tickets.
     closed_since and closed_before keep only closed tickets (a never-closed ticket is left out).
     Side effects: None (read-only).
@@ -895,6 +903,9 @@ async def get_ticket(
     """Get one ticket in full: the list fields plus Description, Time, Products, BillingOverride, Shipments, Banner and
     linked asset and uptime ids.
 
+    Sla: PolicyId (list_sla_policies), FirstResponse {Status, DueOn, AtRiskOn, RespondedOn, TargetBusinessMinutes},
+    Resolution; a status is 1 NotApplicable, 2 Pending, 3 Met, 4 Breached.
+
     Prefer the GUID or the display number (TCK-1234). A bare number (1234) is searched with Query and can scan several
     pages (capped at 20 pages of 50 tickets); no match or several matches is an error.
     Side effects: None (read-only).
@@ -918,7 +929,9 @@ async def get_ticket(
 async def create_ticket(
     ctx: Context,
     title: Annotated[str, Field(description="Max 250 characters")],
-    description: Annotated[str, Field(description="Ticket text")],
+    description: Annotated[
+        str, Field(description="Ticket body as HTML. Write a literal < or > as &lt; / &gt;: text in angle brackets is read as a tag and lost.")
+    ],
     client_id: Annotated[StrictId, Field(description="Client id (list_clients)")],
     status_id: Annotated[StrictId, Field(description="Status id (list_ticket_statuses)")],
     type_id: Annotated[StrictId, Field(description="Type id (list_ticket_types)")],
@@ -1320,3 +1333,15 @@ async def list_ticket_sources(ctx: Context) -> dict:
     search_tickets accepts all of them.
     Side effects: None (read-only)."""
     return {**list_result(await client_of(ctx).get_list(OP_SOURCES, tool="list_ticket_sources")), "note": SOURCES_NOTE}
+
+
+@gorelo_tool(toolset="tickets", kind="read", ops=[OP_SLA_POLICIES])
+async def list_sla_policies(ctx: Context) -> dict:
+    """List the SLA policies (Id, Name, Order, Targets). Returns {items, count}.
+
+    Use it to turn a ticket's Sla.PolicyId (from get_ticket or list_tickets) into a policy name and its targets. Order is
+    the position in the automatic matching, lower first. Each target has PriorityId (the ticket priority scale: 0 None,
+    1 Urgent, 2 High, 3 Normal, 4 Low), TargetBusinessMinutes (null: no target, that priority gets no SLA tracking) and
+    Is24x7. Policies are managed in the Gorelo app; this server cannot change them.
+    Side effects: None (read-only)."""
+    return list_result(await client_of(ctx).get_list(OP_SLA_POLICIES, tool="list_sla_policies"))

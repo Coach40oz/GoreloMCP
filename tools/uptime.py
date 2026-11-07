@@ -18,7 +18,8 @@ Ops owned by this module:
     DELETE /v1/uptime/{uptimeId}
 
 Check types: 1 ICMP (target ip), 2 HTTP (target url), 3 TCP (target ip and port). Regions: 1 Seattle,
-2 Sydney, 3 UK, 4 Frankfurt. The ip of an ICMP or TCP check is a literal IP address, never a host name.
+2 Sydney, 3 UK, 4 Frankfurt. The ip of a TCP check is a literal IP address; an ICMP check also accepts a host name
+(spec, UptimeTarget.Ip: "ICMP accepts a hostname as well as an address; TCP requires a parseable address").
 A new check starts monitoring at once. POST and PATCH answer with only the check Id, so the write tools
 read the check back with reread_after_write. update_uptime_check never sends MaintenanceMode and
 set_uptime_maintenance sends nothing else: they share PATCH /v1/uptime/{uptimeId} but change disjoint parts of
@@ -26,12 +27,17 @@ the check. TagIds replace the whole list; an empty list (every tag removed) is o
 clear_tags=true. The Target of a PATCH is always sent complete: when the caller changes only part of it
 (for example the port of a TCP check) update_uptime_check reads the check first, validates the given
 fields against its type and fills the rest from the stored target. set_uptime_maintenance with enabled=true
-requires start and duration_minutes (0 is allowed and means the window never expires): a window nobody gave a
-length would be an invented default, and one that never expires hides outages until somebody ends it. Gorelo
-also refuses a window without a start (live, 2026-10-02: 400 "MaintenanceMode.StartDateTime is required when
-enabling maintenance mode."), and the tool never reads the clock for the caller: for maintenance that should
-begin now the model passes the current time, and only when the user wants it now. With enabled=false every
-other field is refused.
+requires start, duration_minutes and reason (0 minutes is allowed and means the window never expires): a window
+nobody gave a length would be an invented default, and one that never expires hides outages until somebody ends
+it. Gorelo also refuses a window without a start (live, 2026-10-02: 400 "MaintenanceMode.StartDateTime is
+required when enabling maintenance mode."), and the spec (UptimeMaintenanceMode, since contract 05200951c89e)
+says StartDateTime, DurationInMinutes and Reason are all "required when Enabled is true"; the tool never reads
+the clock for the caller: for maintenance that should begin now the model passes the current time, and only when
+the user wants it now. With enabled=false every other field is refused.
+
+The whole-number parameters that are not ids (frequency_minutes, port, retries_after_failure, duration_minutes)
+are strict (Annotated[int, Strict()]): FastMCP's default lax mode would turn JSON false into 0, and
+duration_minutes=false would then send a window that never expires.
 """
 
 import ipaddress
@@ -40,7 +46,7 @@ from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
 from fastmcp import Context
-from pydantic import Field
+from pydantic import Field, Strict
 
 from gorelo_client import GoreloAPIError
 from tools._common import (
@@ -76,9 +82,9 @@ REGION_IDS = {"seattle": 1, "sydney": 2, "uk": 3, "frankfurt": 4}
 # ignoring it"), so the tools refuse it before sending anything.
 TARGET_FIELDS_BY_TYPE = {"icmp": ("ip",), "http": ("url",), "tcp": ("ip", "port")}
 TARGET_HINTS = {
-    "icmp": "ip is the IP address to ping",
+    "icmp": "ip is the IP address or host name to ping",
     "http": "url is the address to request, such as https://example.com/health",
-    "tcp": "ip is the IP address to connect to and port the TCP port",
+    "tcp": "ip is the literal IP address to connect to and port the TCP port",
 }
 CHECK_LABELS = {"icmp": "an ICMP check", "http": "an HTTP check", "tcp": "a TCP check"}
 
@@ -186,17 +192,36 @@ def _tag_ids(param: str, value: Any, *, if_empty: str) -> list[int] | None:
     return None if ids is None else list(dict.fromkeys(ids))
 
 
-def _ip_address(value: Any) -> str | None:
-    """The ip of an icmp or tcp check: a literal IPv4 or IPv6 address, sent as given. Host names are refused."""
+_HOST_FORBIDDEN = re.compile(r"[\s/\\:?#@]")
+HOST_MAX_CHARS = 253
+ICMP_HOST_ERROR_TEXT = (
+    "ip: must be an IP address or a host name such as router.example.com, with no scheme, path, port or spaces"
+)
+
+
+def _ip_address(value: Any, *, kind: str | None = None) -> str | None:
+    """The ip of an icmp or tcp check, sent as given.
+
+    A tcp check takes a literal IPv4 or IPv6 address only (spec: "TCP requires a parseable address"). An icmp
+    check also accepts a host name (spec: "ICMP accepts a hostname as well as an address"), checked here only
+    for its shape: no spaces, no scheme, path, port, query or user part. With `kind` None (update_uptime_check
+    before it has read the stored type) either form passes; the tcp rule is applied once the type is known.
+    """
     if value is None:
         return None
     text = non_empty("ip", value)
     try:
         ipaddress.ip_address(text)
+        return text
     except ValueError:
+        pass
+    if kind == "tcp":
         raise ValueError(
             "ip: must be a literal IP address (IPv4 or IPv6), not a host name; ask the user for the address"
-        ) from None
+        )
+    if len(text) > HOST_MAX_CHARS or _HOST_FORBIDDEN.search(text) or text.rsplit(".", 1)[-1].isdigit():
+        # A last part of only digits is a mistyped address ("10.0.0", "999.1.1.1"), never a DNS name.
+        raise ValueError(ICMP_HOST_ERROR_TEXT)
     return text
 
 
@@ -367,23 +392,23 @@ async def create_uptime_check(
     check_type: Annotated[
         Literal["icmp", "http", "tcp"], Field(description="icmp needs ip, http needs url, tcp needs ip and port.")
     ],
-    frequency_minutes: Annotated[int, Field(description="Minutes, 1 or more.")],
+    frequency_minutes: Annotated[int, Strict(), Field(description="Whole minutes, 1 or more.")],
     region: Annotated[Literal["seattle", "sydney", "uk", "frankfurt"], Field(description="Where it runs.")],
-    ip: Annotated[str | None, Field(description="icmp, tcp: literal IP address, not a host name.")] = None,
+    ip: Annotated[str | None, Field(description="icmp: IP address or host name; tcp: literal IP address only.")] = None,
     url: Annotated[str | None, Field(description="http: http:// or https:// address.")] = None,
-    port: Annotated[int | None, Field(description="tcp: 1-65535.")] = None,
+    port: Annotated[int | None, Strict(), Field(description="tcp: 1-65535.")] = None,
     client_id: Annotated[StrictId | None, Field(description="From list_clients; send location_id too.")] = None,
     location_id: Annotated[
         StrictId | None, Field(description="From list_client_locations; needs client_id.")
     ] = None,
     description: Annotated[str | None, Field(description="Free text.")] = None,
-    retries_after_failure: Annotated[int | None, Field(description="0 or more.")] = None,
+    retries_after_failure: Annotated[int | None, Strict(), Field(description="Whole number, 0 or more.")] = None,
     isp_connection_link: Annotated[str | None, Field(description="ISP status page URL.")] = None,
     tag_ids: Annotated[
         list[StrictId] | None, Field(description="No tag lookup: copy TagIds of other checks.")
     ] = None,
     adopt_client_assets: Annotated[
-        bool | None, Field(description="true: move matching unassigned devices to the client.")
+        StrictBool | None, Field(description="true: move matching unassigned devices to the client.")
     ] = None,
 ) -> dict:
     """Create an uptime check and return it.
@@ -399,7 +424,7 @@ async def create_uptime_check(
             "check_type": CHECK_TYPE_IDS[kind],
             "frequency_minutes": _required_whole("frequency_minutes", frequency_minutes, minimum=1),
             "region": _pick("region", region, REGION_IDS),
-            "ip": _ip_address(ip),
+            "ip": _ip_address(ip, kind=kind),
             "url": _http_url(url),
             "port": _whole("port", port, minimum=1, maximum=65535),
             "client_id": _opt_id("client_id", client_id),
@@ -437,24 +462,24 @@ async def update_uptime_check(
     check_type: Annotated[
         Literal["icmp", "http", "tcp"] | None, Field(description="Change the type; send its complete target too.")
     ] = None,
-    ip: Annotated[str | None, Field(description="icmp, tcp: literal IP address, not a host name.")] = None,
+    ip: Annotated[str | None, Field(description="icmp: IP address or host name; tcp: literal IP address only.")] = None,
     url: Annotated[str | None, Field(description="http: http:// or https:// address.")] = None,
-    port: Annotated[int | None, Field(description="tcp: 1-65535.")] = None,
+    port: Annotated[int | None, Strict(), Field(description="tcp: 1-65535.")] = None,
     client_id: Annotated[StrictId | None, Field(description="From list_clients; send location_id too.")] = None,
     location_id: Annotated[
         StrictId | None, Field(description="From list_client_locations; needs client_id.")
     ] = None,
     description: Annotated[str | None, Field(description="Free text.")] = None,
-    frequency_minutes: Annotated[int | None, Field(description="Minutes, 1 or more.")] = None,
-    retries_after_failure: Annotated[int | None, Field(description="0 or more.")] = None,
+    frequency_minutes: Annotated[int | None, Strict(), Field(description="Whole minutes, 1 or more.")] = None,
+    retries_after_failure: Annotated[int | None, Strict(), Field(description="Whole number, 0 or more.")] = None,
     region: Annotated[Literal["seattle", "sydney", "uk", "frankfurt"] | None, Field(description="Where it runs.")] = None,
     isp_connection_link: Annotated[str | None, Field(description="ISP status page URL.")] = None,
     tag_ids: Annotated[
         list[StrictId] | None, Field(description="The COMPLETE new list; copy TagIds of other checks.")
     ] = None,
-    clear_tags: Annotated[bool, Field(description="true: remove every tag (not with tag_ids).")] = False,
+    clear_tags: Annotated[StrictBool, Field(description="true: remove every tag (not with tag_ids).")] = False,
     adopt_client_assets: Annotated[
-        bool | None, Field(description="true: move matching unassigned devices to the client.")
+        StrictBool | None, Field(description="true: move matching unassigned devices to the client.")
     ] = None,
 ) -> dict:
     """Change fields of an uptime check (partial update) and return it; tag_ids replaces the whole list.
@@ -478,7 +503,7 @@ async def update_uptime_check(
         "check_type": _pick("check_type", kind, CHECK_TYPE_IDS),
         "frequency_minutes": _whole("frequency_minutes", frequency_minutes, minimum=1),
         "region": _pick("region", region, REGION_IDS),
-        "ip": _ip_address(ip),
+        "ip": _ip_address(ip, kind=kind),
         "url": _http_url(url),
         "port": _whole("port", port, minimum=1, maximum=65535),
         "client_id": _opt_id("client_id", client_id),
@@ -502,8 +527,10 @@ async def update_uptime_check(
             GET_OP,
             tool="update_uptime_check",
         )
+        stored_kind = _stored_type(record)
+        _ip_address(values["ip"], kind=stored_kind)  # the tcp rule (a literal address) now that the type is known
         target = _complete_target(
-            _stored_type(record), record.get("Target"), ip=values["ip"], url=values["url"], port=values["port"]
+            stored_kind, record.get("Target"), ip=values["ip"], url=values["url"], port=values["port"]
         )
         values.update({"ip": None, "url": None, "port": None, **target})
     body = build_body(
@@ -546,16 +573,20 @@ async def set_uptime_maintenance(
     ] = None,
     duration_minutes: Annotated[
         int | None,
+        Strict(),
         Field(
-            description="Required with enabled=true: minutes the window lasts. 0 means no expiry: it never ends "
-            "until you end it."
+            description="Required with enabled=true: whole minutes the window lasts. 0 means no expiry: it never "
+            "ends until you end it."
         ),
     ] = None,
-    reason: Annotated[str | None, Field(description="Why the check is in maintenance.")] = None,
+    reason: Annotated[
+        str | None,
+        Field(description="Required with enabled=true: why the check is in maintenance (max 500 characters)."),
+    ] = None,
 ) -> dict:
     """Start or end a maintenance window on an uptime check and return it. enabled=false ends it and takes
-    no other field; with enabled=true start and duration_minutes are required (0 means the window never
-    expires) and reason is optional. Pass the current time as start only if the user wants maintenance now.
+    no other field; with enabled=true start, duration_minutes and reason are all required (0 means the
+    window never expires). Pass the current time as start only if the user wants maintenance now.
     Side effects: while a window is active the check's failures stop raising alerts, and one with no
     expiry (duration 0) hides outages until it is ended. A failed re-read returns {Id, warning}: the
     change WAS applied, do not repeat it.
@@ -573,11 +604,12 @@ async def set_uptime_maintenance(
             raise ValueError(
                 f"{', '.join(extra)}: only valid with enabled=true; ending a window takes no other field"
             )
-    elif start is None or duration_minutes is None:
+    elif start is None or duration_minutes is None or reason is None:
         # No defaults. A window nobody gave a length would be an invented one, and a window that never expires hides
         # outages until somebody ends it, so the choice (including 0) is the caller's, and the user's. Gorelo refuses
         # a window without a start (400 "MaintenanceMode.StartDateTime is required when enabling maintenance mode."),
-        # and the tool does not read the clock: the model passes the current time when the user wants it now.
+        # and the tool does not read the clock: the model passes the current time when the user wants it now. The spec
+        # also requires Reason when Enabled is true (UptimeMaintenanceMode.Reason), so it is asked for, not invented.
         missing = []
         if start is None:
             missing.append(
@@ -590,6 +622,11 @@ async def set_uptime_maintenance(
                 "duration_minutes: required when enabled=true; ask the user how long the window should last, in "
                 "minutes. 0 is allowed and means the window never expires (it hides outages until it is ended with "
                 "enabled=false)"
+            )
+        if reason is None:
+            missing.append(
+                "reason: required when enabled=true (Gorelo requires it to begin a window); ask the user why the "
+                "check is going into maintenance, at most 500 characters"
             )
         raise ValueError("; ".join(missing))
     body = build_body(

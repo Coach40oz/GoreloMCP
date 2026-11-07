@@ -17,7 +17,9 @@ change to the tooling cannot silently change what the index says.
 Regenerate and compare (from the repo root):
 
     uv run python scripts/spec_snapshot.py
-    uv run python scripts/spec_diff.py backups/<old>.json spec/spec_index.json --out <report>.md
+    uv run python scripts/spec_diff.py backups/<old>.json backups/swagger-<new>.json --out <report>.md
+
+Compare raw against raw: with the index as the second input a change that is only in a description prints "identical".
 """
 
 import copy
@@ -84,7 +86,7 @@ def _walk_keys(node, path=""):
 # --------------------------------------------------------------------------
 
 
-def test_op_count_is_169(index, ops):
+def test_op_count_is_170(index, ops):
     # 96 operations in contract e15cb5a18ec2 (2026-10-02); the 2026-10-08 spec (contract 56005ff28330) added POST /v1/payments and
     # DELETE /v1/payments/{paymentId}; the 2026-10-12 spec (contract bce2fad59937) added GET /v1/api-keys, DELETE /v1/api-keys/{apiKeyId},
     # POST /v1/assets/custom, PATCH /v1/assets/custom/{customAssetId} and GET /v1/assets/custom/hardware-types; the 2026-10-14 spec
@@ -96,15 +98,17 @@ def test_op_count_is_169(index, ops):
     # the 2026-10-29 spec (contract 6c30770dffc0) added 44 (169 in all): alerts, policies, asset tags and types, client types,
     # locations and domains, contracts, contact tags, invoice updates and lines, payments reads, product charges, structured
     # documents, roles, users, groups, project templates, ticket priorities and sources, comment edits and more
-    assert index["op_count"] == 169
-    assert len(ops) == 169
-    assert index["contract_sha256"].startswith("6c30770dffc0")
+    # the 2026-11-05 spec (contract b0850edb962d) added one (170 in all): GET /v1/tickets/sla/policies
+    assert index["op_count"] == 170
+    assert len(ops) == 170
+    assert index["contract_sha256"].startswith("b0850edb962d")
     # 252 schemas on 2026-10-01, 268 on 2026-10-02, 274 on 2026-10-08, 286 on 2026-10-12; the 2026-10-14 spec added two:
     # CustomPropertyUpdate and CustomPropertyValue; the 2026-10-17 spec added twenty two (310 in all: the document, deletion
     # and related item schemas)
     # the 2026-10-22 spec added 35 and renamed away 12 (333 in all: agent asset, script and uptime schemas)
     # the 2026-10-29 spec added 98 (431 in all: the new operations' bodies and rows)
-    assert len(index["schemas"]) == 431
+    # the 2026-11-05 spec added four (435 in all: SlaPolicyListItemModel, its list envelope, SlaPolicyTargetModel and SlaStatusModel)
+    assert len(index["schemas"]) == 435
 
 
 def test_index_has_no_description_or_summary_keys(index):
@@ -171,10 +175,10 @@ def test_page_size_rule_is_null_exactly_without_page_size(ops):
         assert (op["page_size_rule"] is not None) == has_page_size, key
         if op["page_size_rule"] is not None:
             assert op["page_size_rule"] in ("clamp", "reject", "unknown"), key
-    # 2026-10-29 measurement: no page size 139, reject 26, unknown 4 (the description of PageSize does not say what an out-of-range
+    # 2026-11-05 measurement: no page size 140 (the SLA policy list is unpaged); the others as on 2026-10-29: reject 26, unknown 4 (the description of PageSize does not say what an out-of-range
     # value does: GET /v1/alerts, the two project comment lists and GET /v1/scripts); every paged operation takes PageSize
     rules = [op["page_size_rule"] for op in ops.values()]
-    assert {rule: rules.count(rule) for rule in set(rules)} == {None: 139, "reject": 26, "unknown": 4}
+    assert {rule: rules.count(rule) for rule in set(rules)} == {None: 140, "reject": 26, "unknown": 4}
     assert sorted(key for key, op in ops.items() if op["page_size_rule"] == "unknown") == [
         "GET /v1/alerts", "GET /v1/projects/{projectId}/comments", "GET /v1/projects/{projectId}/tasks/{taskId}/comments",
         "GET /v1/scripts",
@@ -427,14 +431,14 @@ def test_live_spec_rejects_unknown_fields_on_every_object_schema(schemas):
     # added twenty two; 282 until the 2026-10-14 spec, which added CustomPropertyUpdate and CustomPropertyValue; 270 until the
     # 2026-10-12 spec, 264 before the payments schemas of 2026-10-08), plus the free-form DataContext property that 82 response schemas carry (77 until the 2026-10-17 spec). The other four schemas are enums.
     objects = {name: schema for name, schema in schemas.items() if schema["type"] == "object"}
-    assert len(objects) == 427  # 329 until the 2026-10-29 spec (98 schemas added, no enum among them); 306 until the 2026-10-22 spec (35 schemas added, 12 renamed away)
+    assert len(objects) == 431  # 427 until the 2026-11-05 spec (four schemas added, no enum among them); 329 until the 2026-10-29 spec (98 schemas added, no enum among them); 306 until the 2026-10-22 spec (35 schemas added, 12 renamed away)
     assert [name for name, schema in objects.items() if schema.get("additional_properties") is not False] == []
     assert {"CustomPropertyUpdate", "CustomPropertyValue"} <= set(objects)  # both new schemas reject unknown fields too
     data_contexts = [
         (name, field) for name, schema in schemas.items() for field, entry in schema["fields"].items()
         if entry.get("additional_properties") is False
     ]
-    assert len(data_contexts) == 115  # 89 until the 2026-10-29 spec; 82 until the 2026-10-22 spec
+    assert len(data_contexts) == 116  # 115 until the 2026-11-05 spec (the SLA policy list envelope); 89 until the 2026-10-29 spec; 82 until the 2026-10-22 spec
     assert {field for _, field in data_contexts} == {"DataContext"}
 
 
@@ -453,7 +457,7 @@ def test_index_records_every_default_constraint_and_additional_properties_of_the
 
     raw_counts = {key: count([raw], key) for key in ("default", "minLength", "pattern", "additionalProperties")}
     # until 2026-10-29: 44, 23, 3 and 418 (41, 23, 3 and 388 until 2026-10-22)
-    assert raw_counts == {"default": 59, "minLength": 24, "pattern": 7, "additionalProperties": 542}
+    assert raw_counts == {"default": 59, "minLength": 24, "pattern": 7, "additionalProperties": 547}
     schema_nodes = [index["schemas"]]
     param_nodes = [params for op in index["ops"].values() for params in (op["path_params"], op["query_params"])]
     assert count(param_nodes, "default") == raw_counts["default"]

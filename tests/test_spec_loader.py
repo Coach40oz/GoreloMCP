@@ -127,7 +127,7 @@ def test_the_real_index_loads_with_every_operation(spec_index):
     swapped = json.loads(DEFAULT_OVERRIDES_PATH.read_text(encoding="utf-8"))["replace_ops"]
     assert swapped == {}
     assert set(spec_index.ops) == (set(raw["ops"]) - set(swapped)) | set(swapped.values())
-    assert len(spec_index.ops) == len(raw["ops"]) == 169  # 125 until the 2026-10-29 spec (contract 6c30770dffc0)
+    assert len(spec_index.ops) == len(raw["ops"]) == 170  # 169 until the 2026-11-05 spec (contract b0850edb962d), 125 until the 2026-10-29 spec
     # the hashes still describe the published spec, which is what the changelog watcher compares
     assert spec_index.sha256 == raw["sha256"] and spec_index.contract_sha256 == raw["contract_sha256"]
     assert spec_index.openapi == raw["openapi"] and spec_index.source == raw["source"]
@@ -376,6 +376,34 @@ def test_a_list_element_that_is_not_an_object_is_rejected(tiny):
 
 def test_lists_of_scalars_and_free_form_objects_are_not_inspected(tiny):
     validate_body(tiny.op("POST /v1/things"), {"Tags": [1, "two", None], "Free": {"X": [1, {"Y": 2}]}})
+
+
+@pytest.mark.parametrize("op_key", ["POST /v1/contracts", "PATCH /v1/contracts/{contractId}"])
+def test_an_object_that_declares_no_fields_and_no_others_takes_only_an_empty_object(spec_index, op_key):
+    # UnlimitedHoursDetails (type object, no fields, additional_properties false): {} is the only valid value. A key in it
+    # (AutoApprove moved to the service line as AutoApproveTime in contract 6c30770dffc0) would be a Gorelo 400 with no
+    # PropertyName, so it is refused here, like a stray key of PerHourDetails
+    op = spec_index.op(op_key)
+    validate_body(op, {"ServiceLines": [{"UnlimitedHoursDetails": {}}]})
+    validate_body(op, {"ServiceLines": [{"UnlimitedHoursDetails": None}]})
+    with pytest.raises(SpecViolation) as info:
+        validate_body(op, {"ServiceLines": [{"UnlimitedHoursDetails": {"AutoApprove": True}}]})
+    assert info.value.field == "ServiceLines[0].UnlimitedHoursDetails.AutoApprove"
+    with pytest.raises(SpecViolation) as sibling:
+        validate_body(op, {"ServiceLines": [{"PerHourDetails": {"Bogus": 1}}]})
+    assert sibling.value.field == "ServiceLines[0].PerHourDetails.Bogus"
+
+
+def test_a_free_form_object_is_still_not_inspected_but_a_closed_empty_one_is(spec_index):
+    # the rule is the schema's own statement (additional_properties false), not "no fields": the tiny index has a free-form
+    # object ("Free") that takes any key
+    data = tiny_data()
+    data["ops"]["POST /v1/things"]["body"]["fields"]["Closed"] = {"type": "object", "nullable": True, "additional_properties": False}
+    closed = SpecIndex(data).op("POST /v1/things")
+    validate_body(closed, {"Closed": {}, "Free": {"anything": 1}})
+    with pytest.raises(SpecViolation) as info:
+        validate_body(closed, {"Closed": {"Key": 1}})
+    assert info.value.field == "Closed.Key"
 
 
 def test_structural_mistakes_are_caught(tiny):

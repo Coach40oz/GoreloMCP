@@ -7,9 +7,10 @@ a side conversation or an approval sends nothing by itself.
 
 An approver must be an active contact of the ticket's client that carries a contact tag marked as an approver.
 Gorelo enforces it on ticket approvals as well as on task approvals (live, 2026-10-02: 400 "An approver must be
-active, belong to the ticket's client and carry a contact tag marked as approver"). The tags are set in the
-Gorelo UI: the API has no contact tag endpoint, so create_ticket_approval cannot make a contact eligible and
-says so; it does not pre-check the tag, because no read shows it.
+active, belong to the ticket's client and carry a contact tag marked as approver"). Which tag is an approver tag is
+marked in the Gorelo UI and no read shows it (list_contact_tags has no approver flag), so create_ticket_approval does not
+pre-check the tag. A contact gets an existing approver tag through update_contact(tag_ids=[the complete list]) (contract
+6c30770dffc0 added TagIds); the tool texts say so and tell the model to ask the user which tag is the approver tag.
 
 Ops used by this module (each tool declares exactly the ones it calls, re-read GETs included):
 
@@ -397,7 +398,7 @@ async def get_ticket_comment(
 async def create_ticket_comment(
     ctx: Context,
     ticket_id: Annotated[str, Field(description=TICKET_ID_DOC)],
-    body: Annotated[str, Field(description="Comment body as HTML, not empty.")],
+    body: Annotated[str, Field(description="Comment body as HTML, not empty. Write a literal < or > as &lt; / &gt;: text in angle brackets is read as a tag and lost.")],
     conversation_type: Annotated[PostType, Field(description="Thread to post in.")] = "private",
     conversation_id: Annotated[
         str | StrictId | None,
@@ -555,14 +556,14 @@ async def create_ticket_approval(
         list[StrictId],
         Field(
             description="Approver contact ids (list_contacts), each once: Active contacts of the ticket's client "
-            "with an approver tag, set in the Gorelo UI (the API cannot set tags)."
+            "with an approver tag."
         ),
     ],
     attach_public_conversation: Annotated[
         bool, Field(description="True also sends the ticket's public comments with the first comment posted.")
     ] = False,
 ) -> dict:
-    """Create an approval on a ticket and return it with its approvers, all Pending. Each approver must be an active contact of the ticket's client AND carry a contact tag marked as an approver; tags are set in the Gorelo UI (the API cannot set them), and Gorelo rejects any other contact with a 400. Nothing is emailed until you post into it: create_ticket_comment(conversation_type=approval, conversation_id=<Id>) emails the approvers. Check status with get_ticket_approval. If the read-back fails the result is {Id, warning}: it WAS created, do not create it again (check list_ticket_conversations)."""
+    """Create an approval on a ticket and return it with its approvers, all Pending. Each approver must be an active contact of the ticket's client AND carry a contact tag marked as an approver (the mark is set in the Gorelo UI, so ask the user which tag; update_contact(tag_ids=<complete list + it>) adds it). Gorelo rejects any other contact with a 400. Nothing is emailed until you post into it: create_ticket_comment(conversation_type=approval, conversation_id=<Id>) emails the approvers. Check status with get_ticket_approval. If the read-back fails the result is {Id, warning}: it WAS created, do not create it again (check list_ticket_conversations)."""
     ticket = guid("ticket_id", ticket_id)
     values = {
         "name": _required_text("name", name),

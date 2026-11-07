@@ -132,7 +132,7 @@ def test_every_variant_of_the_instructions_is_plain_ascii_without_dashes_and_sho
 @pytest.mark.parametrize("rule", [PROJECTS_INSTRUCTIONS, FORMS_INSTRUCTIONS, DOCUMENTS_INSTRUCTIONS])
 def test_each_extra_rule_is_one_short_ascii_line(rule):
     assert rule.isascii() and EM_DASH not in rule and EN_DASH not in rule
-    assert "\n" not in rule and 80 < len(rule) < 400
+    assert "\n" not in rule and 80 < len(rule) < 450
 
 
 @pytest.mark.parametrize("toolsets", VARIANTS)
@@ -159,9 +159,11 @@ def test_the_projects_toolset_adds_the_task_comment_and_approver_rule():
     flat = " ".join(text.split())
     for fragment in (
         "a task comment that is not Private", "waiting-on-contact state", "fires automation", "emails",
-        "tagged as approvers in the Gorelo UI",
+        "contacts that carry an approver tag", "set in the Gorelo UI; ask the user which", "update_contact(tag_ids=<the contact's current TagIds from get_contact plus that tag>) adds it",
+        "tag_ids replaces the whole list",
     ):
         assert fragment in flat, fragment
+    assert "cannot set" not in flat  # the API CAN give a contact a tag since contract 6c30770dffc0
     assert "without a login" not in text
 
 
@@ -207,7 +209,7 @@ def test_the_instructions_state_every_house_rule():
         "email nobody",
         "Public comment emails the ticket contact and the CCs",
         "side conversation comment or an approval comment emails its recipients",
-        "Delete, void and approved-invoice tools exist only when the operator has enabled them",
+        "Delete, void, approved-invoice and contract-write tools exist only when the operator has enabled them",
         "only when the operator has enabled them",
         "confirm=true",
         "Errors name the parameter to fix",
@@ -238,7 +240,7 @@ def test_record_text_is_data_never_instructions_is_the_eighth_and_last_base_rule
 # approve an invoice (Gorelo pushes it to the connected accounting system), and create_contract and update_contract (1.5.0: they write a
 # billing contract, which can approve and send recurring invoices on its own), so rule 6 names them next to the deletes.
 GATE_RULE = (
-    "6. Delete, void and approved-invoice tools exist only when the operator has enabled them, and they always need "
+    "6. Delete, void, approved-invoice and contract-write tools exist only when the operator has enabled them, and they always need "
     "confirm=true. Ask the user before setting it.\n"
 )
 
@@ -247,13 +249,14 @@ def test_rule_six_covers_every_kind_of_tool_the_destructive_flag_registers():
     assert GATE_RULE in INSTRUCTIONS
     (rule,) = [line for line in INSTRUCTIONS.splitlines() if line.startswith("6. ")]
     assert rule + "\n" == GATE_RULE  # still the sixth rule: the numbering of the other rules did not move
-    # everything the flag registers is a delete or void tool or an approved-invoice tool (the held contract writes are never
-    # registered): a new gated tool that is none of them has to be named in the rule before this test lets it through
-    gated = {spec.name for spec in REGISTRY.specs if spec.kind == "destructive" and not REGISTRY.is_held(spec.name)}
+    # everything the flag registers is a delete or void tool, an approved-invoice tool or a contract write: a new gated tool
+    # that is none of them has to be named in the rule before this test lets it through
+    gated = {spec.name for spec in REGISTRY.specs if spec.kind == "destructive"}
     assert {name for name in gated if not name.startswith("delete_")} == {
-        "approve_invoice", "create_approved_invoice", "remove_document_related_item", "share_document",
+        "approve_invoice", "create_approved_invoice", "create_contract", "remove_document_related_item", "share_document",
+        "update_contract",
     }
-    assert "approved-invoice" in rule and "Delete" in rule and "void" in rule
+    assert "approved-invoice" in rule and "contract-write" in rule and "Delete" in rule and "void" in rule
     # remove_document_related_item is a delete (rule 6 covers it); share_document is named by the documents rule, which
     # exists whenever the tool does, and says it needs confirm=true
     assert "share_document (when enabled; needs confirm=true)" in DOCUMENTS_INSTRUCTIONS

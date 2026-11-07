@@ -13,9 +13,10 @@ These checks look at ALL tools at once (every toolset on, delete tools enabled):
 * every paged list refuses a blank cursor, every clear_fields lists its names in the schema, a tool outside the
   projects toolset says so when it points at a project tool, the attachments of every tool that takes them are the
   name and url upload_attachment returned, and no tool text carries a number that belongs to one tenant;
-* the three tools that approve or void an invoice say that a void happens in Gorelo ONLY and that the copy already pushed
-  to the accounting system stays open (observed with Xero), before the instruction to ask the user, and no
-  other tool text talks about voiding.
+* the three tools that approve or void an invoice say that Gorelo's spec has a void sent on to the accounting system, that
+  the evidence is mixed (a void reached Xero on 2026-10-31, one was still open there on 2026-10-04), and to tell the user to
+  check the accounting system, before the instruction to ask the user; approve_invoice and create_approved_invoice also say
+  that Gorelo may email an Approved invoice; and no other tool text talks about voiding.
 
 A new tool that trips one of these rules fails here until its text says what the rule asks for.
 """
@@ -36,9 +37,8 @@ def flat(text):
 
 
 async def all_tools(server_factory):
-    """{name: the tool as a client lists it}, every toolset on and delete tools enabled. The held tools (create_contract and
-    update_contract are not registered on a real server) are included through a view of the registry, so their texts are checked too."""
-    server = server_factory(registry=REGISTRY.with_held(), toolsets=frozenset(TOOLSETS), destructive=True)
+    """{name: the tool as a client lists it}, every toolset on and delete tools enabled."""
+    server = server_factory(toolsets=frozenset(TOOLSETS), destructive=True)
     return {tool.name: tool for tool in await list_tools(server)}
 
 
@@ -73,6 +73,7 @@ async def test_the_checked_listing_holds_every_registered_tool(server_factory):
         "delete_asset_type",
         "delete_client_domain",
         "delete_client_location",
+        "delete_contact",
         "delete_invoice",
         "delete_item",
         "delete_product_charge",
@@ -155,9 +156,14 @@ EMAIL_WHO = {
     # create_invoice (a Draft) and get/list tools never talk about email: a draft has no recipients parameter at all,
     # and it says it is "not pushed to accounting or sent to anyone"
     "create_approved_invoice": (
-        "recipient_emails, when given, are the addresses Gorelo sends the invoice to",
-        "it does not say whether creating the invoice already sends it",
-        "tell the user who",
+        "Gorelo may email an Approved invoice to the client's contacts on its own (not verified for a manual approval)",
+        "sends to recipient_emails when given",
+        "tell the user who may get it before confirming",
+    ),
+    # approving an existing Draft can make Gorelo email the invoice on its own too (not verified for a manual approval)
+    "approve_invoice": (
+        "Gorelo may also email an Approved invoice to the client's contacts on its own (not verified for a manual approval)",
+        "tell the user before confirming",
     ),
     # auto_approve_and_send=true makes Gorelo approve and send the recurring invoices, and the invoices of
     # contracts were seen EMAILED to the client about 2 minutes after creation (IsEmailSent, live 2026-10-04)
@@ -302,6 +308,7 @@ async def test_no_tool_text_names_a_destructive_tool_without_saying_deletes_must
     assert {(name, target) for name, _, target in mentions} == {
         ("create_client_domain", "delete_client_domain"),
         ("create_client_location", "delete_client_location"),
+        ("create_contact", "delete_contact"),  # 1.5.2: a mistaken contact is removed with delete_contact, when deletes are enabled
         ("create_invoice", "create_approved_invoice"),
         ("create_invoice", "delete_invoice"),
         ("create_item", "delete_item"),
@@ -313,6 +320,29 @@ async def test_no_tool_text_names_a_destructive_tool_without_saying_deletes_must
         ("update_product_charge", "delete_product_charge"),
         ("update_time_entry", "delete_time_entry"),
     }
+
+
+# A gated tool may name ANOTHER gated tool. The variable GORELO_ENABLE_DESTRUCTIVE takes a list of names, so the named tool may be absent
+# (create_contract enabled alone has no update_contract): the name has to carry its own condition, in one of these forms, within 40
+# characters after it.
+CONDITIONAL_AFTER_NAME = re.compile(r"^[^.]{0,40}\b(?:if|when) (?:deletes are )?enabled")
+
+
+async def test_a_gated_tool_that_names_another_gated_tool_says_it_exists_only_when_enabled(server_factory):
+    tools = await all_tools(server_factory)
+    destructive = sorted(name for name in tools if kind_of(name) == "destructive")
+    pairs = set()
+    for name in destructive:
+        for where, text in texts_of(tools[name]).items():
+            for target in destructive:
+                if target == name:
+                    continue
+                for match in re.finditer(rf"\b{target}\b", text):
+                    pairs.add((name, target))
+                    tail = text[match.end() : match.end() + 60]
+                    assert CONDITIONAL_AFTER_NAME.match(tail), f"{name} ({where}) names {target} without a condition: {text[match.start():match.end() + 60]!r}"
+    # the pairs that exist today, so a removed or renamed mention is noticed
+    assert pairs == {("create_contract", "update_contract"), ("approve_invoice", "delete_invoice")}
 
 
 async def test_a_tool_text_that_names_a_delete_tool_never_offers_it_unconditionally(server_factory):
@@ -353,7 +383,7 @@ async def test_create_invoice_points_at_the_gated_approval_tool_with_the_gate_ph
 
 
 # --------------------------------------------------------------------------
-# A void happens in Gorelo only: the accounting system keeps its copy open (observed with Xero)
+# A void is meant to reach the accounting system, but one copy stayed open: the user is told to check it
 # --------------------------------------------------------------------------
 
 # Every spelling of voiding in a tool text. The status name ("4 Void" in the status filter of list_invoices) is a label,
@@ -362,20 +392,25 @@ VOID_WORD = re.compile(r"\bvoid(?:s|ed|ing)?\b", re.IGNORECASE)
 TOOLS_THAT_APPROVE_OR_VOID = ("approve_invoice", "create_approved_invoice", "delete_invoice")
 
 
-async def test_the_tools_that_approve_or_void_an_invoice_say_the_accounting_copy_stays_open(server_factory):
-    """Gorelo pushes an Approved invoice to Xero, and the
-    DELETE that voids it (StatusId 4, get_invoice shows Void) leaves the Xero copy open. A model
-    that approves or voids an invoice has to tell the user to void the copy there, so both tools say so in the text it
-    reads before it acts (said before the instruction to ask the user), and no tool text claims that voiding takes the
-    approval back."""
+async def test_the_tools_that_approve_or_void_an_invoice_tell_the_user_to_check_the_accounting_system(server_factory):
+    """Gorelo pushes an Approved invoice to Xero. The published DELETE text (since 2026-10-22) says the void is sent there
+    too and a void of 2026-10-31 reached Xero, but on 2026-10-04 the Xero copy was still open a few minutes after one. So a
+    model that approves or voids an invoice does not promise either: it tells the user to check the accounting system.
+    That is said in the text it reads before it acts (before the instruction to ask the user), and no tool text claims that
+    voiding takes the approval back."""
     tools = await all_tools(server_factory)
     for name in TOOLS_THAT_APPROVE_OR_VOID:
         text = flat(tools[name].description)
-        assert "Gorelo ONLY" in text, f"{name} does not say that a void happens in Gorelo only: {text}"
-        assert "accounting system stays open" in text, f"{name} does not say the accounting copy stays open: {text}"
-        assert "who must void it there too" in text, f"{name} does not say the user must void it there too: {text}"
-        assert "observed with Xero" in text, f"{name} does not say that this was seen live: {text}"
-        assert text.index("Gorelo ONLY") < text.index("Ask the user first"), f"{name} says it only after asking: {text}"
+        assert "Gorelo's spec says a void is sent to the accounting system too" in text, f"{name}: {text}"
+        assert "one reached Xero on 2026-10-31, another was still open there" in text, f"{name}: {text}"
+        assert "tell the user to check the accounting system" in text, f"{name}: {text}"
+        assert "stays open" not in text and "Gorelo ONLY" not in text, f"{name} still states the old claim: {text}"
+        assert text.index("tell the user to check the accounting system") < text.index("Ask the user first"), f"{name}: {text}"
+    for name in ("approve_invoice", "create_approved_invoice"):
+        text = flat(tools[name].description)
+        assert "email an Approved invoice to the client's contacts on its own" in text, name
+        assert "not verified for a manual approval" in text, name
+        assert "tell the user who may get it before confirming" in text or "tell the user before confirming" in text, name
     for name, tool in tools.items():
         for where, text in texts_of(tool).items():
             assert "except by voiding" not in text, f"{name} ({where}) says that voiding takes the approval back: {text}"

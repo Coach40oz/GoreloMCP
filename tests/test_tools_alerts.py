@@ -366,11 +366,22 @@ async def test_post_alert_that_times_out_says_the_alert_may_be_posted_and_is_nev
 
 
 async def test_post_alert_after_a_connection_failure_says_the_alert_may_be_posted(server, mock_gorelo):
-    mock_gorelo.on("POST", ALERTS, httpx.ConnectError("refused"))
+    mock_gorelo.on("POST", ALERTS, httpx.ReadError("reset"))  # made, then lost
     text = await call_tool_error(server, "post_alert", GIVEN)
     assert text.startswith("Gorelo did not confirm post_alert (the connection failed). ")
     assert_alert_advice(text)
     assert len(mock_gorelo.requests) == 1
+
+
+async def test_post_alert_when_the_connection_was_never_made_says_nothing_was_sent(server, mock_gorelo):
+    # httpx.ConnectError: nothing reached Gorelo, so "the alert may already be posted" would be wrong
+    mock_gorelo.on("POST", ALERTS, httpx.ConnectError("refused"))
+    text = await call_tool_error(server, "post_alert", GIVEN)
+    assert text == (
+        "Gorelo could not be reached for post_alert (the connection was never established). "
+        "Nothing was sent, so repeating it is safe."
+    )
+    assert "may already be posted" not in text and len(mock_gorelo.requests) == 1
 
 
 async def test_post_alert_after_a_5xx_envelope_gives_the_gorelo_message_the_alert_advice_and_the_trace_id(server, mock_gorelo):

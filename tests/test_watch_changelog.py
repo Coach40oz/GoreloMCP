@@ -23,7 +23,9 @@ import configparser
 import copy
 import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -1053,6 +1055,62 @@ def test_write_atomic_refuses_a_target_outside_the_state_directory(app, tmp_path
     watch.write_atomic(app, app.state_dir / "sub" / "ok.txt", b"fine")
     assert (app.state_dir / "sub" / "ok.txt").read_bytes() == b"fine"
     assert not list(app.state_dir.rglob("*.tmp"))
+
+
+def test_write_atomic_never_writes_through_a_planted_tmp_symlink(app, tmp_path):
+    """The old code wrote to a fixed "<name>.tmp" next to the target; a symlink of that name sent the bytes outside .state/."""
+    app.state_dir.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me")
+    target = app.state_dir / "changelog-seen.json"
+    (app.state_dir / "changelog-seen.json.tmp").symlink_to(victim)
+    watch.write_json(app, target, {"seen": ["x"]})
+    assert victim.read_text() == "keep me"
+    assert json.loads(target.read_text()) == {"seen": ["x"]}
+    assert not target.is_symlink()
+
+
+def test_write_atomic_uses_a_unique_exclusive_temp_file_and_leaves_none_behind(app, monkeypatch):
+    app.state_dir.mkdir()
+    made = []
+    real = watch.tempfile.mkstemp
+
+    def spy(*args, **kwargs):
+        fd, name = real(*args, **kwargs)
+        made.append(name)
+        return fd, name
+
+    monkeypatch.setattr(watch.tempfile, "mkstemp", spy)
+    target = app.state_dir / "a.json"
+    watch.write_atomic(app, target, b"1")
+    watch.write_atomic(app, target, b"2")
+    assert len(made) == 2 and made[0] != made[1] and all(Path(n).parent == app.state_dir for n in made)
+    assert target.read_bytes() == b"2" and not list(app.state_dir.glob("*.tmp")) and not list(app.state_dir.glob(".*.tmp"))
+    umask = os.umask(0)
+    os.umask(umask)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o666 & ~umask  # the mode a plain write gives, not mkstemp's 0600
+
+
+def test_write_atomic_cleans_its_temp_file_when_the_rename_fails(app, monkeypatch):
+    app.state_dir.mkdir()
+
+    def boom(src, dst):
+        raise OSError("no")
+
+    monkeypatch.setattr(watch.os, "replace", boom)
+    with pytest.raises(OSError):
+        watch.write_atomic(app, app.state_dir / "a.json", b"1")
+    assert list(app.state_dir.iterdir()) == []
+
+
+def test_write_atomic_refuses_a_target_that_is_a_symlink(app, tmp_path):
+    app.state_dir.mkdir()
+    inside = app.state_dir / "real.json"
+    inside.write_text("{}")
+    (app.state_dir / "link.json").symlink_to(inside)
+    with pytest.raises(watch.WatchError, match="symbolic link"):
+        watch.write_atomic(app, app.state_dir / "link.json", b"x")
+    assert inside.read_text() == "{}"
 
 
 # --------------------------------------------------------------------------

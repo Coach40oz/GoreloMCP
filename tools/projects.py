@@ -1008,7 +1008,7 @@ async def get_project_comment(
 async def create_project_comment(
     ctx: Context,
     project_id: Annotated[str, Field(description="Project id (list_projects).")],
-    body: Annotated[str, Field(description="Comment body as HTML.")],
+    body: Annotated[str, Field(description="Comment body as HTML. Write a literal < or > as &lt; / &gt;: text in angle brackets is read as a tag and lost.")],
     task_id: Annotated[
         str | None, Field(description="Task id (list_project_tasks): comment on that task instead.")
     ] = None,
@@ -1326,7 +1326,9 @@ async def update_project_comment(
     project_id: Annotated[str, Field(description="Project id (list_projects).")],
     comment_id: Annotated[str, Field(description="Id of a PRIVATE project comment (list_project_comments).")],
     body: Annotated[
-        str | None, Field(description="New comment body as HTML, not blank. It replaces the text; it cannot be cleared.")
+        str | None, Field(
+            description="New comment body as HTML, not blank. It replaces the text; it cannot be cleared. Write a literal < or > as &lt; / &gt;: text in angle brackets is read as a tag and lost."
+        )
     ] = None,
     attachments: Annotated[
         list[CommentAttachment] | None,

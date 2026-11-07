@@ -7,7 +7,8 @@ checked against the tools after the other variables are valid).
 
 Variables:
     GORELO_API_KEY            required. The Gorelo API key (sent as X-API-Key).
-    PUBLIC_BASE_URL           required when require_http is true (the OAuth issuer URL).
+    PUBLIC_BASE_URL           required when require_http is true (the OAuth issuer URL): the https address of this server
+                              WITHOUT the /mcp the connector adds (see parse_public_base_url).
     MCP_AUTH_PASSWORD         required when require_http is true (the consent page password).
     GORELO_TOOLSETS           optional. Comma list of toolsets, case-insensitive, or "all".
                               Unset or blank means DEFAULT_TOOLSETS.
@@ -16,7 +17,9 @@ Variables:
                               record), create_approved_invoice (it creates an Approved invoice, which Gorelo pushes to
                               the connected accounting system at once and may email to its recipients),
                               approve_invoice (it approves an existing invoice, which Gorelo pushes to the connected
-                              accounting system at once) and
+                              accounting system at once), create_contract and update_contract (they write a billing
+                              contract, and a contract can make Gorelo approve and send recurring invoices on its own,
+                              which pushes them to the accounting system) and
                               share_document (it turns a document's public link on, so anyone who has the link can
                               read it without a login, or publishes it to the client portal). Every call still needs
                               confirm=true.
@@ -29,9 +32,9 @@ Variables:
                               a name that is not a gated tool, or a gated tool of a toolset that GORELO_TOOLSETS does not
                               enable, stops the start with one error that names this variable, the bad names and the valid
                               ones. A word next to a tool name is an error (a word with stray commas, such as 1, is the
-                              word). Anything else is an error. create_contract and update_contract are held back
-                              (tools._common.HELD_TOOLS): no setting registers them, and server.resolve_gated_tools
-                              drops them from a list without an error (main.py logs one warning line).
+                              word). Anything else is an error. A tool named in tools._common.HELD_TOOLS (empty
+                              since 1.5.3) is registered by no setting, and server.resolve_gated_tools drops it from a
+                              list without an error (main.py logs one warning line).
     GORELO_BASE_URL           optional. The Gorelo API address: the host of the region your Gorelo account is
                               hosted in: US https://api.usw.gorelo.io (the default when unset or blank) or Australia
                               https://api.aue.gorelo.io. "/v1" and a trailing slash are optional; the value is
@@ -128,6 +131,11 @@ class Settings:
         public_base_url = _text(env.get(ENV_PUBLIC_BASE_URL))
         if require_http and not public_base_url:
             missing.append(ENV_PUBLIC_BASE_URL)
+        elif require_http:  # the live harness never serves HTTP and does not need a usable address
+            try:
+                parse_public_base_url(public_base_url)
+            except SettingsError as exc:
+                problems.append(str(exc))
 
         # The password is kept exactly as written (surrounding spaces are part of a password).
         raw_password = env.get(ENV_AUTH_PASSWORD)
@@ -299,6 +307,49 @@ def parse_base_url(raw: str | None) -> str:
     if parts.path not in ("", "/", "/v1", "/v1/"):
         raise _base_url_error("must not contain a path other than /v1")
     return f"https://{host}/v1"
+
+
+def _public_base_url_error(why: str) -> SettingsError:
+    return SettingsError(f"{ENV_PUBLIC_BASE_URL} {why}")
+
+
+def parse_public_base_url(raw: str | None) -> str | None:
+    """PUBLIC_BASE_URL as the OAuth provider uses it (the issuer address), or None when it is empty.
+
+    It must be one https address with a host, no user name or password, query or fragment, and no path other than "" or "/".
+    In particular it must NOT end in /mcp: the connector address is this address plus /mcp, and the OAuth endpoints
+    (/authorize, /token, /register) sit directly under this address, so a value with /mcp starts a server that cannot sign
+    anybody in. A value with http:// would make the OAuth library fail with a traceback. Raises SettingsError naming
+    PUBLIC_BASE_URL and the reason; the message never repeats the value (it may hold a password).
+    """
+    text = _text(raw)
+    if not text:
+        return None
+    if not _CLEAN_URL.fullmatch(text):
+        raise _public_base_url_error("must be one address without spaces, control characters, backslashes or non-ASCII characters")
+    try:
+        parts = urlsplit(text)
+        parts.port  # noqa: B018  (raises ValueError for a bad port)
+    except ValueError:
+        raise _public_base_url_error("is not a valid address") from None
+    if parts.scheme.lower() != "https":
+        raise _public_base_url_error("must start with https:// (the sign-in of claude.ai needs a secure address)")
+    if "@" in parts.netloc:
+        raise _public_base_url_error("must not contain a user name or password")
+    if not parts.hostname:
+        raise _public_base_url_error("must name a host")
+    if "?" in text:
+        raise _public_base_url_error("must not contain a query string")
+    if "#" in text:
+        raise _public_base_url_error("must not contain a fragment")
+    path = parts.path.rstrip("/")
+    if path.lower().endswith("/mcp") or path.lower() == "mcp":
+        raise _public_base_url_error(
+            "must not end in /mcp: give the address of the server without it (the connector adds /mcp itself)"
+        )
+    if path:
+        raise _public_base_url_error("must not contain a path (give only the address of the server, for example https://mcp.example.com)")
+    return text
 
 
 def _redirect_domain_problem(entry: str) -> str | None:

@@ -47,13 +47,18 @@ Contract (the observed API behavior behind every rule is in docs/API-OBSERVED-BE
   other 5xx, a 3xx (a redirect is never followed), an unreadable 2xx, and every failure but a 429 of a POST,
   PATCH, DELETE or multipart upload or of a SIDE_EFFECT_GETS call (a 502, 503 or 504 and a connection that was
   never established included). For a write they are reported as `write_unconfirmed` so nobody repeats a write
-  that may have applied.
+  that may have applied. The one exception is a connection that was never established (httpx.ConnectError): it is
+  still not sent again, but nothing reached Gorelo, so it is a kind "transport" error with `write_unconfirmed`
+  False whose text says nothing was sent and that repeating it is safe.
 * SIDE_EFFECT_GETS are GETs that still change state (the invoice PDF download is recorded as an
   export event). They are treated like writes for every failure above: write_unconfirmed is True and
   the message says the export may already be recorded and a retry records another export event. Like
   FORBIDDEN_OPS they are compared by SHAPE (is_side_effect_get: every {placeholder} counts the same, whatever
   Gorelo calls it), so a placeholder rename cannot turn the PDF export back into a harmless read.
-* At most `max_concurrency` requests are in flight at once (default 4), after they have their token.
+* At most `max_concurrency` requests are in flight at once (default 4), after they have their token. A token can be
+  held for a long time by a request that waits for a slot, so the bucket also keeps a ledger of the moments requests are
+  really SENT (`_TokenBucket.pace_send`, called with the slot held): no more than `burst` go out at once, however
+  many tokens were granted while the slots were taken.
 * Logging (logger "gorelo_client"): one INFO line per request with the tool, operation, the path with its
   record ids, status, latency, attempts (every retry counts), query parameter NAMES and body field NAMES (only
   names of fields the spec defines, as returned by spec.validate_body). One WARNING line per 429 retry and per
@@ -99,7 +104,8 @@ GORELO_BASE_URL = "https://api.usw.gorelo.io/v1"
 PAGE_SIZE_MIN, PAGE_SIZE_MAX = 1, 200
 
 # Never callable, by any tool, whatever its kind. Deleting an agent asset UNINSTALLS the RMM agent
-# from the host; the other deletes destroy records the operator wants to remove by hand in the app;
+# from the host; the other deletes destroy records the operator wants to remove by hand in the app (the delete of a
+# contact is not one of them since 1.5.2: delete_contact, a gated tool that always needs confirm=true, may call it);
 # POST /v1/api-keys would let a tool mint API credentials (a key with any scope, returned once);
 # DELETE /v1/api-keys/{apiKeyId} revokes a key at once and for good, and a key may revoke itself, so a
 # tool could revoke the server's own key and lock the server out.
@@ -108,7 +114,6 @@ PAGE_SIZE_MIN, PAGE_SIZE_MAX = 1, 200
 FORBIDDEN_OPS = frozenset(
     {
         "DELETE /v1/clients/{clientId}",
-        "DELETE /v1/contacts/{contactId}",
         "DELETE /v1/tickets/{ticketId}",
         "DELETE /v1/assets/agents/{agentAssetId}",
         "DELETE /v1/assets/custom/{customAssetId}",
@@ -220,8 +225,10 @@ class GoreloAPIError(Exception):
             "forbidden" (operation blocked by design) or "spec" (unknown operation or helper misuse).
         notifications: Gorelo's Notifications as [{"code", "message", "property"}].
         trace_id: DataContext.TraceId, quote it when reporting a problem to Gorelo.
-        write_unconfirmed: True when a write may or may not have been applied (timeout, connection
-            error, 5xx, a redirect answer that is never followed, or an unreadable 2xx on a non-GET).
+        write_unconfirmed: True when a write may or may not have been applied (timeout, a connection
+            that broke after it was made, 5xx, a redirect answer that is never followed, or an unreadable 2xx
+            on a non-GET). A connection that was never established (httpx.ConnectError) is False: nothing
+            was sent, so repeating the call is safe.
             Verify with a read before retrying. It is also True for the same failures of a
             SIDE_EFFECT_GETS call (the PDF download): the export may already be recorded and a retry
             records another export event.
@@ -344,14 +351,25 @@ def _ci_get(mapping: Any, name: str) -> Any:
 
 
 def _notification(raw: Any) -> dict[str, Any]:
-    """Normalize one notification to {"code", "message", "property"} (accepts either casing)."""
+    """Normalize one notification to {"code", "message", "property"} (accepts either casing).
+
+    The property is text or None: a number or a boolean becomes its text, anything else that is not text (a list, an
+    object) is dropped, because the error formatters read it as a string. A message that is not text becomes its text.
+    """
     if isinstance(raw, Mapping):
         prop = _ci_get(raw, "PropertyName")
         if prop is None:
             prop = _ci_get(raw, "property")
+        if isinstance(prop, (bool, int, float)):
+            prop = str(prop)
+        elif not isinstance(prop, str):
+            prop = None
+        message = _ci_get(raw, "Message")
+        if message is not None and not isinstance(message, str):
+            message = str(message)
         return {
             "code": _ci_get(raw, "Code"),
-            "message": _ci_get(raw, "Message"),
+            "message": message,
             "property": prop,
         }
     return {"code": None, "message": str(raw), "property": None}
@@ -497,9 +515,16 @@ def _clamp_page_size(value: Any) -> int:
 # --------------------------------------------------------------------------
 
 
+# A request is sent at most this long before its turn in the send ledger of _TokenBucket.pace_send. The token ledger is
+# charged a moment before the send (a few microseconds on an idle client), so without a little slack every request would
+# wait for the difference. The slack does not accumulate: the ledger is always charged one full interval per send.
+_SEND_SLACK_SECONDS = 0.05
+
+
 class _NeverConnected(Exception):
     """Internal signal from GoreloClient._send_once to request(): the connection to Gorelo was never established
-    (httpx.ConnectError), so nothing reached Gorelo and a read may be sent once more.
+    (httpx.ConnectError), so nothing reached Gorelo and a read may be sent once more. A call that is not repeated
+    (a write, an upload, the invoice export) raises the error as a transport error that is not write_unconfirmed.
 
     It carries the error that request() raises when it does not retry, so the caller sees exactly what it always saw.
     """
@@ -524,6 +549,14 @@ class _TokenBucket:
     bucket will be full again (each token taken moves it one interval later) and `_blocked_until` is the moment before
     which no token goes out (only back_off moves it).
 
+    A token is taken BEFORE the in-flight slot, so a request can hold a token for a long time while it waits for a slot
+    (Gorelo degraded, every slot taken by a slow request). Left alone, those tokens would pile up and the whole queue
+    would leave in one clump the moment the slots free, past the burst. So the bucket keeps a second ledger, of the
+    moments requests are really SENT: pace_send() is called by a request that holds its slot, right before the send,
+    and applies the same rule (at most `burst` at once, then one per interval) to the real sends, in arrival order.
+    A request that did not have to wait for a slot finds the send ledger in the same state as the token ledger and
+    passes at once; only the clump is spread out.
+
     The bucket keeps its own time: the injected clock, but never behind the latest moment that one of its own waits has
     reached. After a sleep until a token is due it does not read the clock again to confirm that the time has passed,
     it knows it. A sleep that returns at once (a test double) therefore cannot make a waiter spin, and a frozen clock
@@ -545,8 +578,10 @@ class _TokenBucket:
         self._clock = clock
         self._sleep = sleep
         self._lock = asyncio.Lock()
+        self._send_lock = asyncio.Lock()
         self._floor = float(start)
-        self._full_at = self._floor
+        self._full_at = self._floor  # the token ledger: moments tokens were granted
+        self._sent_full_at = self._floor  # the send ledger: moments requests were really sent
         self._blocked_until = self._floor
 
     def _now(self) -> float:
@@ -573,7 +608,30 @@ class _TokenBucket:
         """A 429: empty the bucket and let no token out for `seconds` from now (a longer back-off stays in force)."""
         now = self._now()
         self._full_at = now + self._burst * self._interval
+        self._sent_full_at = now + self._burst * self._interval
         self._blocked_until = max(self._blocked_until, now + max(0.0, seconds))
+
+    async def pace_send(self) -> None:
+        """Wait until this request may really leave, then record the send. Takes no token of the first ledger.
+
+        The client calls it once it holds an in-flight slot, right before the send. It waits out a running back-off (like
+        wait_unblocked) and keeps the real sends within the burst and the rate: a request that sat in the queue for a slot
+        while tokens were granted leaves no earlier than the send ledger allows, so no more than `burst` requests go out
+        at once however long the slots were taken. The slack of _SEND_SLACK_SECONDS applies to the send ledger only: a
+        request never leaves before the end of a back-off, not even by the slack. Waiters are served in arrival order and
+        a cancelled waiter records nothing.
+        """
+        async with self._send_lock:
+            while True:
+                now = self._now()
+                ledger_due = self._sent_full_at - (self._burst - 1) * self._interval
+                if now >= self._blocked_until and ledger_due - now <= _SEND_SLACK_SECONDS:
+                    self._sent_full_at = max(now, self._sent_full_at) + self._interval
+                    return
+                due = max(ledger_due, self._blocked_until)
+                await self._sleep(max(due - now, 0.0))
+                if due > self._floor:
+                    self._floor = due
 
     async def wait_unblocked(self) -> None:
         """Wait, through the injected sleep, until no back-off of a 429 is running. Takes no token, queues behind nobody.
@@ -1303,8 +1361,9 @@ class GoreloClient:
             raise RuntimeError(_NOT_STARTED)
         headers = {"Accept": ", ".join([*sorted(expected), "application/json"])} if binary else None
         async with self._semaphore:
-            # A token was taken before this slot: if a 429 came in the meantime, the back-off still holds this request.
-            await self._bucket.wait_unblocked()
+            # A token was taken before this slot: if a 429 came in the meantime, the back-off still holds this request,
+            # and a request that waited for the slot leaves no faster than the burst and the rate allow.
+            await self._bucket.pace_send()
             try:
                 request = self._http.build_request(
                     op.method,
@@ -1318,9 +1377,10 @@ class GoreloClient:
             except httpx.TimeoutException as exc:
                 raise self._transport_failure(op, "timeout", exc) from None
             except httpx.ConnectError as exc:
-                # The connection was never established, so nothing reached Gorelo: request() may send a read once more.
+                # The connection was never established, so nothing reached Gorelo: request() may send a read once more,
+                # and a call that is not repeated (a write, an upload, the invoice export) says that nothing was sent.
                 # (A connect TIMEOUT is a TimeoutException, caught above, and is never retried.)
-                raise _NeverConnected(self._transport_failure(op, "transport", exc)) from None
+                raise _NeverConnected(self._connect_failure(op, exc)) from None
             except httpx.RequestError as exc:
                 raise self._transport_failure(op, "transport", exc) from None
             try:
@@ -1424,6 +1484,20 @@ class GoreloClient:
             f"{op.key}: {reason} ({detail}) and Gorelo did not confirm the write; it may or may not "
             "have been applied. Verify with a read before retrying",
             op_key=op.key, kind=kind, write_unconfirmed=True,
+        )
+
+    def _connect_failure(self, op: OpSpec, exc: Exception) -> GoreloAPIError:
+        """The error for a connection that was never established (httpx.ConnectError).
+
+        A plain read keeps the wording of every other read failure. Any other call (a write, an upload, the invoice PDF
+        export) is not repeated by this client, but nothing was sent, so it is NOT write_unconfirmed: repeating it is safe.
+        """
+        if op.method == "GET" and not is_side_effect_get(op.key):
+            return self._transport_failure(op, "transport", exc)
+        return GoreloAPIError(
+            f"{op.key}: the connection to Gorelo could not be established ({type(exc).__name__}); nothing was sent, "
+            "so repeating it is safe",
+            op_key=op.key, kind="transport", write_unconfirmed=False,
         )
 
     def _rate_limit_error(self, op: OpSpec, raw: _Raw, attempts: int, waited: float) -> GoreloAPIError:

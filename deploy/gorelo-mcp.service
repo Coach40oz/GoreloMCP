@@ -26,8 +26,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# The only places the service may write. Both directories must exist before the start (status 226/NAMESPACE otherwise).
-ReadWritePaths=/opt/gorelo-mcp/app/.oauth-state /opt/gorelo-mcp/app/.state
+# The only place the service may write. The directory must exist before the start (status 226/NAMESPACE otherwise). .state
+# (the API watcher's directory) is deliberately not listed: no server code writes there, and a hijacked service process
+# could otherwise plant files (a symbolic link, say) for the watcher, which may be run as root by hand.
+ReadWritePaths=/opt/gorelo-mcp/app/.oauth-state
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
