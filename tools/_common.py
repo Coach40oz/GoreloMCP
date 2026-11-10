@@ -198,7 +198,7 @@ class Registry:
         return list(self._specs.values())
 
     def select(
-        self, toolsets: Iterable[str], destructive: bool, destructive_tools: Iterable[str] | None = None
+        self, toolsets: Iterable[str], destructive: bool, destructive_tools: Iterable[str] | None = None, exclude_tools: Iterable[str] | None = None,
     ) -> list[ToolSpec]:
         """The tools to register on a server: in one of `toolsets`, and kind != destructive unless `destructive`
         is true. When `destructive` is true, `destructive_tools` None keeps every gated tool of those toolsets
@@ -208,10 +208,12 @@ class Registry:
         only tests use, returns it)."""
         wanted = set(toolsets)
         only = None if destructive_tools is None else set(destructive_tools)
+        excluded = set(exclude_tools or ())
         return [
             spec
             for spec in self._specs.values()
             if spec.toolset in wanted
+            and spec.name not in excluded
             and not self.is_held(spec.name)
             and (spec.kind != "destructive" or (destructive and (only is None or spec.name in only)))
         ]

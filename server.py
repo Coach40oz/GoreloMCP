@@ -403,7 +403,7 @@ def build_server(
 
         registry = REGISTRY
     gated = resolve_gated_tools(settings, registry)  # refuses a GORELO_ENABLE_DESTRUCTIVE list the registry cannot honor
-    selected = registry.select(settings.toolsets, settings.destructive, settings.destructive_tools)
+    selected = registry.select(settings.toolsets, settings.destructive, settings.destructive_tools, settings.exclude_tools)
     _verify_ops(selected, spec)
 
     toolsets = sorted(settings.toolsets)
