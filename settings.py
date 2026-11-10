@@ -48,6 +48,8 @@ Variables:
                               bare DNS name with at least one dot: no scheme, path, port, wildcard, IP address or
                               localhost. Unset, blank or only commas adds nothing. Anything else is an error.
 
+	ENV_EXCLUDE_TOOLS	A list of tools,  which if you know you don't need, can be exluded in your .env in order to bypass the (arbitrary) CoPilot Studio 70 tools limitation
+
 The repr of Settings never shows the API key or the password.
 """
 
@@ -71,6 +73,7 @@ ENV_AUTH_PASSWORD = "MCP_AUTH_PASSWORD"
 ENV_TOOLSETS = "GORELO_TOOLSETS"
 ENV_DESTRUCTIVE = "GORELO_ENABLE_DESTRUCTIVE"
 ENV_EXTRA_REDIRECT_DOMAINS = "MCP_EXTRA_REDIRECT_DOMAINS"
+ENV_EXCLUDE_TOOLS = "GORELO_EXCLUDE_TOOLS"
 
 _TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
 _FALSE_WORDS = frozenset({"0", "false", "no", "off"})
@@ -101,6 +104,7 @@ class Settings:
     destructive: bool = False
     extra_redirect_domains: tuple[str, ...] = ()
     destructive_tools: frozenset[str] | None = None
+    exclude_tools: frozenset[str] = frozenset()
 
     @property
     def redirect_domains(self) -> list[str]:
@@ -158,6 +162,13 @@ class Settings:
         except SettingsError as exc:
             problems.append(str(exc))
 
+        exclude_tools: frozenset[str] = frozenset()
+        try:
+            exclude_tools = parse_exclude_tools(env.get(ENV_EXCLUDE_TOOLS))
+        except SettingsError as exc:
+            problems.append(str(exc))
+
+
         base_url = DEFAULT_BASE_URL
         try:
             base_url = parse_base_url(env.get(ENV_BASE_URL))
@@ -182,6 +193,7 @@ class Settings:
             destructive=destructive,
             extra_redirect_domains=extra_redirect_domains,
             destructive_tools=destructive_tools,
+            exclude_tools=exclude_tools,
         )
 
 
@@ -206,6 +218,28 @@ def _parse_toolsets(raw: str | None) -> frozenset[str]:
         )
     if "all" in names:
         return frozenset(TOOLSETS)
+    return frozenset(names)
+
+def parse_exclude_tools(value: str | None) -> frozenset[str]:
+    """Parse GORELO_EXCLUDE_TOOLS as a comma-separated set of tool names."""
+    if value is None or not value.strip():
+        return frozenset()
+
+    names = [item.strip() for item in value.split(",") if item.strip()]
+
+    bad = [
+        name
+        for name in names
+        if not all(char.isalnum() or char in "_-" for char in name)
+    ]
+
+    if bad:
+        raise SettingsError(
+            f"{ENV_EXCLUDE_TOOLS} has item(s) that cannot be tool names: "
+            + ", ".join(repr(name) for name in bad)
+            + " (tool names may contain only letters, digits, underscores and hyphens)"
+        )
+
     return frozenset(names)
 
 
