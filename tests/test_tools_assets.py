@@ -4,6 +4,7 @@ hardware types, create, update)."""
 import inspect
 import json
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -43,7 +44,12 @@ AGENT_SUB_TOOLS = {
 RAW_INDEX = json.loads((Path(__file__).resolve().parent.parent / "spec" / "spec_index.json").read_text(encoding="utf-8"))
 TOOLS = {
     # name: (ops, parameters in order, required parameters)
-    "list_agents": (["GET /v1/assets/agents"], ["status_ids", "client_ids", *FILTERS], []),
+    "list_agents": (["GET /v1/assets/agents"], ["status_ids", "client_ids", *FILTERS, "view"], []),
+    "search_agents": (
+        ["GET /v1/assets/agents"],
+        ["client_ids", "status_ids", "query", "posture_failing", "offline_days", "os", "limit", "view"],
+        [],
+    ),
     "get_agent": (["GET /v1/assets/agents/{agentAssetId}"], ["agent_id"], ["agent_id"]),
     **{
         name: ([f"GET /v1/assets/agents/{{agentAssetId}}{suffix}"], ["agent_id"], ["agent_id"])
@@ -267,6 +273,7 @@ def test_the_template_reads_of_the_policies_name_the_tool_that_resolves_their_id
     "name, param, resolver",
     [
         ("list_agents", "client_ids", "list_clients"),
+        ("search_agents", "client_ids", "list_clients"),
         ("list_custom_assets", "client_ids", "list_clients"),
         ("get_agent", "agent_id", "list_agents"),
         *[(name, "agent_id", "list_agents") for name in AGENT_SUB_TOOLS],
@@ -474,6 +481,637 @@ async def test_list_agents_refuses_the_legacy_lowercase_body_instead_of_returnin
     assert text.startswith("Gorelo returned an unexpected response for list_agents")
 
 
+# --------------------------------------------------------------------------
+# list_agents: view
+# --------------------------------------------------------------------------
+
+SUMMARY_FIELDS = [
+    "Id", "Name", "DisplayName", "Description", "ClientId", "Status", "Os", "OsName", "OsVersion", "LastLoggedOnUser",
+    "LastBootUpTime", "LastDisconnectDateTime", "SerialNumber", "SecurityPosture",
+]
+
+
+def posture_item(passing=True, item_id=1, name="Up To Date"):
+    return {"Id": item_id, "Name": name, "Passing": passing}
+
+
+def posture(**items):
+    """A SecurityPosture where every item passes unless `items` (antivirus=..., firewall=..., patches=..., apps=...) replaces it."""
+    base = {"Antivirus": posture_item(), "Firewall": posture_item(item_id=4, name="Enabled"), "Patches": posture_item(), "Apps": posture_item()}
+    base.update({key.capitalize(): value for key, value in items.items()})
+    return base
+
+
+def full_row(n=1, **extra):
+    """A list row with every field of AgentAssetListItemResponse that matters here (shapes measured live on 2026-11-09)."""
+    row = agent_record(
+        n,
+        Description="Front desk",
+        Os="Windows",
+        OsName="Microsoft Windows 11 Pro",
+        OsType="Windows Workstation",
+        OsVersion="10.0.26100",
+        LastLoggedOnUser="jo",
+        LastBootUpTime="2026-11-01T07:00:00Z",
+        LastDisconnectDateTime=None,
+        SerialNumber="SN-1",
+        SecurityPosture=posture(),
+        Cpu="i7",
+        PublicIPAddress="203.0.113.5",
+    )
+    row.update(extra)
+    return row
+
+
+def test_the_agent_summary_fields_are_pinned_and_are_fields_of_the_spec_model(spec_index):
+    assert list(assets_module.AGENT_SUMMARY_FIELDS) == SUMMARY_FIELDS
+    assert set(SUMMARY_FIELDS) <= set(spec_index.schema("AgentAssetListItemResponse")["fields"])
+    assert {"Antivirus", "Firewall", "Patches", "Apps"} == set(spec_index.schema("SecurityPostureModel")["fields"])
+    assert set(spec_index.schema("SecurityPostureStatusModel")["fields"]) >= {"Id", "Name", "Passing"}
+
+
+def test_the_agent_list_docstring_names_the_posture_and_the_times_and_points_to_search_agents():
+    text = flat(assets_module.list_agents.__doc__)
+    for fragment in (
+        "SecurityPosture ({Antivirus, Firewall, Patches, Apps}, each {Id, Name, Passing})",
+        "LastDisconnectDateTime",
+        "LastBootUpTime",
+        "LastLoggedOnUser",
+        "use search_agents",
+    ):
+        assert fragment in text, fragment
+    assert len(text) <= 900
+
+
+@pytest.mark.parametrize("name, default", [("list_agents", "full"), ("search_agents", "summary")])
+async def test_the_view_parameter_is_full_or_summary_in_that_order(server, name, default):
+    tool = next(t for t in await list_tools(server) if t.name == name)
+    view = tool.inputSchema["properties"]["view"]
+    assert view["enum"] == ["full", "summary"] and view["default"] == default
+    assert view["description"] and len(view["description"]) <= 220
+
+
+async def test_list_agents_summary_keeps_the_named_fields_in_order(server, mock_gorelo):
+    rows = [full_row(1), full_row(2)]
+    del rows[1]["Description"]  # a missing field is left out, never invented
+    rows[1]["LastDisconnectDateTime"] = "2026-11-06T14:08:33.207Z"
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows, total_count=2))
+    result = await call_tool(server, "list_agents", {"view": "summary", "client_ids": [9101]})
+    assert mock_gorelo.last.query == {"ClientIds": "9101", "PageSize": "100"}  # view is not a Gorelo parameter
+    assert [list(item) for item in result["items"]] == [SUMMARY_FIELDS, [n for n in SUMMARY_FIELDS if n != "Description"]]
+    assert result["items"][0] == {name: rows[0][name] for name in SUMMARY_FIELDS}  # a null stays null
+    assert result["items"][0]["LastDisconnectDateTime"] is None
+    for dropped in ("Cpu", "PublicIPAddress", "OsType", "LocationId", "WarrantyEndDate", "CreatedOn", "SerialNo"):
+        assert all(dropped not in item for item in result["items"])
+    assert result["filters"] == {"client_ids": [9101], "view": "summary"}
+    assert (result["count"], result["total_count"], result["has_more"], result["page_size"]) == (2, 2, False, 100)
+
+
+@pytest.mark.parametrize("arguments", [{}, {"view": "full"}])
+async def test_list_agents_full_view_is_unchanged_and_keeps_view_out_of_filters(server, mock_gorelo, arguments):
+    rows = [full_row(1)]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "list_agents", arguments)
+    assert result["items"] == rows and result["filters"] == {}
+
+
+@pytest.mark.parametrize("bad", ["brief", "", "SUMMARY", 1])
+async def test_list_agents_refuses_a_view_that_is_not_full_or_summary(server, mock_gorelo, bad):
+    await call_tool_error(server, "list_agents", {"view": bad})
+    assert mock_gorelo.requests == []
+
+
+async def test_list_agents_summary_of_a_row_that_is_not_an_object_is_a_shape_error(server, mock_gorelo):
+    mock_gorelo.on("GET", AGENTS, paged_envelope([full_row(1), "oops"]))
+    text = await call_tool_error(server, "list_agents", {"view": "summary"})
+    assert "list_agents" in text and "oops" not in text
+
+
+# --------------------------------------------------------------------------
+# search_agents
+# --------------------------------------------------------------------------
+
+NOW = datetime(2026, 11, 9, 12, 0, 0, tzinfo=timezone.utc)
+ISO = "%Y-%m-%dT%H:%M:%SZ"
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """The module clock of search_agents, fixed at NOW; `calls` counts how often it was read."""
+    calls = []
+
+    def fake_now():
+        calls.append(1)
+        return NOW
+
+    monkeypatch.setattr(assets_module, "_now", fake_now)
+    return calls
+
+
+def ago(**delta):
+    return (NOW - timedelta(**delta)).strftime(ISO)
+
+
+def offline_row(n=1, disconnect=None, status=(3, "Offline"), **extra):
+    return full_row(n, Status={"Id": status[0], "Name": status[1]}, LastDisconnectDateTime=disconnect, **extra)
+
+
+def ids_of(result):
+    return [item["Id"] for item in result["items"]]
+
+
+def test_the_real_clock_is_an_aware_utc_time():
+    moment = assets_module._now()
+    assert moment.tzinfo is not None and moment.utcoffset() == timedelta(0)
+    assert abs(moment - datetime.now(timezone.utc)) < timedelta(seconds=5)
+
+
+def test_search_agents_is_a_core_read_tool_that_declares_only_the_agent_list():
+    spec = next(s for s in REGISTRY.specs if s.name == "search_agents")
+    assert (spec.toolset, spec.kind, spec.ops) == ("core", "read", ["GET /v1/assets/agents"])
+    assert spec.field_map == {"client_ids": "ClientIds", "status_ids": "StatusIds", "query": "Query"}
+
+
+async def test_search_agents_texts_stay_within_the_caps(server):
+    tool = next(t for t in await list_tools(server) if t.name == "search_agents")
+    assert len(tool.description) <= 900
+    assert all(0 < len(p["description"]) <= 220 for p in tool.inputSchema["properties"].values())
+    text = flat(tool.description)
+    for fragment in ("macOS agents report N/A (passing)", "one Gorelo request per 200 devices", "use list_agents", "AND"):
+        assert fragment in text, fragment
+    # what the counts mean, the returned note, and what to do when the scan saw the set change
+    for fragment in (
+        "total_count is Gorelo's count for client_ids, status_ids and query, not the matches",
+        "matched counts the rows meeting the row conditions",
+        "count_mismatch, note, filters",
+        "count_mismatch true: agents changed during the scan, matches may be missing, repeat",
+    ):
+        assert fragment in text, fragment
+    assert "Paging:" not in text and "Side effects:" not in text
+    properties = tool.inputSchema["properties"]
+    assert properties["posture_failing"]["items"]["enum"] == ["antivirus", "firewall", "patches", "apps"]
+    assert (properties["limit"]["default"], properties["offline_days"]["type"]) == (100, "integer")
+
+
+async def test_search_agents_sends_the_server_filters_and_reads_pages_of_200(server, mock_gorelo, clock):
+    mock_gorelo.on("GET", AGENTS, paged_envelope([full_row(1)]))
+    result = await call_tool(
+        server, "search_agents", {"client_ids": [9101, 9102], "status_ids": [1, 3], "query": "HOST", "os": "windows"}
+    )
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", AGENTS)]
+    assert mock_gorelo.last.query == {"ClientIds": "9101,9102", "StatusIds": "1,3", "Query": "HOST", "PageSize": "200"}
+    assert result["filters"] == {
+        "client_ids": [9101, 9102], "status_ids": [1, 3], "query": "HOST", "os": "windows", "limit": 100,
+    }  # view is the default (summary), so it is not echoed
+
+
+async def test_search_agents_follows_every_page_and_reports_the_scan(server, mock_gorelo, clock):
+    pages = [[full_row(1), full_row(2, Os="MacOS", OsName="macOS", OsType="MacOS Workstation")], [full_row(3)]]
+    mock_gorelo.on("GET", AGENTS, paged_responder(pages, total_count=3))
+    result = await call_tool(server, "search_agents", {"os": "windows"})
+    assert [r.query for r in mock_gorelo.requests] == [{"PageSize": "200"}, {"PageSize": "200", "Cursor": "c1"}]
+    assert ids_of(result) == [uid(1), uid(3)]  # Gorelo's order
+    assert (result["matched"], result["scanned"], result["count"], result["total_count"]) == (2, 3, 2, 3)
+    assert (result["truncated"], result["complete_scan"], result["count_mismatch"]) == (False, True, False)
+    assert "note" not in result
+
+
+@pytest.mark.parametrize("item", ["antivirus", "firewall", "patches", "apps"])
+async def test_each_posture_item_matches_when_it_alone_is_failing(server, mock_gorelo, clock, item):
+    failing = posture(**{item: posture_item(False, 3, "Out of Date")})
+    rows = [full_row(1), full_row(2, SecurityPosture=failing)]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"posture_failing": [item]})
+    assert ids_of(result) == [uid(2)] and result["matched"] == 1
+    # the other three items do not match this row
+    others = [name for name in ("antivirus", "firewall", "patches", "apps") if name != item]
+    result = await call_tool(server, "search_agents", {"posture_failing": others})
+    assert result["items"] == [] and result["matched"] == 0 and "note" not in result
+    assert result["filters"]["posture_failing"] == others
+
+
+async def test_posture_failing_matches_when_any_named_item_fails(server, mock_gorelo, clock):
+    rows = [
+        full_row(1, SecurityPosture=posture(patches=posture_item(False, 3, "Out of Date"))),
+        full_row(2, SecurityPosture=posture(apps=posture_item(False, 6, "Missing"))),
+        full_row(3, SecurityPosture=posture(firewall=posture_item(False, 6, "Missing"))),
+    ]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"posture_failing": ["patches", "apps"]})
+    assert ids_of(result) == [uid(1), uid(2)]
+
+
+async def test_a_macos_agent_with_every_posture_item_n_a_never_matches(server, mock_gorelo, clock):
+    na = posture_item(True, 8, "N/A")
+    mac = full_row(1, Os="MacOS", OsName="macOS", SecurityPosture=posture(antivirus=na, firewall=na, patches=na, apps=na))
+    mock_gorelo.on("GET", AGENTS, paged_envelope([mac]))
+    result = await call_tool(server, "search_agents", {"posture_failing": ["antivirus", "firewall", "patches", "apps"]})
+    assert result["items"] == [] and result["matched"] == 0 and result["scanned"] == 1 and "note" not in result
+
+
+async def test_a_posture_item_that_is_missing_or_not_a_boolean_does_not_match_and_is_counted(server, mock_gorelo, clock):
+    rows = [
+        full_row(1, SecurityPosture={"Firewall": posture_item(), "Patches": posture_item(), "Apps": posture_item()}),  # Antivirus missing
+        full_row(2, SecurityPosture=posture(antivirus={"Id": 6, "Name": "Missing", "Passing": "false"})),  # text, not a bool
+        full_row(3, SecurityPosture=posture(antivirus={"Id": 6, "Name": "Missing", "Passing": None})),
+        full_row(4, SecurityPosture=posture(antivirus={"Id": 6, "Name": "Missing"})),  # no Passing
+        full_row(5, SecurityPosture=posture(antivirus="Missing")),  # the item is not an object
+        full_row(6, SecurityPosture=None),
+        full_row(7, SecurityPosture="n/a"),
+        {k: v for k, v in full_row(8).items() if k != "SecurityPosture"},
+        full_row(9, SecurityPosture=posture(antivirus=posture_item(False, 6, "Missing"))),  # the one real match
+        full_row(10),  # readable and passing: not counted
+    ]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"posture_failing": ["antivirus"]})
+    assert ids_of(result) == [uid(9)] and result["matched"] == 1 and result["scanned"] == 10
+    assert result["note"] == (
+        "8 agents have a named SecurityPosture item that is missing or has no true/false Passing; they are not counted as failing"
+    )
+
+
+async def test_an_unreadable_item_does_not_count_when_another_named_item_already_fails(server, mock_gorelo, clock):
+    row = full_row(1, SecurityPosture=posture(antivirus=posture_item(False, 6, "Missing"), firewall=None))
+    mock_gorelo.on("GET", AGENTS, paged_envelope([row]))
+    result = await call_tool(server, "search_agents", {"posture_failing": ["antivirus", "firewall"]})
+    assert ids_of(result) == [uid(1)] and "note" not in result
+
+
+async def test_an_unreadable_item_that_is_not_named_is_not_counted(server, mock_gorelo, clock):
+    row = full_row(1, SecurityPosture=posture(apps=None))
+    mock_gorelo.on("GET", AGENTS, paged_envelope([row]))
+    result = await call_tool(server, "search_agents", {"posture_failing": ["antivirus"]})
+    assert result["items"] == [] and "note" not in result
+
+
+async def test_offline_days_boundary_is_exactly_n_whole_days_of_24_hours(server, mock_gorelo, clock):
+    rows = [
+        offline_row(1, ago(days=7)),  # exactly 7 days: matches
+        offline_row(2, ago(days=7, seconds=-1)),  # one second short of 7 days: no
+        offline_row(3, ago(days=7, seconds=1)),  # one second over: yes
+        offline_row(4, ago(days=30)),
+        offline_row(5, ago(hours=1)),
+    ]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"offline_days": 7})
+    assert ids_of(result) == [uid(1), uid(3), uid(4)] and result["matched"] == 3
+    assert len(clock) == 1  # one reading of the clock per call
+    one = await call_tool(server, "search_agents", {"offline_days": 1})
+    assert ids_of(one) == [uid(1), uid(2), uid(3), uid(4)]
+
+
+async def test_offline_days_never_matches_an_online_agent_whatever_its_disconnect_time(server, mock_gorelo, clock):
+    rows = [
+        offline_row(1, ago(days=90), status=(2, "Online")),
+        offline_row(2, None, status=(2, "Online")),
+        offline_row(3, "garbage", status=(2, "Online")),
+        offline_row(4, ago(days=90), status=(3, "Offline")),
+    ]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"offline_days": 1})
+    assert ids_of(result) == [uid(4)] and "note" not in result  # an Online row is no doubt, so it is not counted
+
+
+@pytest.mark.parametrize("status", [(1, "Unreachable"), (3, "Offline"), (4, "Pending Delete"), (6, "Pending client inactive")])
+async def test_every_status_but_online_can_match_offline_days(server, mock_gorelo, clock, status):
+    mock_gorelo.on("GET", AGENTS, paged_envelope([offline_row(1, ago(days=3), status=status)]))
+    result = await call_tool(server, "search_agents", {"offline_days": 2})
+    assert ids_of(result) == [uid(1)]
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        "2026-11-06T14:08:33.207Z",  # three fraction digits
+        "2026-11-06T14:08:33.20Z",  # two
+        "2026-11-06T14:08:33Z",  # none
+        "2026-11-06T16:08:33.207+02:00",  # another offset, converted
+    ],
+)
+async def test_the_disconnect_formats_gorelo_sends_are_read_as_utc(server, mock_gorelo, clock, stamp):
+    mock_gorelo.on("GET", AGENTS, paged_envelope([offline_row(1, stamp)]))
+    assert ids_of(await call_tool(server, "search_agents", {"offline_days": 2})) == [uid(1)]  # 2 days 21 hours old
+    assert await call_tool(server, "search_agents", {"offline_days": 3}) is not None
+    assert ids_of(await call_tool(server, "search_agents", {"offline_days": 3})) == []
+
+
+async def test_a_not_online_agent_without_a_usable_disconnect_time_never_matches_and_is_counted(server, mock_gorelo, clock):
+    rows = [
+        offline_row(1, None),
+        offline_row(2, "2026-10-01T00:00:00"),  # no UTC offset: nothing is guessed
+        offline_row(3, "last tuesday"),
+        offline_row(4, 12345),
+        offline_row(5, ""),
+        offline_row(6, ago(days=40)),  # the real match
+        offline_row(7, ago(days=40), status=(2, "Online")),  # Online: no doubt, not counted
+    ]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"offline_days": 10})
+    assert ids_of(result) == [uid(6)] and result["matched"] == 1
+    assert result["note"] == (
+        "5 agents have no known Status Id or, when not Online, no LastDisconnectDateTime with a UTC offset; "
+        "they never match offline_days"
+    )
+
+
+async def test_an_agent_without_a_readable_status_never_matches_offline_days_and_is_counted(server, mock_gorelo, clock):
+    rows = [
+        full_row(1, Status=None, LastDisconnectDateTime=ago(days=50)),
+        full_row(2, Status={"Id": "3", "Name": "Offline"}, LastDisconnectDateTime=ago(days=50)),
+        full_row(3, Status={"Id": True}, LastDisconnectDateTime=ago(days=50)),
+        {k: v for k, v in offline_row(4, ago(days=50)).items() if k != "Status"},
+    ]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"offline_days": 1})
+    assert result["items"] == [] and result["note"].startswith("4 agents have no known Status Id")
+
+
+@pytest.mark.parametrize("status_id", [0, 5, 7, 99, -1])
+async def test_a_status_id_off_the_scale_is_unreadable_for_offline_days_and_counted(server, mock_gorelo, clock, status_id):
+    rows = [
+        offline_row(1, ago(days=50), status=(status_id, "Something new")),  # not Online, but not known either: no match
+        offline_row(2, ago(days=50), status=(3, "Offline")),  # the real match
+    ]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"offline_days": 1})
+    assert ids_of(result) == [uid(2)] and result["matched"] == 1
+    assert result["note"] == (
+        "1 agents have no known Status Id or, when not Online, no LastDisconnectDateTime with a UTC offset; "
+        "they never match offline_days"
+    )
+
+
+async def test_a_status_id_off_the_scale_is_not_counted_when_another_condition_rules_the_row_out(server, mock_gorelo, clock):
+    rows = [offline_row(1, ago(days=50), status=(9, "Something new"), Os="MacOS", OsName="macOS", OsType="MacOS Workstation")]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"offline_days": 1, "os": "windows"})
+    assert result["items"] == [] and "note" not in result
+
+
+def test_every_status_id_of_the_scale_is_known_to_the_offline_test():
+    cutoff = NOW
+    for status_id in assets_module.AGENT_STATUS_LABELS:
+        verdict = assets_module._row_offline({"Status": {"Id": status_id}, "LastDisconnectDateTime": "2020-01-01T00:00:00Z"}, cutoff)
+        assert verdict is (status_id != 2), status_id
+
+
+async def test_a_disconnect_time_in_the_future_does_not_match(server, mock_gorelo, clock):
+    mock_gorelo.on("GET", AGENTS, paged_envelope([offline_row(1, (NOW + timedelta(days=2)).strftime(ISO))]))
+    result = await call_tool(server, "search_agents", {"offline_days": 1})
+    assert result["items"] == [] and "note" not in result
+
+
+@pytest.mark.parametrize(
+    "text, key",
+    [("windows", "Os"), ("MACOS", "Os"), ("pro", "OsName"), ("11 PRO", "OsName"), ("workstation", "OsType"), ("Server", "OsType")],
+)
+async def test_os_is_a_case_insensitive_substring_of_os_osname_or_ostype(server, mock_gorelo, clock, text, key):
+    rows = [
+        full_row(1, Os="Windows", OsName="Microsoft Windows 11 Pro", OsType="Windows Workstation"),
+        full_row(2, Os="MacOS", OsName="macOS", OsType="MacOS Workstation"),
+        full_row(3, Os="Windows", OsName="Microsoft Windows Server 2022", OsType="Windows Server"),
+    ]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"os": f"  {text} "})
+    expected = [row["Id"] for row in rows if text.casefold() in row[key].casefold()]
+    assert expected and ids_of(result) == expected
+    assert result["filters"]["os"] == text  # shown trimmed, with the case the caller used
+
+
+async def test_os_matches_on_any_of_the_three_fields_that_hold_text(server, mock_gorelo, clock):
+    rows = [{k: v for k, v in full_row(2).items() if k != "Os"}]  # still has OsName and OsType
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"os": "windows"})
+    assert ids_of(result) == [uid(2)] and "note" not in result
+
+
+async def test_a_row_with_no_text_in_os_osname_and_ostype_is_unreadable_for_os_and_counted(server, mock_gorelo, clock):
+    rows = [
+        full_row(1, Os=None, OsName=5, OsType=["Windows"]),  # none of the three is text
+        {k: v for k, v in full_row(2).items() if k not in ("Os", "OsName", "OsType")},  # none is present
+        full_row(3, Os=None, OsName=None, OsType=None),
+        full_row(4),  # the real match
+    ]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"os": "windows"})
+    assert ids_of(result) == [uid(4)] and result["matched"] == 1
+    assert result["note"] == "3 agents have no text in Os, OsName and OsType; they never match os"
+
+
+async def test_an_empty_string_is_readable_for_os_and_does_not_match(server, mock_gorelo, clock):
+    rows = [full_row(1, Os="", OsName="", OsType=""), full_row(2, Os=None, OsName="", OsType=None)]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"os": "windows"})
+    assert result["items"] == [] and "note" not in result
+
+
+async def test_a_text_in_one_field_that_does_not_match_is_not_unreadable_even_when_the_others_are_missing(server, mock_gorelo, clock):
+    rows = [full_row(1, Os="MacOS", OsName=None, OsType=None)]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"os": "windows"})
+    assert result["items"] == [] and "note" not in result
+
+
+async def test_an_unreadable_os_is_counted_only_when_no_other_condition_rules_the_row_out(server, mock_gorelo, clock):
+    rows = [
+        offline_row(1, ago(days=20), Os=None, OsName=None, OsType=None),  # os unreadable, offline holds: counted
+        offline_row(2, ago(days=2), Os=None, OsName=None, OsType=None),  # not offline long enough: no doubt
+        offline_row(3, None, Os=None, OsName=None, OsType=None),  # os and offline both unreadable: counted in both
+    ]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"os": "windows", "offline_days": 14})
+    assert result["items"] == [] and result["matched"] == 0
+    assert result["note"] == (
+        "1 agents have no known Status Id or, when not Online, no LastDisconnectDateTime with a UTC offset; "
+        "they never match offline_days; 2 agents have no text in Os, OsName and OsType; they never match os"
+    )
+
+
+async def test_all_conditions_must_hold_together(server, mock_gorelo, clock):
+    bad = posture(patches=posture_item(False, 3, "Out of Date"))
+    rows = [
+        offline_row(1, ago(days=20), SecurityPosture=bad),  # all three
+        offline_row(2, ago(days=20), SecurityPosture=bad, Os="MacOS", OsName="macOS", OsType="MacOS Workstation"),  # not Windows
+        offline_row(3, ago(days=2), SecurityPosture=bad),  # not offline long enough
+        offline_row(4, ago(days=20)),  # posture passes
+        offline_row(5, ago(days=20), status=(2, "Online"), SecurityPosture=bad),  # online
+    ]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(
+        server, "search_agents", {"posture_failing": ["patches"], "offline_days": 14, "os": "windows"}
+    )
+    assert ids_of(result) == [uid(1)] and result["matched"] == 1 and result["scanned"] == 5
+    assert result["filters"] == {"posture_failing": ["patches"], "offline_days": 14, "os": "windows", "limit": 100}
+
+
+async def test_an_unreadable_row_is_counted_only_when_no_other_condition_rules_it_out(server, mock_gorelo, clock):
+    bad = posture(patches=posture_item(False, 3, "Out of Date"))
+    rows = [
+        offline_row(1, None, SecurityPosture=bad),  # offline unreadable, os and posture hold: counted
+        offline_row(2, None, SecurityPosture=bad, Os="MacOS", OsName="macOS", OsType="MacOS Workstation"),  # not Windows: no doubt
+        offline_row(3, None),  # posture passes: no doubt
+        offline_row(4, ago(days=20), SecurityPosture=posture(patches=None)),  # posture unreadable, others hold: counted
+        offline_row(5, None, SecurityPosture=posture(patches=None)),  # both unreadable: counted in both
+    ]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(
+        server, "search_agents", {"posture_failing": ["patches"], "offline_days": 14, "os": "windows"}
+    )
+    assert result["items"] == [] and result["matched"] == 0
+    assert result["note"] == (
+        "2 agents have a named SecurityPosture item that is missing or has no true/false Passing; they are not counted as failing; "
+        "2 agents have no known Status Id or, when not Online, no LastDisconnectDateTime with a UTC offset; "
+        "they never match offline_days"
+    )
+
+
+async def test_limit_cuts_the_rows_and_says_matched_was_more(server, mock_gorelo, clock):
+    rows = [offline_row(n, ago(days=10 + n)) for n in range(1, 6)]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"offline_days": 5, "limit": 2})
+    assert ids_of(result) == [uid(1), uid(2)]  # Gorelo's order, not sorted by age
+    assert (result["count"], result["matched"], result["scanned"], result["truncated"]) == (2, 5, 5, True)
+    assert result["complete_scan"] is True and result["filters"]["limit"] == 2
+    assert result["note"] == "5 agents matched and 2 are returned: raise limit (max 500) or narrow the filters"
+
+
+async def test_a_limit_equal_to_the_matches_is_not_truncated(server, mock_gorelo, clock):
+    rows = [offline_row(n, ago(days=10)) for n in (1, 2)]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"offline_days": 5, "limit": 2})
+    assert result["count"] == 2 and result["truncated"] is False and "note" not in result
+
+
+async def test_the_scan_stops_at_2000_agents_and_says_so(server, mock_gorelo, clock):
+    def page(start):
+        return [{"Id": uid(start + i), "Os": "Windows", "Status": {"Id": 2}} for i in range(200)]
+
+    pages = [page(1 + 200 * index) for index in range(11)]
+    mock_gorelo.on("GET", AGENTS, paged_responder(pages, total_count=2200))
+    result = await call_tool(server, "search_agents", {"os": "windows", "limit": 5})
+    assert len(mock_gorelo.requests) == 10  # 200 rows per request, no early stop, the cap ends the scan
+    assert (result["scanned"], result["matched"], result["count"]) == (2000, 2000, 5)
+    assert (result["truncated"], result["complete_scan"], result["total_count"]) == (True, False, 2200)
+    assert "2000 agents matched and 5 are returned" in result["note"]
+    assert "the scan stopped after 2000 agents (cap 2000) of 2200, so matched counts only those" in result["note"]
+
+
+async def test_a_scan_that_ends_exactly_at_2000_agents_is_complete(server, mock_gorelo, clock):
+    pages = [[{"Id": uid(1 + 200 * index + i), "Os": "Linux"} for i in range(200)] for index in range(10)]
+    pages[9][199]["Os"] = "Windows"
+    mock_gorelo.on("GET", AGENTS, paged_responder(pages, total_count=2000))
+    result = await call_tool(server, "search_agents", {"os": "windows", "limit": 500})
+    assert len(mock_gorelo.requests) == 10 and result["matched"] == 1
+    assert (result["scanned"], result["complete_scan"], result["truncated"]) == (2000, True, False)
+    assert "stopped" not in result.get("note", "")
+
+
+async def test_a_total_that_differs_from_the_rows_read_is_reported(server, mock_gorelo, clock):
+    mock_gorelo.on("GET", AGENTS, paged_envelope([full_row(1)], total_count=3))
+    result = await call_tool(server, "search_agents", {"os": "windows"})
+    assert result["count_mismatch"] is True
+    assert result["note"] == "Gorelo reported 3 agents but 1 rows were read (agents changed during the scan): repeat the search"
+    assert "matches" not in result["note"]  # Gorelo's number counts agents of the server filters, not matches
+
+
+async def test_a_total_below_the_rows_read_is_reported_too(server, mock_gorelo, clock):
+    rows = [full_row(n) for n in (1, 2, 3)]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows, total_count=1))
+    result = await call_tool(server, "search_agents", {"os": "windows"})
+    assert (result["count_mismatch"], result["total_count"], result["scanned"], result["matched"]) == (True, 1, 3, 3)
+    assert result["complete_scan"] is True and result["truncated"] is False
+    assert result["note"] == "Gorelo reported 1 agents but 3 rows were read (agents changed during the scan): repeat the search"
+
+
+async def test_total_count_is_gorelos_count_for_the_server_filters_and_matched_counts_the_row_conditions(server, mock_gorelo, clock):
+    rows = [full_row(1), full_row(2, Os="MacOS", OsName="macOS", OsType="MacOS Workstation")]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    result = await call_tool(server, "search_agents", {"os": "windows"})
+    assert (result["total_count"], result["scanned"], result["matched"], result["count"]) == (2, 2, 1, 1)
+
+
+async def test_the_summary_view_is_the_default_and_the_full_view_returns_the_rows_unchanged(server, mock_gorelo, clock):
+    rows = [full_row(1, Description="Front desk")]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    summary = await call_tool(server, "search_agents", {"os": "windows"})
+    assert [list(item) for item in summary["items"]] == [[n for n in SUMMARY_FIELDS if n in rows[0]]]
+    assert summary["items"][0]["SecurityPosture"] == rows[0]["SecurityPosture"]
+    assert "Cpu" not in summary["items"][0] and "view" not in summary["filters"]  # the default is not echoed
+    explicit = await call_tool(server, "search_agents", {"os": "windows", "view": "summary"})
+    assert explicit == summary
+    full = await call_tool(server, "search_agents", {"os": "windows", "view": "full"})
+    assert full["items"] == rows and full["filters"]["view"] == "full"  # shown only when it is not the default
+
+
+async def test_matches_are_counted_on_whole_rows_whatever_the_view(server, mock_gorelo, clock):
+    rows = [offline_row(n, ago(days=9)) for n in (1, 2, 3)]
+    mock_gorelo.on("GET", AGENTS, paged_envelope(rows))
+    for view in ("summary", "full"):
+        result = await call_tool(server, "search_agents", {"offline_days": 9, "view": view, "limit": 2})
+        assert (result["matched"], result["count"]) == (3, 2)
+
+
+async def test_search_agents_with_no_match_is_an_empty_answer_with_its_scan(server, mock_gorelo, clock):
+    mock_gorelo.on("GET", AGENTS, paged_envelope([full_row(1), full_row(2)]))
+    result = await call_tool(server, "search_agents", {"posture_failing": ["apps"]})
+    assert result["items"] == [] and (result["count"], result["matched"], result["scanned"]) == (0, 0, 2)
+    assert result["truncated"] is False and result["complete_scan"] is True
+
+
+async def test_search_agents_needs_at_least_one_row_condition(server, mock_gorelo, clock):
+    for arguments in ({}, {"client_ids": [9101], "status_ids": [2], "query": "HOST", "limit": 5, "view": "full"}):
+        text = await call_tool_error(server, "search_agents", arguments)
+        assert text == "posture_failing, offline_days and os: give at least one of them (without a row condition use list_agents)"
+    assert mock_gorelo.requests == [] and clock == []
+
+
+@pytest.mark.parametrize(
+    "arguments, fragment",
+    [
+        ({"posture_failing": []}, "posture_failing: expected a non-empty list of antivirus, firewall, patches, apps"),
+        ({"posture_failing": ["antivirus", "antivirus"]}, "posture_failing: each item may be named once; remove the duplicate"),
+        ({"posture_failing": ["firewall", "disk"]}, "posture_failing"),
+        ({"posture_failing": ["Antivirus"]}, "posture_failing"),
+        ({"posture_failing": "antivirus"}, "posture_failing"),
+        ({"offline_days": 0, "os": "x"}, "offline_days: must be a whole number from 1 to 3650"),
+        ({"offline_days": -3, "os": "x"}, "offline_days: must be a whole number from 1 to 3650"),
+        ({"offline_days": 3651, "os": "x"}, "offline_days: must be a whole number from 1 to 3650"),
+        ({"offline_days": True}, "offline_days"),
+        ({"offline_days": "7"}, "offline_days"),
+        ({"offline_days": 7.5}, "offline_days"),
+        ({"os": "  "}, "os: must not be empty or whitespace only"),
+        ({"os": ""}, "os: must not be empty or whitespace only"),
+        ({"os": "x", "limit": 0}, "limit: must be a whole number from 1 to 500"),
+        ({"os": "x", "limit": 501}, "limit: must be a whole number from 1 to 500"),
+        ({"os": "x", "limit": True}, "limit"),
+        ({"os": "x", "limit": "5"}, "limit"),
+        ({"os": "x", "client_ids": []}, "client_ids: expected at least one id, got an empty list"),
+        ({"os": "x", "client_ids": [True]}, "client_ids"),
+        ({"os": "x", "status_ids": [2, 5]}, f"status_ids[1]: expected {AGENT_SCALE}, got 5"),
+        ({"os": "x", "status_ids": [2] * 101}, "status_ids: at most 100 ids, got 101"),
+        ({"os": "x", "query": " "}, "query: must not be empty or whitespace only"),
+        ({"os": "x", "view": "brief"}, "view"),
+    ],
+)
+async def test_search_agents_local_errors_name_the_parameter_and_send_nothing(server, mock_gorelo, clock, arguments, fragment):
+    assert fragment in await call_tool_error(server, "search_agents", arguments)
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize("property_name, param", [("StatusIds", "status_ids"), ("ClientIds", "client_ids"), ("Query", "query")])
+async def test_search_agents_maps_a_gorelo_error_to_the_snake_case_parameter(server, mock_gorelo, clock, property_name, param):
+    mock_gorelo.on("GET", AGENTS, error_envelope(400, [("070101", "Rejected value.", property_name)]))
+    text = await call_tool_error(server, "search_agents", {"os": "windows"})
+    assert text == trace(f"Gorelo rejected search_agents (HTTP 400, code 070101): {param}: Rejected value.")
+
+
+async def test_search_agents_refuses_a_row_that_is_not_an_object(server, mock_gorelo, clock):
+    mock_gorelo.on("GET", AGENTS, paged_envelope([full_row(1), "oops"]))
+    text = await call_tool_error(server, "search_agents", {"os": "windows"})
+    assert "search_agents" in text and "row 1" in text and "oops" not in text
+
+
+# --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 # get_agent
 # --------------------------------------------------------------------------
@@ -997,7 +1635,11 @@ def test_the_single_custom_asset_get_answers_one_unpaged_custom_asset_row(spec_i
 
 
 @pytest.mark.parametrize(
-    "name, param", [("list_agents", "status_ids"), ("list_agents", "client_ids"), ("list_custom_assets", "client_ids")]
+    "name, param",
+    [
+        ("list_agents", "status_ids"), ("list_agents", "client_ids"), ("list_custom_assets", "client_ids"),
+        ("search_agents", "status_ids"), ("search_agents", "client_ids"),
+    ],
 )
 @pytest.mark.parametrize("bad", [[True], ["5"], [5.0], [1, True], [None], "5", 5])
 async def test_the_id_lists_are_strict_item_by_item(server, mock_gorelo, name, param, bad):
@@ -1032,7 +1674,9 @@ async def test_the_optional_parameters_default_to_null_without_advertising_a_nul
     tools = {name: tool.inputSchema["properties"] for name, tool in listed.items()}
     for name in ("list_agents", "list_custom_assets"):
         assert all("anyOf" not in p for p in tools[name].values()), name
-        assert [p for p, definition in tools[name].items() if "default" in definition] == ["page_size"], name
+        assert [p for p, definition in tools[name].items() if "default" in definition] == (
+            ["page_size", "view"] if name == "list_agents" else ["page_size"]
+        ), name
         assert not listed[name].inputSchema.get("required"), name
         assert tools[name]["client_ids"]["type"] == "array" and tools[name]["client_ids"]["items"] == {"type": "integer"}
         assert tools[name]["query"]["type"] == "string"

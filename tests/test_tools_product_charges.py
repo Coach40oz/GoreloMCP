@@ -89,7 +89,9 @@ def module_specs():
 EXPECTED_TOOLS = {
     "list_product_charges": ("read", ["GET /v1/product-charges"]),
     "get_product_charge": ("read", ["GET /v1/product-charges/{productChargeId}"]),
-    "create_product_charge": ("write", ["POST /v1/product-charges", "GET /v1/product-charges/{productChargeId}"]),
+    "create_product_charge": (
+        "write", ["POST /v1/product-charges", "GET /v1/product-charges/{productChargeId}", "GET /v1/tickets"]
+    ),
     "update_product_charge": ("write", ["PATCH /v1/product-charges/{productChargeId}"]),
     "delete_product_charge": ("destructive", ["DELETE /v1/product-charges/{productChargeId}"]),
 }
@@ -347,7 +349,8 @@ BASE = {"ticket_id": TICKET, "item_id": ITEM, "quantity": 1}
     [
         ({"ticket_id": None}, "ticket_id and task_id: give exactly one of them"),
         ({"task_id": TASK}, "ticket_id and task_id: give exactly one of them"),
-        ({"ticket_id": "T-123"}, "ticket_id: expected a GUID"),
+        ({"ticket_id": ""}, "ticket_id: must not be empty"),
+        ({"ticket_id": 0}, "ticket_id: expected a positive whole number"),
         ({"ticket_id": None, "task_id": "x"}, "task_id: expected a GUID"),
         ({"item_id": "SKU-1"}, "item_id: expected a GUID"),
         ({"quantity": 0}, "quantity: must be above 0"),
@@ -685,3 +688,60 @@ async def test_no_text_or_description_value_reaches_the_log(server, mock_gorelo,
         await call_tool(server, "create_product_charge", {**BASE, "description": "SECRET-DESCRIPTION-TEXT"})
     assert "SECRET-DESCRIPTION-TEXT" not in "\n".join(r.getMessage() for r in caplog.records if r.name.startswith("gorelo"))
     assert json.loads(mock_gorelo.requests[0].content)["Description"] == "SECRET-DESCRIPTION-TEXT"
+
+
+# --------------------------------------------------------------------------
+# The ticket as a GUID, a number or a display number (resolve_ticket_id)
+# --------------------------------------------------------------------------
+
+TICKETS = "/v1/tickets"
+TICKET_ROW = {"Id": TICKET, "Number": 4242, "DisplayNumber": "TCK-4242"}
+
+
+def test_create_declares_the_ticket_list_and_keeps_ticket_id_on_the_body_field():
+    spec = next(s for s in module_specs() if s.name == "create_product_charge")
+    assert "GET /v1/tickets" in spec.ops
+    # TicketId is the body field Gorelo names in a 400; the lookup's Query shares the parameter and cannot be mapped too
+    assert spec.field_map["ticket_id"] == "TicketId"
+
+
+@pytest.mark.parametrize("reference", ["TCK-4242", "tck-4242", "4242", 4242])
+async def test_create_resolves_a_number_or_display_number_and_charges_the_resolved_ticket(server, mock_gorelo, reference):
+    mock_gorelo.on("GET", TICKETS, paged_envelope([TICKET_ROW]))
+    route_create(mock_gorelo)
+    result = await call_tool(server, "create_product_charge", {**BASE, "ticket_id": reference})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", TICKETS), ("POST", CHARGES), ("GET", NEW)]
+    lookup, post, _ = mock_gorelo.requests
+    assert lookup.query["Query"] == str(reference)
+    assert post.json == {"TicketId": TICKET, "ItemId": ITEM, "Quantity": 1}
+    assert result == charge(Id=NEW_ID)
+
+
+async def test_create_with_a_guid_makes_no_lookup_request(server, mock_gorelo):
+    route_create(mock_gorelo)
+    await call_tool(server, "create_product_charge", BASE)
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("POST", CHARGES), ("GET", NEW)]
+
+
+async def test_create_with_an_unknown_number_stops_before_the_write(server, mock_gorelo):
+    mock_gorelo.on("GET", TICKETS, paged_envelope([]))
+    route_create(mock_gorelo)
+    text = await call_tool_error(server, "create_product_charge", {**BASE, "ticket_id": "TCK-9999"})
+    assert text.startswith("ticket_id: no ticket has the number or display number 'TCK-9999'")
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", TICKETS)]
+
+
+async def test_create_checks_its_other_parameters_before_the_ticket_lookup(server, mock_gorelo):
+    mock_gorelo.on("GET", TICKETS, paged_envelope([TICKET_ROW]))
+    text = await call_tool_error(server, "create_product_charge", {**BASE, "ticket_id": "TCK-4242", "quantity": 0})
+    assert "quantity: must be above 0" in text
+    both = await call_tool_error(server, "create_product_charge", {**BASE, "ticket_id": "TCK-4242", "task_id": TASK})
+    assert "ticket_id and task_id: give exactly one of them" in both
+    assert mock_gorelo.requests == []
+
+
+async def test_the_ticket_id_text_names_the_three_forms(server_factory):
+    tools = {t.name: t for t in await list_tools(server_factory(destructive=True))}
+    text = tools["create_product_charge"].inputSchema["properties"]["ticket_id"]["description"]
+    assert "GUID" in text and "number (1234)" in text and "display number (TCK-1234)" in text
+    assert "ticket_ids" in tools["list_product_charges"].inputSchema["properties"]  # the list filter stays GUID only

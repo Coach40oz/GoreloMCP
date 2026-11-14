@@ -50,6 +50,7 @@ from tools._common import (
     require_confirm,
     server_info_of,
 )
+from version import VERSION, read_version
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EM_DASH, EN_DASH = chr(0x2014), chr(0x2013)
@@ -596,8 +597,20 @@ async def test_the_client_is_closed_when_the_session_ends(server_factory, mock_g
 async def test_the_lifespan_exposes_toolsets_destructive_and_the_spec(make_settings, server_factory, spec_index):
     server = server_factory(registry=demo_registry(), settings=make_settings(toolsets={"core", "tickets"}, destructive=False))
     info = (await call_tool(server, "demo_identity"))["info"]
-    assert info == {"toolsets": ["core", "tickets"], "destructive": False, "gated_tools": [], "spec_sha256": spec_index.sha256}
+    assert info == {
+        "toolsets": ["core", "tickets"], "destructive": False, "gated_tools": [], "spec_sha256": spec_index.sha256,
+        "version": VERSION,
+    }
     assert spec_index.sha256 and len(spec_index.sha256) == 64
+
+
+async def test_the_mcp_initialize_result_reports_the_project_version(make_settings, server_factory):
+    server = server_factory(registry=demo_registry(), settings=make_settings(toolsets={"core"}))
+    assert server.version == VERSION
+    async with Client(server) as client:
+        result = client.initialize_result
+    assert result is not None and result.serverInfo.name == "Gorelo PSA"
+    assert result.serverInfo.version == VERSION == read_version()  # the text of pyproject.toml, not FastMCP's own version
 
 
 async def test_tools_reach_gorelo_with_the_configured_key_and_base_url(make_settings, server_factory, mock_gorelo):
@@ -682,7 +695,8 @@ def test_the_ready_line_is_logged(make_settings, spec_index, mock_gorelo, caplog
         transport=mock_gorelo.transport, spec=spec_index, registry=demo_registry(),
     )
     lines = [r.getMessage() for r in caplog.records if r.name == "gorelo-mcp"]
-    assert lines == ["gorelo-mcp ready: toolsets=core,tickets destructive=True tools=3"]
+    assert lines == [f"gorelo-mcp ready: version={VERSION} toolsets=core,tickets destructive=True tools=3"]
+    assert re.search(r"tools=[0-9]*$", lines[0])  # a script that greps tools=[0-9]* keeps working: that part of the line stays as it was
 
 
 # --------------------------------------------------------------------------

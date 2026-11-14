@@ -86,6 +86,7 @@ deleted or voided. The invoice and due date filters of list_invoices take a cale
 <date>T00:00:00Z; the created and updated filters are instants with a UTC offset.
 """
 
+import dataclasses
 import math
 import re
 from collections.abc import Mapping
@@ -118,10 +119,18 @@ from tools._common import (
     positive_ids,
     reread_after_write,
     require_confirm,
+    summary_rows,
     utc_iso,
 )
 
 LIST_OP = "GET /v1/invoices"
+# view="summary" of list_invoices: the identifying, date and money fields of InvoiceModel, in this order (no template ids, payment
+# link or external id); summary_rows leaves out a field a row does not have. TotalDiscount stays so that a discounted invoice
+# adds up from the summary alone (SubTotal, TotalDiscount, TotalTax, Total).
+INVOICE_SUMMARY_FIELDS = (
+    "Id", "Number", "DisplayNumber", "ClientId", "ContractId", "Status", "InvoiceDate", "DueDate", "SubTotal", "TotalDiscount",
+    "TotalTax", "Total", "AmountPaid", "AmountDue", "Reference",
+)
 GET_OP = "GET /v1/invoices/{invoiceId}"
 CREATE_OP = "POST /v1/invoices"
 PDF_OP = "GET /v1/invoices/{invoiceId}/pdf"
@@ -441,10 +450,14 @@ async def list_invoices(
     cursor: Annotated[
         str | None, Field(description="next_cursor from the previous call; same filters and sort; repeat until has_more is false.")
     ] = None,
+    view: Annotated[
+        Literal["full", "summary"],
+        Field(description="full: all fields. summary: ids, Status, dates, SubTotal, TotalDiscount, TotalTax, Total, AmountPaid, AmountDue, Reference."),
+    ] = "full",
 ) -> dict:
     """List invoices, one page at a time; filter by number, client, status or dates.
     Rows carry Id (the GUID get_invoice and export_invoice_pdf need), Number, Status and amounts; only get_invoice
-    returns the lines. Without status_ids every status is listed; deleted invoices never are. A Void invoice can still show AmountDue: read Status first.
+    returns the lines. Without status_ids every status is listed; deleted invoices never are. A Void invoice can still show AmountDue: read Status first. view=summary keeps only the identifying, date and amount fields.
     """
     filters = {
         "client_ids": positive_ids("client_ids", client_ids),
@@ -476,7 +489,11 @@ async def list_invoices(
         cursor=non_empty("cursor", cursor),
         tool="list_invoices",
     )
-    return paged_result(page, filters)
+    if view == "summary":
+        page = dataclasses.replace(
+            page, items=summary_rows(page.items, INVOICE_SUMMARY_FIELDS, op_key=LIST_OP, tool="list_invoices")
+        )
+    return paged_result(page, {**filters, "view": "summary" if view == "summary" else None})
 
 
 # --------------------------------------------------------------------------

@@ -28,6 +28,7 @@ import tools.meta as meta_module
 import tools.org as org_module
 from gorelo_client import GoreloAPIError, is_forbidden_op
 from tools._common import REGISTRY
+from version import VERSION
 
 pytestmark = pytest.mark.anyio
 
@@ -90,7 +91,8 @@ def test_health_check_is_declared_as_a_core_read_tool_over_get_clients():
 
 def test_the_docstring_says_what_it_returns_and_that_a_failure_is_data_not_an_error():
     doc = flat(meta_module.health_check.__doc__)
-    assert "returns {ok, api, api_host, total_clients, toolsets, destructive, gated_tools, spec_sha256}" in doc
+    assert "returns {ok, api, api_host, total_clients, version, toolsets, destructive, gated_tools, spec_sha256}" in doc
+    assert "version is the version of this server." in doc
     assert "total_clients is the number of clients Gorelo lists by default (Archived clients are not counted)." in doc
     # every gated tool, the contract writes and approve_invoice included, not a list of kinds that goes stale
     assert "gated_tools names the gated tools switched on ([] means none)" in doc
@@ -98,7 +100,7 @@ def test_the_docstring_says_what_it_returns_and_that_a_failure_is_data_not_an_er
     assert "Side effects:" not in doc  # read only
     assert "api_host is the Gorelo host this server calls" in doc
     assert "api_host is the Gorelo host this server calls (GORELO_BASE_URL)." in doc
-    assert "{ok: false, error, status} instead of a tool error" in doc
+    assert "{ok: false, error, status, version} instead of a tool error" in doc
 
 
 def test_the_module_text_says_destructive_means_whether_the_gated_tools_are_on_not_only_the_delete_tools():
@@ -270,9 +272,18 @@ BASE_ARGS = {
 }
 
 
-def is_integer_id(name, prop):
+# Documented exception (1.7.0): one ticket_id accepts a GUID, a display number (TCK-1234) or a number (1234) in EVERY tool that takes one
+# ticket, so set_alert_status.ticket_id is `str | StrictId` and its schema is {"anyOf": [string, integer]}. It is not an integer-only id,
+# so the strict-integer table and the "no anyOf" check below leave it out; the two tests at the end of this block pin what it IS: both
+# branches exactly (nothing else, so no null branch can hide in the anyOf), and a boolean or a decimal refused naming the parameter.
+TICKET_REFERENCE_PARAMS = {("set_alert_status", "ticket_id")}
+
+
+def is_integer_id(name, prop, tool=None):
     """An integer id or a list of them, whether or not the schema also spells out a null branch (anyOf)."""
     if not (name.endswith("_id") or name.endswith("_ids")):
+        return False
+    if (tool, name) in TICKET_REFERENCE_PARAMS:
         return False
     return any(
         branch.get("type") == "integer" or (branch.get("type") == "array" and branch["items"].get("type") == "integer")
@@ -283,11 +294,24 @@ def is_integer_id(name, prop):
 async def test_the_table_of_id_parameters_covers_every_integer_id_parameter_of_the_package(server):
     found = {}
     for tool in await core_tools(server):
-        ids = sorted(name for name, prop in tool.inputSchema.get("properties", {}).items() if is_integer_id(name, prop))
+        ids = sorted(name for name, prop in tool.inputSchema.get("properties", {}).items() if is_integer_id(name, prop, tool.name))
         if ids:
             found[tool.name] = ids
     assert found == {name: sorted(params) for name, params in ID_PARAMS.items()}
     assert set(BASE_ARGS) == set(ID_PARAMS)
+
+
+async def test_a_ticket_reference_parameter_is_text_or_integer_and_nothing_else(server, mock_gorelo):
+    tools = {tool.name: tool for tool in await core_tools(server)}
+    for tool_name, param in sorted(TICKET_REFERENCE_PARAMS):
+        prop = tools[tool_name].inputSchema["properties"][param]
+        assert sorted(branch.get("type") for branch in prop["anyOf"]) == ["integer", "string"], (tool_name, param)
+        assert "default" not in prop or prop["default"] is not None
+        base = {"alert_ids": [uid(1)], "status": "ticketed"}
+        for bad in (True, 5.5, ["x"]):
+            text = await call_tool_error(server, tool_name, {**base, param: bad})
+            assert param in text, (tool_name, param, bad, text)
+    assert mock_gorelo.requests == []
 
 
 @pytest.mark.parametrize("name", sorted(ID_PARAMS))
@@ -356,7 +380,9 @@ async def test_every_core_tool_and_parameter_description_stays_within_the_size_l
 # Since 1.5.0 (the billing contact guard of update_client_location and its new parameter, the "Resolve ids
 # first" and "Side effects: None (read-only)." lines of eleven reads, text fixes) the group measures 57_910 bytes: the limit
 # is that plus about 1 percent, rounded up to the next 100.
-CORE_BUDGET_BYTES = 58_500
+# For 1.7.0 the group measures 58_612 bytes: the `view` parameter and the longer text of list_agents, the ticket reference
+# text of set_alert_status and the `version` of health_check. The limit is that plus about 1 percent, rounded up to the next 100.
+CORE_BUDGET_BYTES = 59_200
 
 
 async def test_the_core_tool_list_stays_within_its_size_budget(server_factory):
@@ -376,6 +402,8 @@ async def test_core_optional_parameters_do_not_advertise_a_null_branch(server):
         advertised = json.dumps(tool.inputSchema)
         assert '"type": "null"' not in advertised and '"default": null' not in advertised, tool.name
         for pname, prop in tool.inputSchema.get("properties", {}).items():
+            if (tool.name, pname) in TICKET_REFERENCE_PARAMS:
+                continue  # a ticket reference is a real union of two types; see test_a_ticket_reference_parameter_is_text_or_integer_and_nothing_else
             assert "anyOf" not in prop, f"{tool.name}.{pname}"
 
 
@@ -424,6 +452,7 @@ async def test_a_healthy_api_reports_the_client_count_and_the_server_configurati
         "api": "reachable",
         "api_host": "api.usw.gorelo.io",
         "total_clients": 40,
+        "version": VERSION,
         "toolsets": ["core", "tickets"],
         "destructive": True,
         "gated_tools": ["delete_asset_type", "delete_client_domain", "delete_client_location", "delete_contact", "delete_ticket_comment"],  # core gained three gated tools in 1.5.0 and delete_contact in 1.5.2
@@ -494,8 +523,10 @@ async def test_called_without_the_lifespan_data_it_still_answers_and_says_what_i
     async with client_factory() as client:
         result = await meta_module.health_check(make_ctx(client))
     assert result["ok"] is True and result["total_clients"] == 40
-    assert (result["toolsets"], result["destructive"], result["gated_tools"], result["spec_sha256"]) == (None, None, None, None)
-    assert "toolsets, destructive, gated_tools, spec_sha256 could not be read" in result["note"]
+    assert (result["version"], result["toolsets"], result["destructive"], result["gated_tools"], result["spec_sha256"]) == (
+        None, None, None, None, None
+    )
+    assert "version, toolsets, destructive, gated_tools, spec_sha256 could not be read" in result["note"]
     assert result["api_host"] == "api.usw.gorelo.io" and "api_host" not in result["note"]
 
 
@@ -504,8 +535,18 @@ async def test_a_partly_missing_lifespan_names_only_what_is_missing(client_facto
     async with client_factory() as client:
         result = await meta_module.health_check(make_ctx(client, toolsets=["core"], destructive=False))
     assert result["toolsets"] == ["core"] and result["destructive"] is False and result["spec_sha256"] is None
-    assert result["gated_tools"] is None
-    assert result["note"].startswith("gated_tools, spec_sha256 could not be read")
+    assert result["gated_tools"] is None and result["version"] is None
+    assert result["note"].startswith("version, gated_tools, spec_sha256 could not be read")
+
+
+async def test_the_version_is_the_one_of_the_project_and_a_missing_one_is_named(client_factory, mock_gorelo, server_factory):
+    mock_gorelo.on("GET", CLIENTS, paged_envelope([a_client()], total_count=40))
+    assert (await call_tool(server_factory(toolsets={"core"}), "health_check"))["version"] == VERSION == "1.7.0"
+    async with client_factory() as client:
+        result = await meta_module.health_check(
+            make_ctx(client, toolsets=["core"], destructive=False, gated_tools=[], spec=type("S", (), {"sha256": "a" * 64})())
+        )
+    assert result["version"] is None and result["note"].startswith("version could not be read from the server's lifespan context")
 
 
 async def test_without_a_gorelo_client_the_tool_raises_instead_of_pretending_to_diagnose():
@@ -521,7 +562,7 @@ async def test_without_a_gorelo_client_the_tool_raises_instead_of_pretending_to_
 async def test_an_unauthorized_key_is_reported_not_raised(server, mock_gorelo):
     mock_gorelo.on("GET", CLIENTS, error_envelope(401, [("070401", "Invalid API key.")]))
     result = await call_tool(server, "health_check")
-    assert result == {"ok": False, "error": f"{BASE_401} {region_hint('api.usw.gorelo.io')}", "status": 401}
+    assert result == {"ok": False, "error": f"{BASE_401} {region_hint('api.usw.gorelo.io')}", "status": 401, "version": VERSION}
     assert "GORELO_API_KEY" in result["error"] and "GORELO_BASE_URL" in result["error"]
 
 
@@ -592,7 +633,7 @@ async def test_the_result_names_the_host_it_called(server_factory, mock_gorelo):
 async def test_a_401_names_the_host_that_was_called_and_the_variable_that_changes_it(server_factory, mock_gorelo):
     mock_gorelo.on("GET", CLIENTS, error_envelope(401, [("070401", "Invalid API key.")]))
     result = await call_tool(server_factory(**AU_SETTINGS), "health_check")
-    assert result == {"ok": False, "error": f"{BASE_401} {region_hint('api.aue.gorelo.io')}", "status": 401}
+    assert result == {"ok": False, "error": f"{BASE_401} {region_hint('api.aue.gorelo.io')}", "status": 401, "version": VERSION}
 
 
 async def test_a_401_gateway_json_that_is_not_an_envelope_gets_the_hint_too(server, mock_gorelo):
@@ -682,7 +723,34 @@ async def test_a_response_that_is_not_a_page_of_clients_is_not_healthy(server, m
     result = await call_tool(server, "health_check")
     assert result["ok"] is False and result["status"] == 200
     assert fragment in result["error"]
-    assert set(result) == {"ok", "error", "status"}
+    assert set(result) == {"ok", "error", "status", "version"} and result["version"] == VERSION
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param(error_envelope(500, [("070500", "Internal error")]), id="http-error"),
+        pytest.param(httpx.ReadTimeout("slow"), id="timeout"),
+        pytest.param(envelope([a_client()], {"NextCursor": None, "HasMore": False}), id="unexpected-shape"),
+    ],
+)
+async def test_every_failure_result_carries_the_server_version_and_none_of_the_other_self_knowledge(server, mock_gorelo, response):
+    # the version is local, so a person can read it when Gorelo cannot be reached; the rest of the self-knowledge stays out
+    mock_gorelo.on("GET", CLIENTS, response)
+    result = await call_tool(server, "health_check")
+    assert result["ok"] is False and result["version"] == VERSION == "1.7.0"
+    assert not {"toolsets", "destructive", "gated_tools", "spec_sha256", "api", "api_host"} & set(result)
+
+
+async def test_a_failure_with_no_version_in_the_lifespan_context_reports_none_not_a_guess():
+    class Failing:
+        base_url = "https://api.usw.gorelo.io/v1"
+
+        async def get_page(self, op_key, **kwargs):
+            raise GoreloAPIError(status=500, op_key=op_key, kind="http", notifications=[{"code": "070500", "message": "x"}])
+
+    result = await meta_module.health_check(make_ctx(Failing()))
+    assert result["ok"] is False and result["version"] is None
 
 
 async def test_a_failure_never_claims_the_api_is_reachable(server, mock_gorelo):

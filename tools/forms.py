@@ -4,7 +4,8 @@ Three tools, every one in toolset "forms":
 
     list_forms                    read    GET /v1/forms (paged)
     list_form_responses           read    GET /v1/forms/{formId}/responses (paged)
-    create_form_submission_link   write   POST /v1/forms/{formId}/submission-links
+    create_form_submission_link   write   POST /v1/forms/{formId}/submission-links (a ticket number or display number is
+                                          first looked up with GET /v1/tickets)
 
 Ops owned by this module (each must exist in spec/spec_index.json, none may be in FORBIDDEN_OPS; keep
 the list in step with the ops=[...] of the declarations below):
@@ -12,6 +13,7 @@ the list in step with the ops=[...] of the declarations below):
     GET /v1/forms
     GET /v1/forms/{formId}/responses
     POST /v1/forms/{formId}/submission-links
+    GET /v1/tickets
 
 Things to know:
 
@@ -23,7 +25,9 @@ Things to know:
   and Label (the question text at submission time), which is the only question text the API offers.
 * Form ids are short url-safe tokens (the spec pattern is ^[A-Za-z0-9_-]{1,50}$), not numbers or GUIDs.
 * Integer ids are StrictId parameters (JSON true, "5" or 5.0 is refused by the schema) and are then
-  range-checked by positive_ids; the ticket and task ids go through guid.
+  range-checked by positive_ids; the task id goes through guid. ticket_id is a GUID, a number (1234) or a display number
+  (TCK-1234): resolve_ticket_id (tools/_ticket_ref.py) looks a number up with GET /v1/tickets after the local checks and
+  before the POST (a GUID costs no request), and the resolved GUID is the TicketId of the body.
 * The POST answers with {"Link", "ExpiresOn"} and there is no single-link GET, so the answer is returned
   as it is and there is no re-read. The API cannot list links either, so a POST
   whose outcome is unknown (timeout, connection failure, 5xx, an answer without a usable link) may have
@@ -55,6 +59,7 @@ from tools._common import (
     positive_id,
     positive_ids,
 )
+from tools._ticket_ref import TICKET_LIST_OP, resolve_ticket_id
 
 LIST_OP = "GET /v1/forms"
 RESPONSES_OP = "GET /v1/forms/{formId}/responses"
@@ -228,12 +233,12 @@ async def list_form_responses(
 # --------------------------------------------------------------------------
 
 
-@gorelo_tool(toolset="forms", kind="write", ops=[LINK_OP], field_map=LINK_FIELDS)
+@gorelo_tool(toolset="forms", kind="write", ops=[LINK_OP, TICKET_LIST_OP], field_map=LINK_FIELDS)
 async def create_form_submission_link(
     ctx: Context,
     form_id: Annotated[str, Field(description="Form Id from list_forms (letters, digits, '_' or '-').")],
     ticket_id: Annotated[
-        str | None, Field(description="Active ticket GUID (list_tickets), not the display number.")
+        str | StrictId | None, Field(description="Active ticket: GUID, number (1234) or display number (TCK-1234).")
     ] = None,
     task_id: Annotated[
         str | None,
@@ -246,16 +251,19 @@ async def create_form_submission_link(
     Side effects: every call issues a new, separate link; nothing is submitted until someone fills the form in. If a call fails with "did not confirm", a link may already exist and the API cannot list links: ask the user before requesting another.
     """
     form = _form_id("form_id", form_id)
-    ticket = guid("ticket_id", ticket_id) if ticket_id is not None else None
     task = guid("task_id", task_id) if task_id is not None else None
-    if ticket is not None and task is not None:
+    if ticket_id is not None and task is not None:
         raise ValueError(
             "ticket_id and task_id: give at most one of them (the submission is filed against one ticket or one "
             "task), got both"
         )
+    client = client_of(ctx)
+    ticket = (
+        await resolve_ticket_id(client, ticket_id, tool="create_form_submission_link") if ticket_id is not None else None
+    )
     body = build_body({"ticket_id": ticket, "task_id": task}, LINK_BODY)  # {} when neither is given
     try:
-        data = await client_of(ctx).post(
+        data = await client.post(
             LINK_OP, path_params={"formId": form}, json_body=body, tool="create_form_submission_link"
         )
         data = expect_object(data, LINK_OP, tool="create_form_submission_link")

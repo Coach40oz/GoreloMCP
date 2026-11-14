@@ -60,6 +60,16 @@ Sharing is exposure. share_document is the only tool that can send a true Public
 (it is destructive: registered only with GORELO_ENABLE_DESTRUCTIVE and refused without confirm=true); unshare_document
 sends false values only and update_document has no sharing parameter at all.
 
+update_document edits: a list of {find, replace} pairs applied to the stored Body in order, so a small change to a long
+document needs neither the whole body in the call nor (with return_body=false) the whole body in the answer. Each find must
+occur exactly once in the text as the earlier edits left it (exact, case-sensitive, on the HTML text); the tool refuses
+before any write, naming the item (and, from item 2 on, saying that the text is the one the earlier edits left, and
+blaming them when the find is unique in the stored body) and never quoting document text. The new body then meets the
+checks of a body given by the caller, the BODY_MAX length limit included. Writing a read body back is safe for the image
+links in it (measured live 2026-11-09 on a test document): Gorelo ignores the access token of an image link when it saves
+a body, a stale or invalid one included, and signs the link afresh on every read. So an image link differs between two
+reads, which is why a find must not contain one.
+
 PATCH replaces the whole attachment list ("send every name and url, including the ones to keep"), so update_document
 reads the document first and refuses a list that leaves out a current attachment unless remove_attachment_names names it.
 A current attachment is matched by its name and its url without the query string (the time-limited token is taken to
@@ -140,6 +150,15 @@ TITLE_MAX = 200
 ALTERNATE_NAME_MAX = 200
 QUERY_MAX = 200
 RELATED_MAX = 100
+# update_document edits: how many {find, replace} pairs one call takes, and the longest find. A find is a piece copied from
+# the stored body that must be unique there, so a short stretch of markup is enough; the cap keeps a call from sending a
+# whole document as a search text. The replacement has no cap of its own, but the body the edits build is checked before the
+# PATCH like a body the caller gives: not blank, no data: image, at most BODY_MAX characters.
+EDITS_MAX = 50
+FIND_MAX = 2000
+# The longest Body Gorelo accepts. Measured live on 2026-10-24: a Body of 2,097,062 characters was a 400 on Body, "Body can be
+# at most 900,000 characters."; the published spec states no limit. One more than this is refused here before any request.
+BODY_MAX = 900_000
 # restore_document_version looks for the restored version on the first page of the version list (newest first).
 VERIFY_PAGE_SIZE = 20
 
@@ -281,12 +300,14 @@ def _given(check: Any, param: str, value: Any) -> Any:
 
 
 def _body(value: Any) -> str | None:
-    """The HTML body: text that is not blank and embeds no image as a data: URL."""
+    """The HTML body: text that is not blank, at most BODY_MAX characters, and embeds no image as a data: URL."""
     if value is None:
         return None
     if not isinstance(value, str):
         raise ValueError(f"body: expected HTML text, got {describe_value(value)}")
     non_empty("body", value)
+    if len(value) > BODY_MAX:
+        raise ValueError(f"body: at most {BODY_MAX} characters, got {len(value)}")
     if _DATA_IMAGE.search(value):
         raise ValueError(
             "body: embeds an image as a data: URL, which Gorelo does not accept. Upload the image with "
@@ -317,6 +338,98 @@ def _clear_names(clear_fields: Any) -> list[str]:
         if name not in CLEAR_VALUES:
             raise ValueError(f"clear_fields: {name!r} cannot be cleared; allowed: {', '.join(CLEAR_VALUES)}")
     return names
+
+
+def _edit_pairs(value: Any) -> list[tuple[str, str]] | None:
+    """The (find, replace) pairs of the edits parameter, checked. Items are counted from 1, as in the messages of the
+    other tools; a text is never quoted."""
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, (list, tuple)):
+        raise ValueError(f"edits: expected a list of find and replace pairs, got {describe_value(value)}")
+    if not value:
+        raise ValueError(f"edits: at least one edit is required (1 to {EDITS_MAX}); omit it to leave the body as it is")
+    if len(value) > EDITS_MAX:
+        raise ValueError(f"edits: at most {EDITS_MAX} edits per call, got {len(value)}")
+    pairs: list[tuple[str, str]] = []
+    for position, entry in enumerate(value, start=1):
+        data = entry.model_dump() if isinstance(entry, BaseModel) else entry
+        if not isinstance(data, Mapping) or set(data) != {"find", "replace"}:
+            raise ValueError(f"edits (item {position}): must be an object with find and replace only")
+        find, replace = data["find"], data["replace"]
+        if not isinstance(find, str) or not find.strip():
+            raise ValueError(f"edits (item {position}, find): must be text that is not empty or whitespace only")
+        if len(find) > FIND_MAX:
+            raise ValueError(f"edits (item {position}, find): at most {FIND_MAX} characters, got {len(find)}")
+        if not isinstance(replace, str):
+            raise ValueError(
+                f"edits (item {position}, replace): expected text (an empty string deletes the found text), "
+                f"got {describe_value(replace)}"
+            )
+        pairs.append((find, replace))
+    return pairs
+
+
+def _occurrences(text: str, find: str) -> int:
+    """0, 1, or 2 for "more than once": how many times find occurs in text, overlapping occurrences included ("aa" occurs
+    twice in "aaa"). An edit is unambiguous only when it matches at one place, so the count stops at 2; counting every
+    occurrence of a short find in a large repetitive body costs seconds of CPU inside the async server."""
+    first = text.find(find)
+    if first == -1:
+        return 0
+    return 1 if text.find(find, first + 1) == -1 else 2
+
+
+def _edited_body(stored: str, pairs: list[tuple[str, str]]) -> str:
+    """The stored Body after the edits, applied in order; each find must occur exactly once in the text as the earlier
+    edits left it. Every refusal names `edits` and the item, never a piece of the document or of a find, and says that
+    nothing was changed (the caller has not written anything yet). For item 2 and later the text is not the stored one,
+    so the refusal says so, and when the find is unique in the stored body it blames the earlier edits of the call."""
+    text = stored
+    for position, (find, replace) in enumerate(pairs, start=1):
+        count = _occurrences(text, find)
+        if count != 1:
+            seen = "does not occur" if count == 0 else "occurs more than once"
+            if position == 1:
+                raise ValueError(
+                    f"edits (item 1): its find ({len(find)} characters) {seen} in the stored body, and it must occur "
+                    "exactly once (exact match, case-sensitive, on the HTML text). Call get_document and copy a longer, "
+                    "unique piece of the stored body. Nothing was changed."
+                )
+            earlier = "edit 1" if position == 2 else f"edits 1 to {position - 1}"
+            if _occurrences(stored, find) == 1:
+                cause = "removed it" if count == 0 else "made a second occurrence of it"
+                advice = (
+                    f"It occurs exactly once in the stored body, so {earlier} of this call {cause}: reorder or merge the "
+                    "edits."
+                )
+            else:
+                advice = "Call get_document and copy a longer, unique piece; the earlier edits of this call change the text first."
+            raise ValueError(
+                f"edits (item {position}): its find ({len(find)} characters) {seen} in the body as {earlier} left it, and "
+                f"it must occur exactly once there (exact match, case-sensitive, on the HTML text). {advice} "
+                "Nothing was changed."
+            )
+        at = text.index(find)
+        text = text[:at] + replace + text[at + len(find):]
+    if text == stored:
+        raise ValueError("edits: applied in order they leave the body as it is, so drop them. Nothing was changed.")
+    return text
+
+
+def _stored_body(record: Mapping[str, Any], op_key: str) -> str:
+    """The Body of the record read before an edit. Anything but text is a shape error BEFORE any write: the tool will not
+    apply an edit to a body it cannot read."""
+    body = record.get("Body")
+    if not isinstance(body, str):
+        raise GoreloAPIError(
+            f"{op_key}: expected Body to be text but got {describe_value(body)}; refusing to edit a body it cannot read, "
+            "so nothing was changed",
+            status=200,
+            op_key=op_key,
+            kind="shape",
+        )
+    return body
 
 
 def _status_ids(param: str, values: Any) -> list[int] | None:
@@ -406,6 +519,15 @@ def _with_exposure_note(record: dict[str, Any], *others: str | None) -> dict[str
     return {**record, "note": " ".join(notes)} if notes else record
 
 
+def _without_body(record: dict[str, Any]) -> dict[str, Any]:
+    """The record with Body replaced by BodyLength (the number of characters the Body had), at the place of Body. A
+    record without a text Body is returned as it is: nothing is invented."""
+    body = record.get("Body")
+    if not isinstance(body, str):
+        return record
+    return {("BodyLength" if key == "Body" else key): (len(body) if key == "Body" else value) for key, value in record.items()}
+
+
 # --------------------------------------------------------------------------
 # Attachments of update_document
 # --------------------------------------------------------------------------
@@ -419,6 +541,15 @@ class DocumentAttachment(BaseModel):
 
     name: str
     url: str
+
+
+class DocumentEdit(BaseModel):
+    # One {find, replace} pair; the edits parameter explains it (no description here, as for DocumentAttachment).
+
+    model_config = ConfigDict(extra="forbid")
+
+    find: str
+    replace: str
 
 
 def _url_key(url: str) -> str:
@@ -1045,7 +1176,16 @@ async def update_document(
     document_id: Annotated[str, Field(description=DOCUMENT_ID_TEXT)],
     title: Annotated[str | None, Field(description=f"New title, not blank, at most {TITLE_MAX} characters.")] = None,
     body: Annotated[
-        str | None, Field(description="New HTML body, not blank. No images as data: URLs. Text in angle brackets is read as a tag and lost.")
+        str | None,
+        Field(description="New HTML body, not blank. No images as data: URLs. Text in angle brackets is read as a tag and lost. Not with edits."),
+    ] = None,
+    edits: Annotated[
+        list[DocumentEdit] | None,
+        Field(
+            description=f"Instead of body: 1 to {EDITS_MAX} {{find, replace}} pairs, in order. Each find (copied from get_document, "
+            f"up to {FIND_MAX} characters, no image or attachment url: its token changes) must be unique at that point; "
+            "replace may be empty."
+        ),
     ] = None,
     alternate_name: Annotated[
         str | None,
@@ -1070,15 +1210,21 @@ async def update_document(
         list[DocumentClearable] | None,
         Field(description="Fields to remove: alternate_name, or attachments (every attachment). Not together with a value for the same field."),
     ] = None,
+    return_body: Annotated[
+        StrictBool, Field(description="false: the result has BodyLength (characters) in place of Body. Use it after edits on a long document.")
+    ] = True,
 ) -> dict:
-    """Change fields of one document and return its updated record. Send only what changes; a changed title or body is saved as a new version. Attachments is the COMPLETE new list (Gorelo replaces it): the tool reads the document first and refuses a list that leaves out a current attachment unless remove_attachment_names names it. It never changes sharing (share_document, when enabled; unshare_document), place or status (move_document, archive_document, restore_document).
+    """Change one document; returns the record. Send only changes. Small change to a long document: get_document once, then edits and return_body=false. Attachments: the COMPLETE new list (Gorelo replaces it); it reads the document first and refuses to drop a current one unless remove_attachment_names names it. It never changes sharing (share_document, when enabled; unshare_document), place or status (move_document, archive_document, restore_document).
     Resolve ids first: document_id -> list_documents; attachments -> upload_attachment (item_type document), get_document.
-    Side effects: overwrites the fields given; a changed title or body is a new version (restore_document_version goes back). If the document is shared, readers see the change (the result's note says so). Compare the returned Body with what you sent: Gorelo may normalise HTML.
+    Side effects: overwrites what you send; a change someone else saves between the tool's read and its write is replaced. A changed title or body is a new version (restore_document_version recovers it). Readers of a shared document see the change (see note). Gorelo may normalise HTML: compare the returned Body with what you sent.
     """
     doc = guid("document_id", document_id)
     clear = _clear_names(clear_fields)
     files = _attachment_pairs(attachments)
     drops = _drop_names(remove_attachment_names)
+    changes = _edit_pairs(edits)
+    if changes is not None and body is not None:
+        raise ValueError("edits: cannot be given together with body; body replaces the whole text, edits change pieces of the stored one")
     if "attachments" in clear and (files is not None or drops is not None):
         raise ValueError(
             'attachments: cannot be given together with clear_fields=["attachments"]; clearing removes every attachment'
@@ -1093,9 +1239,9 @@ async def update_document(
         values, UPDATE_MAP, clear=[name for name in clear if name == "alternate_name"], clear_values=CLEAR_VALUES
     )
     touches_files = files is not None or drops is not None or "attachments" in clear
-    if not wire and not touches_files:
+    if not wire and not touches_files and changes is None:
         raise ValueError(
-            "nothing to change: give at least one of title, body, alternate_name, is_starred, attachments, "
+            "nothing to change: give at least one of title, body, edits, alternate_name, is_starred, attachments, "
             "remove_attachment_names or clear_fields"
         )
     client = client_of(ctx)
@@ -1103,24 +1249,42 @@ async def update_document(
     if "attachments" in clear:
         wire["Attachments"] = []
         expected = []
-    elif touches_files or "Title" in wire or "Body" in wire:
-        # the read before the write: the attachment list is replaced whole, and a new version must keep the files
-        before = await client.get_one(GET_OP, path_params={"documentId": doc}, tool="update_document")
-        current = _current_attachments(expect_object(before, GET_OP, tool="update_document"), GET_OP, "update_document")
-        expected = [row["Name"] for row in current]
-        if touches_files:
-            final = _final_attachments(doc, current, files, drops)
-            if _keys(final) != _keys(current):
-                wire["Attachments"] = final
-                expected = [row["Name"] for row in final]
-            elif not wire:
-                raise ValueError("nothing to change: the attachments are already the list the document has")
+    if changes is not None or ("attachments" not in clear and (touches_files or "Title" in wire or "Body" in wire)):
+        # the read before the write (one read serves the edits and the attachment checks): the attachment list is
+        # replaced whole, a new version must keep the files, and the edits apply to the stored body
+        before = expect_object(
+            await client.get_one(GET_OP, path_params={"documentId": doc}, tool="update_document"), GET_OP, tool="update_document"
+        )
+        if changes is not None:
+            stored = _stored_body(before, GET_OP)
+            edited = _edited_body(stored, changes)
+            if len(edited) > BODY_MAX:
+                raise ValueError(
+                    f"edits: the body they would build is {len(edited)} characters and Gorelo accepts at most {BODY_MAX} "
+                    f"(the stored body has {len(stored)}). Shorten the replacements. Nothing was changed."
+                )
+            try:
+                wire["Body"] = _body(edited)  # the checks of a body the caller gives
+            except ValueError as err:
+                reason = str(err).removeprefix("body: ")
+                raise ValueError(f"edits: the body they would build is refused ({reason}). Nothing was changed.") from None
+        if "attachments" not in clear:
+            current = _current_attachments(before, GET_OP, "update_document")
+            expected = [row["Name"] for row in current]
+            if touches_files:
+                final = _final_attachments(doc, current, files, drops)
+                if _keys(final) != _keys(current):
+                    wire["Attachments"] = final
+                    expected = [row["Name"] for row in final]
+                elif not wire:
+                    raise ValueError("nothing to change: the attachments are already the list the document has")
     answer = await client.patch(UPDATE_OP, path_params={"documentId": doc}, json_body=wire, tool="update_document")
     record = _document_answer(answer, UPDATE_OP, doc, "update_document")
     problems = _update_problems(record, wire, clear, expected)
     if problems:
         raise _unconfirmed(UPDATE_OP, f"the answer does not show the change ({'; '.join(problems)})", "get_document")
-    return _with_exposure_note(record)
+    result = _with_exposure_note(record)
+    return result if return_body is not False else _without_body(result)
 
 
 # --------------------------------------------------------------------------

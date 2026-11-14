@@ -1,12 +1,12 @@
 """Assets: RMM agents (read, update), monitoring policies and tags (read), asset types (read, create, rename, delete) and
 custom assets (read, create, update, move) (toolset "core").
 
-Tools: list_agents, get_agent, update_agent, list_agent_apps, get_agent_hardware, list_agent_patches,
+Tools: list_agents, search_agents, get_agent, update_agent, list_agent_apps, get_agent_hardware, list_agent_patches,
 list_agent_available_updates, list_agent_tags, list_policies, get_policy, list_asset_tags, list_asset_types,
 create_asset_type, update_asset_type, delete_asset_type (gated), list_custom_assets, get_custom_asset,
 list_custom_asset_hardware_types, create_custom_asset, update_custom_asset.
 
-Ops owned by this module:
+Ops owned by this module (list_agents and search_agents both read GET /v1/assets/agents; search_agents declares that op only):
 
     GET /v1/assets/agents
     GET /v1/assets/agents/{agentAssetId}
@@ -95,9 +95,11 @@ DELETE /v1/assets/custom/{customAssetId} is not allowed; both are in FORBIDDEN_O
 removes an asset type, not an asset, and is the gated delete_asset_type.
 """
 
+import dataclasses
 import ipaddress
 import re
-from datetime import date
+from collections.abc import Mapping
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 
 from fastmcp import Context
@@ -110,6 +112,7 @@ from tools._common import (
     MAX_ID,
     StrictBool,
     StrictId,
+    all_result,
     build_body,
     clamp_page_size,
     client_of,
@@ -127,6 +130,7 @@ from tools._common import (
     positive_ids,
     require_confirm,
     reread_after_write,
+    summary_rows,
     utc_iso,
 )
 
@@ -189,6 +193,26 @@ AGENT_STATUS_LABELS = {1: "Unreachable", 2: "Online", 3: "Offline", 4: "Pending 
 AGENT_STATUS_SCALE = ", ".join(f"{status} {label}" for status, label in AGENT_STATUS_LABELS.items())
 AGENT_STATUS_IDS_MAX = 100
 AGENT_STATUS_HELP = f"Device status ids: {AGENT_STATUS_SCALE}. Up to {AGENT_STATUS_IDS_MAX} ids; any other id is refused."
+# view="summary" of list_agents and search_agents: the identifying, status and security fields of AgentAssetListItemResponse (all
+# named in the spec), in this order; summary_rows leaves out a field a row does not have.
+AGENT_SUMMARY_FIELDS = (
+    "Id", "Name", "DisplayName", "Description", "ClientId", "Status", "Os", "OsName", "OsVersion", "LastLoggedOnUser",
+    "LastBootUpTime", "LastDisconnectDateTime", "SerialNumber", "SecurityPosture",
+)
+AGENT_VIEW_HELP = (
+    "full: all fields. summary: identity, Status, OS, last user, boot and disconnect times, SerialNumber, SecurityPosture."
+)
+# search_agents: the scan reads up to SEARCH_SCAN_CAP agents, 200 per Gorelo request; Gorelo's own names of the posture items
+# (SecurityPostureModel) and the status that counts as reachable (2 Online) are fixed here.
+SEARCH_SCAN_CAP = 2000
+SEARCH_PAGE_SIZE = 200
+SEARCH_LIMIT_DEFAULT = 100
+SEARCH_LIMIT_MAX = 500
+OFFLINE_DAYS_MAX = 3650
+POSTURE_ITEMS = {"antivirus": "Antivirus", "firewall": "Firewall", "patches": "Patches", "apps": "Apps"}
+ONLINE_STATUS_ID = 2
+# snake_case tool parameter -> Gorelo query name of search_agents (the row conditions are not Gorelo parameters).
+AGENT_SEARCH_FIELD_MAP = {"client_ids": "ClientIds", "status_ids": "StatusIds", "query": "Query"}
 # snake_case tool parameter -> body field of CreateCustomAssetCommand / UpdateCustomAssetCommand.
 CUSTOM_BODY_MAP = {
     "name": "Name",
@@ -337,19 +361,225 @@ async def list_agents(
     updated_before: Annotated[str | None, Field(description="Updated before.")] = None,
     page_size: Annotated[int, Field(description="Rows per page, 1 to 200.")] = 100,
     cursor: Annotated[str | None, Field(description="next_cursor from the previous call.")] = None,
+    view: Annotated[Literal["full", "summary"], Field(description=AGENT_VIEW_HELP)] = "full",
 ) -> dict:
     """List agents (managed devices) one page per call; returns {items, has_more, next_cursor, total_count, ...}.
-    Rows carry LocationId, WarrantyStartDate/WarrantyEndDate, DisplayName, SerialNumber, Type ({Id, Name}), ContactId and Banner; SerialNo and HardwareType are deprecated. Rows omit custom fields: get_agent has them. Deleted and client-inactivated devices are never listed. This server cannot delete or uninstall agents. Paging: pass next_cursor as cursor, same filters, until has_more is false.
+    Rows have LocationId, WarrantyStartDate/WarrantyEndDate, DisplayName, SerialNumber, Type ({Id, Name}), ContactId, Banner, LastLoggedOnUser, LastBootUpTime, LastDisconnectDateTime and SecurityPosture ({Antivirus, Firewall, Patches, Apps}, each {Id, Name, Passing}); SerialNo and HardwareType are deprecated. For failing posture or long-offline devices use search_agents. Rows omit custom fields: get_agent has them. Deleted and client-inactivated devices are never listed. This server cannot delete or uninstall agents. Paging: pass next_cursor as cursor, same filters, until has_more is false.
     """
     params, shown = _shared_filters(client_ids, query, created_since, created_before, updated_since, updated_before)
     params["StatusIds"] = csv_ids("status_ids", _agent_statuses("status_ids", status_ids))
     shown["status_ids"] = status_ids
+    shown["view"] = "summary" if view == "summary" else None  # shown only when it is not the default
     token = non_empty("cursor", cursor)
     size = clamp_page_size(page_size)
     page = await client_of(ctx).get_page(
         LIST_AGENTS_OP, query=params, page_size=size, cursor=token, tool="list_agents"
     )
+    if view == "summary":
+        page = dataclasses.replace(
+            page, items=summary_rows(page.items, AGENT_SUMMARY_FIELDS, op_key=LIST_AGENTS_OP, tool="list_agents")
+        )
     return paged_result(page, shown)
+
+
+def _now() -> datetime:
+    """The clock of search_agents (offline_days), an aware UTC time. One function, so that tests can replace it."""
+    return datetime.now(timezone.utc)
+
+
+def _search_limit(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= SEARCH_LIMIT_MAX:
+        raise ValueError(
+            f"limit: must be a whole number from 1 to {SEARCH_LIMIT_MAX}; narrow the filters to read more"
+        )
+    return value
+
+
+def _offline_days(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= OFFLINE_DAYS_MAX:
+        raise ValueError(f"offline_days: must be a whole number from 1 to {OFFLINE_DAYS_MAX}")
+    return value
+
+
+def _posture_items(value: Any) -> list[str] | None:
+    """posture_failing: a non-empty list of distinct item names (POSTURE_ITEMS), else a ValueError that names the parameter."""
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError(f"posture_failing: expected a non-empty list of {', '.join(POSTURE_ITEMS)}")
+    for position, item in enumerate(value):
+        if item not in POSTURE_ITEMS:
+            raise ValueError(f"posture_failing[{position}]: expected one of {', '.join(POSTURE_ITEMS)}, got {item!r}")
+    if len(set(value)) != len(value):
+        raise ValueError("posture_failing: each item may be named once; remove the duplicate")
+    return list(value)
+
+
+def _utc_moment(value: Any) -> datetime | None:
+    """A Gorelo timestamp as an aware UTC time, or None when it is not text, not ISO 8601 or has no UTC offset (nothing is guessed)."""
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        return None
+    try:
+        return moment.astimezone(timezone.utc)
+    except OverflowError:
+        return None
+
+
+def _row_os_matches(row: Mapping[str, Any], needle: str) -> bool | None:
+    """True when the case-insensitive text is part of Os, OsName or OsType; False when at least one of them is text and none
+    holds it (an empty string is text and does not match); None when none of the three is text. The spec marks all three as
+    non-nullable strings, so a row without any is a shape anomaly (unreadable), not a device that is not the wanted system."""
+    texts = [row[key] for key in ("Os", "OsName", "OsType") if isinstance(row.get(key), str)]
+    if not texts:
+        return None
+    return any(needle in text.casefold() for text in texts)
+
+
+def _row_posture(row: Mapping[str, Any], items: list[str]) -> bool | None:
+    """True when ANY named SecurityPosture item has Passing exactly false; None when none does but an item is missing or its
+    Passing is not a boolean (unreadable); False when every named item is readable and passing."""
+    posture = row.get("SecurityPosture")
+    unreadable = False
+    for item in items:
+        entry = posture.get(POSTURE_ITEMS[item]) if isinstance(posture, Mapping) else None
+        passing = entry.get("Passing") if isinstance(entry, Mapping) else None
+        if passing is False:
+            return True
+        if not isinstance(passing, bool):
+            unreadable = True
+    return None if unreadable else False
+
+
+def _row_offline(row: Mapping[str, Any], cutoff: datetime) -> bool | None:
+    """True when the Status Id is a known one other than 2 (Online) and LastDisconnectDateTime is at or before `cutoff`; False
+    for an Online row or a disconnect time after the cutoff; None when the Status Id is not a whole number or not on the scale
+    (AGENT_STATUS_LABELS), or the row is not Online and has no usable LastDisconnectDateTime (null, not text, not ISO 8601 or
+    without a UTC offset). An id Gorelo added since the scale was written is unreadable, never taken for "not Online"."""
+    status = row.get("Status")
+    status_id = status.get("Id") if isinstance(status, Mapping) else None
+    if isinstance(status_id, bool) or not isinstance(status_id, int) or status_id not in AGENT_STATUS_LABELS:
+        return None
+    if status_id == ONLINE_STATUS_ID:
+        return False
+    moment = _utc_moment(row.get("LastDisconnectDateTime"))
+    if moment is None:
+        return None
+    return moment <= cutoff
+
+
+@gorelo_tool(toolset="core", kind="read", ops=[LIST_AGENTS_OP], field_map=AGENT_SEARCH_FIELD_MAP)
+async def search_agents(
+    ctx: Context,
+    client_ids: Annotated[list[StrictId] | None, Field(description="Only these clients' agents (list_clients).")] = None,
+    status_ids: Annotated[list[StrictId] | None, Field(description=AGENT_STATUS_HELP)] = None,
+    query: Annotated[str | None, Field(description="Matches device name, display name and description.")] = None,
+    posture_failing: Annotated[
+        list[Literal["antivirus", "firewall", "patches", "apps"]] | None,
+        Field(description="Items to check, each once. A device matches when ANY named item has Passing false."),
+    ] = None,
+    offline_days: Annotated[
+        StrictId | None,
+        Field(description="1 to 3650. Devices not Online whose LastDisconnectDateTime is at least this many days old."),
+    ] = None,
+    os: Annotated[str | None, Field(description="Text in Os, OsName or OsType, any case, e.g. Windows, MacOS, Server.")] = None,
+    limit: Annotated[StrictId, Field(description="Most devices returned, 1-500.")] = SEARCH_LIMIT_DEFAULT,
+    view: Annotated[Literal["full", "summary"], Field(description=AGENT_VIEW_HELP)] = "summary",
+) -> dict:
+    """Find agents (managed devices) by failing security posture, time offline or operating system, scanning all pages. Returns items, count, total_count, matched, scanned, truncated, complete_scan, count_mismatch, note, filters.
+    client_ids, status_ids and query narrow on the server; posture_failing, offline_days and os apply to the rows read, and at least one is required (otherwise use list_agents). Conditions combine with AND. macOS agents report N/A (passing) for every posture item. total_count is Gorelo's count for client_ids, status_ids and query, not the matches; matched counts the rows meeting the row conditions. The scan costs one Gorelo request per 200 devices and reads up to 2000: truncated true means matches are missing (limit reached or scan capped): raise limit (max 500) or narrow the filters. count_mismatch true: agents changed during the scan, matches may be missing, repeat.
+    """
+    wanted_limit = _search_limit(limit)
+    items = _posture_items(posture_failing)
+    days = _offline_days(offline_days)
+    os_text = non_empty("os", os)
+    os_text = os_text.strip() if os_text is not None else None
+    needle = os_text.casefold() if os_text is not None else None
+    if items is None and days is None and needle is None:
+        raise ValueError(
+            "posture_failing, offline_days and os: give at least one of them (without a row condition use list_agents)"
+        )
+    params, shown = _shared_filters(client_ids, query, None, None, None, None)
+    params["StatusIds"] = csv_ids("status_ids", _agent_statuses("status_ids", status_ids))
+    shown["status_ids"] = status_ids
+    shown.update(
+        posture_failing=items, offline_days=days, os=os_text, limit=wanted_limit,
+        view="full" if view == "full" else None,  # shown only when it is not the default (summary)
+    )
+    cutoff = _now() - timedelta(days=days) if days is not None else None
+
+    scan = await client_of(ctx).get_all(
+        LIST_AGENTS_OP, query=params, page_size=SEARCH_PAGE_SIZE, max_items=SEARCH_SCAN_CAP, tool="search_agents"
+    )
+    matches: list[Mapping[str, Any]] = []
+    posture_unreadable = offline_unreadable = os_unreadable = 0
+    for position, row in enumerate(scan.items):
+        if not isinstance(row, Mapping):
+            raise GoreloAPIError(
+                f"{LIST_AGENTS_OP}: row {position} is {describe_value(row)}, not an object",
+                status=200, op_key=LIST_AGENTS_OP, kind="shape",
+            )
+        # one verdict per condition: True, False, or None when the row cannot be read for it (never a match)
+        verdicts: dict[str, bool | None] = {}
+        if needle is not None:
+            verdicts["os"] = _row_os_matches(row, needle)
+        if cutoff is not None:
+            verdicts["offline"] = _row_offline(row, cutoff)
+        if items is not None:
+            verdicts["posture"] = _row_posture(row, items)
+        if all(verdict is True for verdict in verdicts.values()):
+            matches.append(row)
+        elif all(verdict is not False for verdict in verdicts.values()):
+            # no condition rules the row out, so an unreadable one is the only reason it is not a match: count it
+            posture_unreadable += 1 if "posture" in verdicts and verdicts["posture"] is None else 0
+            offline_unreadable += 1 if "offline" in verdicts and verdicts["offline"] is None else 0
+            os_unreadable += 1 if "os" in verdicts and verdicts["os"] is None else 0
+    shown_rows = matches[:wanted_limit]
+    if view == "summary":
+        shown_rows = summary_rows(shown_rows, AGENT_SUMMARY_FIELDS, op_key=LIST_AGENTS_OP, tool="search_agents")
+    cut = len(matches) > wanted_limit
+    result = all_result(dataclasses.replace(scan, items=shown_rows), shown, truncated=cut or not scan.complete)
+    result["matched"] = len(matches)
+    result["scanned"] = len(scan.items)
+    notes: list[str] = []
+    if cut:
+        notes.append(
+            f"{len(matches)} agents matched and {wanted_limit} are returned: raise limit (max {SEARCH_LIMIT_MAX}) "
+            "or narrow the filters"
+        )
+    if not scan.complete:
+        of_total = f" of {scan.total_count}" if scan.total_count is not None else ""
+        notes.append(
+            f"the scan stopped after {len(scan.items)} agents (cap {SEARCH_SCAN_CAP}){of_total}, so matched counts only "
+            "those: add client_ids, status_ids or query so Gorelo narrows the set"
+        )
+    if scan.count_mismatch:
+        notes.append(
+            f"Gorelo reported {scan.total_count} agents but {len(scan.items)} rows were read (agents changed "
+            "during the scan): repeat the search"
+        )
+    if posture_unreadable:
+        notes.append(
+            f"{posture_unreadable} agents have a named SecurityPosture item that is missing or has no true/false Passing; "
+            "they are not counted as failing"
+        )
+    if offline_unreadable:
+        notes.append(
+            f"{offline_unreadable} agents have no known Status Id or, when not Online, no LastDisconnectDateTime with a "
+            "UTC offset; they never match offline_days"
+        )
+    if os_unreadable:
+        notes.append(f"{os_unreadable} agents have no text in Os, OsName and OsType; they never match os")
+    if notes:
+        result["note"] = "; ".join(notes)
+    return result
 
 
 @gorelo_tool(toolset="core", kind="read", ops=[GET_AGENT_OP], field_map=GET_AGENT_FIELD_MAP)

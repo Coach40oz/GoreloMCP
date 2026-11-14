@@ -4,7 +4,8 @@ Five tools:
 
     list_product_charges   read         GET /v1/product-charges (paged)
     get_product_charge     read         GET /v1/product-charges/{productChargeId}
-    create_product_charge  write        POST /v1/product-charges, then GET /v1/product-charges/{productChargeId}
+    create_product_charge  write        POST /v1/product-charges, then GET /v1/product-charges/{productChargeId}; a ticket number or
+                                        display number is first looked up with GET /v1/tickets
     update_product_charge  write        PATCH /v1/product-charges/{productChargeId}; destructive_hint
     delete_product_charge  destructive  DELETE /v1/product-charges/{productChargeId}; needs confirm=true
 
@@ -15,14 +16,16 @@ Ops owned by this module (keep the list in step with the ops=[...] of the declar
     GET /v1/product-charges/{productChargeId}
     PATCH /v1/product-charges/{productChargeId}
     DELETE /v1/product-charges/{productChargeId}
+    GET /v1/tickets
 
 Rules that shape the code (contract 6c30770dffc0, the descriptions of the raw spec):
 
 * A product charge is billed to the client of its ticket (or of its task's project) and is invoiced with that
   ticket's or project's other charges. It is the sibling of a time entry: POST answers only {Id}, so create reads the
   charge back with the single GET (reread_after_write); PATCH answers the full charge.
-* Exactly one of ticket_id and task_id (both GUIDs, like create_time_entry). The item is a product or bundle from
-  GET /v1/items. What a charge is charged to and its item cannot change: remove it and add another.
+* Exactly one of ticket_id and task_id. ticket_id is a GUID, a number (1234) or a display number (TCK-1234): resolve_ticket_id
+  (tools/_ticket_ref.py) looks a number up with GET /v1/tickets after the local checks and before the write, and a GUID
+  costs no request. task_id is a GUID. The item is a product or bundle from GET /v1/items. What a charge is charged to and its item cannot change: remove it and add another.
 * Gorelo refuses with 409 (plain refusals, nothing is written): create on a ticket that is closed, has no client or whose
   client is on credit hold, and on a task whose project is closed or has no client; update and delete while the ticket is
   closed, the task's project is closed, or the charge is waiting to be invoiced or has been invoiced. The tool texts say so
@@ -65,6 +68,7 @@ from tools._common import (
     require_confirm,
     utc_iso,
 )
+from tools._ticket_ref import TICKET_LIST_OP, resolve_ticket_id
 
 LIST_OP = "GET /v1/product-charges"
 GET_OP = "GET /v1/product-charges/{productChargeId}"
@@ -268,12 +272,14 @@ async def get_product_charge(
 # --------------------------------------------------------------------------
 
 
-@gorelo_tool(toolset=TOOLSET, kind="write", ops=[CREATE_OP, GET_OP], field_map=CREATE_FIELDS)
+@gorelo_tool(toolset=TOOLSET, kind="write", ops=[CREATE_OP, GET_OP, TICKET_LIST_OP], field_map=CREATE_FIELDS)
 async def create_product_charge(
     ctx: Context,
     item_id: Annotated[str, Field(description="Item GUID (list_items): an active product or bundle.")],
     quantity: Annotated[float, Strict(), Field(description=QUANTITY_TEXT)],
-    ticket_id: Annotated[str | None, Field(description="Ticket GUID (list_tickets), not the display number.")] = None,
+    ticket_id: Annotated[
+        str | StrictId | None, Field(description="Ticket GUID, number (1234) or display number (TCK-1234).")
+    ] = None,
     task_id: Annotated[str | None, Field(description="Task GUID (list_project_tasks, projects toolset).")] = None,
     unit_price: Annotated[float | None, Strict(), Field(description="Price of one unit. Default: the item's price.")] = None,
     unit_cost: Annotated[float | None, Strict(), Field(description="Cost of one unit, 0 or more. Default: the item's cost.")] = None,
@@ -287,15 +293,13 @@ async def create_product_charge(
     Resolve ids first: ticket_id -> list_tickets, task_id -> list_project_tasks (projects toolset), item_id -> list_items.
     Side effects: a real charge that will be invoiced; a second call charges twice. After a "did not confirm" error check list_product_charges before repeating. {Id, warning} means the charge exists: do not repeat.
     """
-    ticket = guid("ticket_id", ticket_id) if ticket_id is not None else None
     task = guid("task_id", task_id) if task_id is not None else None
-    if (ticket is None) == (task is None):
-        got = "both" if ticket is not None else "neither"
+    if (ticket_id is None) == (task is None):
+        got = "both" if ticket_id is not None else "neither"
         raise ValueError(
             f"ticket_id and task_id: give exactly one of them (a product is charged to one ticket or one task), got {got}"
         )
     values = {
-        "ticket_id": ticket,
         "task_id": task,
         "item_id": guid("item_id", item_id),
         "quantity": _quantity("quantity", quantity),
@@ -304,8 +308,11 @@ async def create_product_charge(
         "description": _description("description", description),
         "billable_status_id": _billable_status("billable_status_id", billable_status_id, void=False),
     }
+    client = client_of(ctx)
+    if ticket_id is not None:
+        values["ticket_id"] = await resolve_ticket_id(client, ticket_id, tool="create_product_charge")
     body = build_body(values, CREATE_FIELDS)
-    written = await client_of(ctx).post(CREATE_OP, json_body=body, tool="create_product_charge")
+    written = await client.post(CREATE_OP, json_body=body, tool="create_product_charge")
     new_id = created_id(written, CREATE_OP, tool="create_product_charge")
     return await reread_after_write(
         ctx, GET_OP, path_params={"productChargeId": new_id}, tool="create_product_charge", written_id=new_id

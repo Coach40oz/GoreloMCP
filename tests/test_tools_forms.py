@@ -36,7 +36,7 @@ DESCRIPTION_MAX, PARAM_DESCRIPTION_MAX = 900, 220  # CONTRIBUTING.md: never more
 EXPECTED_TOOLS = {
     "list_forms": ("read", ["GET /v1/forms"]),
     "list_form_responses": ("read", ["GET /v1/forms/{formId}/responses"]),
-    "create_form_submission_link": ("write", ["POST /v1/forms/{formId}/submission-links"]),
+    "create_form_submission_link": ("write", ["POST /v1/forms/{formId}/submission-links", "GET /v1/tickets"]),
 }
 SCOPE_NOTE = ("080203", "API key does not have 'Forms' scope")
 # The spec-text pins read the full published OpenAPI snapshot (spec/spec_index.json carries no description text).
@@ -223,7 +223,7 @@ ID_SOURCES = {
     "list_form_responses": {"form_id": "list_forms"},
     "create_form_submission_link": {
         "form_id": "list_forms",
-        "ticket_id": "list_tickets",
+        "ticket_id": "display number (TCK-1234)",  # a ticket is given as a GUID, a number or a display number
         "task_id": "list_project_tasks",
     },
 }
@@ -624,6 +624,56 @@ async def test_the_link_body_never_carries_anything_the_caller_did_not_give(serv
     assert "TaskId" not in mock_gorelo.last.json and "formId" not in mock_gorelo.last.json
 
 
+TICKET_ROW = {"Id": uid(5), "Number": 4242, "DisplayNumber": "TCK-4242"}
+
+
+@pytest.mark.parametrize("reference", ["TCK-4242", "tck-4242", "4242", 4242])
+async def test_a_number_or_display_number_is_resolved_and_the_link_is_issued_for_the_resolved_ticket(
+    server, mock_gorelo, reference
+):
+    mock_gorelo.on("GET", "/v1/tickets", paged_envelope([TICKET_ROW]))
+    mock_gorelo.on("POST", LINK_PATH, envelope(link()))
+    result = await call_tool(server, "create_form_submission_link", {"form_id": "aB3dE9", "ticket_id": reference})
+    assert result == link()
+    lookup, post = mock_gorelo.requests
+    assert (lookup.method, lookup.path, lookup.query["Query"]) == ("GET", "/v1/tickets", str(reference))
+    assert (post.method, post.path, post.json) == ("POST", LINK_PATH, {"TicketId": uid(5)})
+
+
+async def test_a_guid_makes_no_lookup_request(server, mock_gorelo):
+    mock_gorelo.on("POST", LINK_PATH, envelope(link()))
+    await call_tool(server, "create_form_submission_link", {"form_id": "aB3dE9", "ticket_id": uid(5)})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("POST", LINK_PATH)]
+
+
+async def test_an_unknown_number_stops_the_tool_before_the_link_is_issued(server, mock_gorelo):
+    mock_gorelo.on("GET", "/v1/tickets", paged_envelope([]))
+    mock_gorelo.on("POST", LINK_PATH, envelope(link()))
+    text = await call_tool_error(server, "create_form_submission_link", {"form_id": "aB3dE9", "ticket_id": "TCK-9999"})
+    assert text.startswith("ticket_id: no ticket has the number or display number 'TCK-9999'")
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", "/v1/tickets")]
+
+
+async def test_a_task_and_a_reference_together_are_refused_before_the_lookup(server, mock_gorelo):
+    text = await call_tool_error(
+        server, "create_form_submission_link", {"form_id": "aB3dE9", "ticket_id": "TCK-4242", "task_id": uid(6)}
+    )
+    assert "ticket_id and task_id: give at most one of them" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_a_link_for_a_task_makes_no_ticket_lookup(server, mock_gorelo):
+    mock_gorelo.on("POST", LINK_PATH, envelope(link()))
+    await call_tool(server, "create_form_submission_link", {"form_id": "aB3dE9", "task_id": uid(6)})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("POST", LINK_PATH)]
+
+
+def test_the_link_tool_declares_the_ticket_list_and_keeps_ticket_id_on_the_body_field():
+    spec = next(s for s in REGISTRY.specs if s.name == "create_form_submission_link")
+    assert "GET /v1/tickets" in spec.ops
+    assert spec.field_map["ticket_id"] == "TicketId"  # the body field of a 400; Query shares the parameter name
+
+
 async def test_both_a_ticket_and_a_task_is_a_local_error(server, mock_gorelo):
     text = await call_tool_error(
         server, "create_form_submission_link", {"form_id": "aB3dE9", "ticket_id": uid(5), "task_id": uid(6)}
@@ -642,8 +692,8 @@ async def test_both_a_ticket_and_a_task_is_a_local_error(server, mock_gorelo):
         ({"form_id": ""}, "form_id: expected a form Id from list_forms"),
         ({"form_id": "x" * 51}, "form_id: expected a form Id from list_forms"),
         ({"form_id": "a/../b"}, "form_id: expected a form Id from list_forms"),
-        ({"form_id": "aB3dE9", "ticket_id": "TCK-4242"}, "ticket_id: expected a GUID"),
-        ({"form_id": "aB3dE9", "ticket_id": ""}, "ticket_id: expected a GUID"),
+        ({"form_id": "aB3dE9", "ticket_id": ""}, "ticket_id: must not be empty"),
+        ({"form_id": "aB3dE9", "ticket_id": 0}, "ticket_id: expected a positive whole number"),
         ({"form_id": "aB3dE9", "task_id": "12345"}, "task_id: expected a GUID"),
         ({"form_id": "aB3dE9", "task_id": uid(1)[:-1]}, "task_id: expected a GUID"),
         ({}, "form_id"),
@@ -801,11 +851,12 @@ async def test_each_tool_sends_exactly_the_operations_it_declares(server, mock_g
     mock_gorelo.on("GET", "/v1/forms", paged_envelope([form()]))
     mock_gorelo.on("GET", "/v1/forms/aB3dE9/responses", paged_envelope([form_response()]))
     mock_gorelo.on("POST", LINK_PATH, envelope(link()))
+    mock_gorelo.on("GET", "/v1/tickets", paged_envelope([TICKET_ROW]))
     specs = module_specs()
     for name, args in (
         ("list_forms", {}),
         ("list_form_responses", {"form_id": "aB3dE9"}),
-        ("create_form_submission_link", {"form_id": "aB3dE9"}),
+        ("create_form_submission_link", {"form_id": "aB3dE9", "ticket_id": "TCK-4242"}),  # the lookup is declared too
     ):
         mock_gorelo.reset()
         await call_tool(server, name, args)

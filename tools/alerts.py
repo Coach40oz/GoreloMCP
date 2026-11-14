@@ -5,7 +5,7 @@ Tools:
     post_alert        write  POST /v1/alerts
     list_alerts       read   GET /v1/alerts
     get_alert         read   GET /v1/alerts/{alertId}
-    set_alert_status  write  PATCH /v1/alerts
+    set_alert_status  write  PATCH /v1/alerts (a ticket number or display number is first looked up with GET /v1/tickets)
 
 Ops owned by this module:
 
@@ -13,6 +13,7 @@ Ops owned by this module:
     GET /v1/alerts
     GET /v1/alerts/{alertId}
     PATCH /v1/alerts
+    GET /v1/tickets
 
 POST /v1/alerts (no trailing slash; the legacy tool used /alerts/) answers 200 with Data true. Data is
 a boolean, so post_alert returns {"ok": true} instead of the bare boolean that used to break the MCP
@@ -58,7 +59,9 @@ the alert list) changes with it. A Ticketed alert cannot change status or ticket
 (409); one refused alert changes nothing, and an id that is no alert of the account is a 400 that changes nothing. An alert that
 already has the status is left alone and is not in UpdatedIds, so a retried request is safe. The status words are the ones
 list_alerts takes (ALERT_STATUS_IDS). ticket_id is checked locally before any request: required with ticketed, refused with any
-other status. The answer is Gorelo's {UpdatedIds}; an answer without that list is an unconfirmed write.
+other status. It is a GUID, a number (1234) or a display number (TCK-1234): resolve_ticket_id (tools/_ticket_ref.py) looks a
+number up with GET /v1/tickets after the local checks and before the PATCH (a GUID costs no request), and the resolved GUID
+is the TicketId of the body. The answer is Gorelo's {UpdatedIds}; an answer without that list is an unconfirmed write.
 """
 
 from datetime import datetime
@@ -87,6 +90,7 @@ from tools._common import (
     positive_ids,
     utc_iso,
 )
+from tools._ticket_ref import TICKET_LIST_OP, resolve_ticket_id
 
 POST_OP = "POST /v1/alerts"
 LIST_OP = "GET /v1/alerts"
@@ -432,15 +436,13 @@ def _target_status(value: Any) -> str:
     return value
 
 
-def _ticket_for(status: str, ticket_id: Any) -> str | None:
+def _check_ticket_for(status: str, ticket_id: Any) -> None:
     """ticket_id: required with ticketed ("Required with StatusId 3"), refused with any other status ("accepted with nothing else")."""
     if status == "ticketed":
         if ticket_id is None:
             raise ValueError("ticket_id: required when status is 'ticketed' (the open ticket to link the alerts to, from list_tickets)")
-        return guid("ticket_id", ticket_id)
-    if ticket_id is not None:
+    elif ticket_id is not None:
         raise ValueError(f"ticket_id: only for status 'ticketed', not for {status!r}; leave it out")
-    return None
 
 
 def _alerts_unconfirmed(detail: str) -> GoreloAPIError:
@@ -453,7 +455,9 @@ def _alerts_unconfirmed(detail: str) -> GoreloAPIError:
     )
 
 
-@gorelo_tool(toolset="core", kind="write", ops=[SET_STATUS_OP], field_map=SET_STATUS_FIELD_MAP, destructive_hint=True)
+@gorelo_tool(
+    toolset="core", kind="write", ops=[SET_STATUS_OP, TICKET_LIST_OP], field_map=SET_STATUS_FIELD_MAP, destructive_hint=True
+)
 async def set_alert_status(
     ctx: Context,
     alert_ids: Annotated[list[str], Field(description="1 to 100 alert UUIDs (list_alerts); a repeated id counts once.")],
@@ -462,7 +466,8 @@ async def set_alert_status(
         Field(description="new=1 restores a dismissed alert, dismissed=2, ticketed=3 (needs ticket_id; final)."),
     ],
     ticket_id: Annotated[
-        str | None, Field(description="Ticket UUID (list_tickets): an open ticket, of the alerts' client. Required with ticketed, refused otherwise.")
+        str | StrictId | None,
+        Field(description="Open ticket of the alerts' client: GUID, number (1234) or display number (TCK-1234). Required with ticketed, refused otherwise."),
     ] = None,
 ) -> dict:
     """Set the status of 1 to 100 alerts at once (also one alert); returns Gorelo's {UpdatedIds}: the alerts named, in order, then the rest of their stacks.
@@ -472,11 +477,13 @@ async def set_alert_status(
     """
     ids = _alert_ids(alert_ids)
     word = _target_status(status)
-    ticket = _ticket_for(word, ticket_id)
+    _check_ticket_for(word, ticket_id)
+    client = client_of(ctx)
+    ticket = await resolve_ticket_id(client, ticket_id, tool="set_alert_status") if ticket_id is not None else None
     body = build_body(
         {"alert_ids": ids, "status": ALERT_STATUS_IDS[word], "ticket_id": ticket}, SET_STATUS_FIELD_MAP
     )
-    data = await client_of(ctx).patch(SET_STATUS_OP, json_body=body, tool="set_alert_status")
+    data = await client.patch(SET_STATUS_OP, json_body=body, tool="set_alert_status")
     result = expect_object(data, SET_STATUS_OP, tool="set_alert_status")
     updated = result.get("UpdatedIds")
     if not isinstance(updated, list):

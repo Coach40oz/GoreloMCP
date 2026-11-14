@@ -1363,6 +1363,71 @@ async def test_get_all_stops_at_max_items_and_says_so(client_factory, mock_gorel
         assert len(result.items) == 6 and result.complete is True
 
 
+async def test_get_all_stops_when_until_says_so_and_calls_it_after_each_page(client_factory, mock_gorelo):
+    pages = [[{"Id": 1}, {"Id": 2}], [{"Id": 3}, {"Id": 4}], [{"Id": 5}]]
+    mock_gorelo.on("GET", "/v1/clients", paged_responder(pages))
+    seen = []
+
+    def until(rows):
+        seen.append([row["Id"] for row in rows])
+        return len(rows) >= 3
+
+    async with client_factory() as client:
+        result = await client.get_all("GET /v1/clients", until=until, tool="t")
+    assert seen == [[1, 2], [1, 2, 3, 4]]  # the rows read so far, after each page, until it said yes
+    assert result == AllResult(items=[{"Id": i} for i in range(1, 5)], total_count=5, complete=False, pages=2, count_mismatch=False)
+    assert len(mock_gorelo.requests) == 2  # the third page was never asked for
+
+
+async def test_get_all_until_true_on_the_last_page_is_a_complete_scan(client_factory, mock_gorelo):
+    pages = [[{"Id": 1}, {"Id": 2}], [{"Id": 3}]]
+    mock_gorelo.on("GET", "/v1/clients", paged_responder(pages))
+    async with client_factory() as client:
+        result = await client.get_all("GET /v1/clients", until=lambda rows: len(rows) == 3, tool="t")
+    assert result == AllResult(items=[{"Id": i} for i in range(1, 4)], total_count=3, complete=True, pages=2, count_mismatch=False)
+
+
+async def test_get_all_until_that_never_says_yes_changes_nothing(client_factory, mock_gorelo):
+    pages = [[{"Id": 1}, {"Id": 2}], [{"Id": 3}]]
+    mock_gorelo.on("GET", "/v1/clients", paged_responder(pages))
+    calls = []
+    async with client_factory() as client:
+        result = await client.get_all("GET /v1/clients", until=lambda rows: calls.append(len(rows)) or False, tool="t")
+        plain = await client.get_all("GET /v1/clients", tool="t")
+    assert calls == [2, 3] and result == plain
+    assert plain == AllResult(items=[{"Id": i} for i in range(1, 4)], total_count=3, complete=True, pages=2, count_mismatch=False)
+
+
+async def test_get_all_until_gets_a_copy_so_it_cannot_change_the_result(client_factory, mock_gorelo):
+    mock_gorelo.on("GET", "/v1/clients", paged_responder([[{"Id": 1}, {"Id": 2}], [{"Id": 3}]]))
+
+    def until(rows):
+        rows.clear()
+        return False
+
+    async with client_factory() as client:
+        result = await client.get_all("GET /v1/clients", until=until, tool="t")
+    assert [row["Id"] for row in result.items] == [1, 2, 3]
+
+
+async def test_get_all_until_with_max_items_stops_at_whichever_comes_first(client_factory, mock_gorelo):
+    pages = [[{"Id": 1}, {"Id": 2}], [{"Id": 3}, {"Id": 4}], [{"Id": 5}]]
+    mock_gorelo.on("GET", "/v1/clients", paged_responder(pages))
+    async with client_factory() as client:
+        capped = await client.get_all("GET /v1/clients", max_items=3, until=lambda rows: len(rows) >= 5, tool="t")
+        early = await client.get_all("GET /v1/clients", max_items=5, until=lambda rows: len(rows) >= 2, tool="t")
+    assert (len(capped.items), capped.complete, capped.pages) == (3, False, 2)
+    assert (len(early.items), early.complete, early.pages) == (2, False, 1)
+
+
+async def test_get_all_until_must_answer_a_bool(client_factory, mock_gorelo):
+    mock_gorelo.on("GET", "/v1/clients", paged_responder([[{"Id": 1}]]))
+    async with client_factory() as client:
+        for bad in (1, None, "yes", []):
+            with pytest.raises(TypeError, match="until must return a bool"):
+                await client.get_all("GET /v1/clients", until=lambda rows, bad=bad: bad, tool="t")
+
+
 async def test_get_all_rejects_a_silly_max_items(client_factory):
     async with client_factory() as client:
         for bad in (0, -1):

@@ -2,6 +2,84 @@
 
 All notable changes to this project are listed here, newest first, in the plain style of Keep a Changelog.
 
+## 1.7.0 (2026-11-09)
+
+Makes the tools cheaper for the model to use and the server easier to check. Gorelo's API description is unchanged (170
+operations). A ticket can now be named by its number in every tool that takes one ticket, `search_tickets` reads less and filters
+more, long lists can come back as short summary rows, and the server says which version it is. There is one new tool. The server
+goes from 162 to 163 tools: 145 regular and 18 gated. With the default settings it goes from 99 to 100 tools (114 with the gated
+switch).
+
+### Added
+
+- `search_agents` (toolset `core`, read): finds devices by failing security posture (`posture_failing`: antivirus, firewall,
+  patches or apps; a device matches when any named item is not passing), by days offline (`offline_days`: not Online, and the last
+  disconnect at least that many days ago) and by operating system (`os`), on top of the `client_ids`, `status_ids` and `query`
+  filters that Gorelo applies. It scans up to 2000 devices, 200 per request, and says when matches are missing (`truncated`).
+  At least one of the three conditions is required; without one, use `list_agents`.
+- The server version. It is the `version` of `pyproject.toml`, shown in the MCP handshake, as `version=` on the start line of the
+  journal (`gorelo-mcp ready: version=1.7.0 toolsets=... destructive=... tools=N`) and as `version` in the `health_check` answer.
+  Compare it with what the chat shows when a tool seems to be missing (`docs/TROUBLESHOOTING.md`).
+- A ticket number in every tool that takes one ticket. `ticket_id` accepts the ticket GUID, a number (`1234`) or a display number
+  (`TCK-1234`) in `get_ticket`, `update_ticket`, `create_time_entry`, the nine comment, conversation and approval tools,
+  `create_product_charge`, `create_form_submission_link` and `set_alert_status`. A GUID costs no extra request; a number or display
+  number costs one lookup. Text that is plainly a malformed GUID is refused without a request, and a reference that matches no
+  ticket, matches several, or cannot be settled is refused with an error that names `ticket_id`. Lists of ticket ids (such as `ticket_ids` of `list_time_entries`) still take GUIDs only.
+- `view` on `list_tickets`, `search_tickets`, `list_agents`, `search_agents` and `list_invoices`: `summary` keeps only the
+  identifying, status, date and amount fields of each row, so a long list takes less of the conversation. `full` (all fields) is the
+  default, except for `search_agents`, which defaults to `summary`. A field a row does not have is left out, never invented.
+- `search_tickets` filters: `lead_assignee_ids`, `contact_ids`, `tag_ids`, `group_ids`, `device_ids`, `updated_before` and
+  `created_before`. `unassigned_only` cannot be combined with `lead_assignee_ids`, because nothing could match.
+- `create_time_entry` has `auto_service_line` (off unless asked for): it reads the ticket and uses the ticket's own service line
+  when it has one. Otherwise it reads the client's Active contracts and uses the one Hourly service line of the contracts that cover
+  the ticket (all locations or the ticket's location, and the entry's day inside the contract's dates). The Hourly line is used
+  even when those contracts also have other labor lines (Unlimited Hours, Block Hours, Limited Hours); a `note` then names them,
+  because Gorelo may have picked one of those on its own. If there are several Hourly lines, the call is refused and lists them
+  (pass `service_line_id`). A contract with an Hourly line that starts the day after the entry's day, or ended the day before,
+  is refused too: the entry's day is a UTC date and the tool does not know the time zone of Gorelo's contract dates. If there is
+  no Hourly line, the entry is created with no service line and a `note` says what Gorelo shows. It needs `ticket_id` and cannot
+  be combined with `service_line_id`, `no_service_line` or a task entry. Every read happens before the entry is written, so a
+  refusal writes nothing. A `note` or `warning` about the service line says only what the created entry shows when it is read back.
+- `update_document` has `edits`, a list of find and replace pairs applied in order to the stored body, and `return_body`. Each
+  `find` must occur exactly once in the text at that point, or nothing is written and the error names the item (it
+  never quotes the document). With `return_body=false` the answer has `BodyLength` in place of `Body`. For a small change to a long
+  document this saves sending and receiving the whole body.
+
+### Changed
+
+- `search_tickets` stops reading as soon as it holds one more match than `limit` (the new result field `stopped_early` is then true
+  and `matched` is a minimum; `total_count` is Gorelo's count for the filters Gorelo applies). Before, it read every matching page
+  (up to 5000 tickets) before it answered.
+- `search_tickets` with `exclude_closed` and no status filter now asks Gorelo only for the statuses whose base status is not
+  Closed (the ids are shown as `filters.exclude_closed_status_ids`), instead of reading closed tickets and dropping them. It always
+  drops tickets that have a close date; when you also name a status, that is its only check, so a Closed status can still be listed
+  and the `note` says so. If the statuses cannot be read that way, every status is read and the `note` says so.
+- `create_time_entry` adds a `note` to a Billable entry that reads back with no service line, so a client with a contract is not
+  billed at the default rate unnoticed, and a `warning` when a service line was sent but the entry reads back with none or another.
+- `health_check` returns `version` also when Gorelo fails, because the server version is known locally.
+- `update_ticket` no longer needs the ticket GUID: its error used to say to call `get_ticket` first for a number.
+- `list_agents` names the `SecurityPosture` and `LastDisconnectDateTime` fields of its rows in its text and points to
+  `search_agents`.
+- `GoreloClient.get_all` can stop a scan early when a caller says it has enough rows (internal; the result is then not marked
+  complete).
+
+### Documents and tests
+
+- `docs/TROUBLESHOOTING.md` has a new section, "The chat does not show a tool that the server registers": compare the `version` of
+  `health_check` and the `version=` and `tools=` of the start line with what the chat lists, then check the server version,
+  disconnect and reconnect the connector, start a new chat, check the per-tool switches of the connector, and for a gated tool
+  check `GORELO_ENABLE_DESTRUCTIVE`.
+- The README, the guides and `docs/tool-catalog.md` carry the new counts and the start line with its version.
+- The live smoke test calls `search_agents` once.
+
+### Notes
+
+- A server older than 1.7.0 prints no `version=` on its start line and `health_check` has no `version`; use the `tools=` number
+  alone to compare.
+- Looking a ticket up by number is one more request to Gorelo, and the API key has a shared rate limit, so a tool that is called
+  many times for one ticket is cheaper with the GUID.
+- Sharing a document, hidden custom fields and the sign-in of ChatGPT and Copilot Studio have not been tested live yet.
+
 ## 1.6.0 (2026-11-06)
 
 Follows Gorelo's new API description of 2026-11-05 (170 operations, 435 schemas): a new read for SLA policies and more SLA fields on

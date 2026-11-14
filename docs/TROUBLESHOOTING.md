@@ -21,6 +21,7 @@ journalctl -u gorelo-mcp.service --since "30 minutes ago" --no-pager
 | claude.ai keeps asking you to sign in | The refresh did not work, or `PUBLIC_BASE_URL` does not match the address. | See "Sign-in loops" below. |
 | The password page says too many attempts (HTTP 429) | Rate limit after wrong passwords. | Wait. See "Sign-in loops". |
 | Tools are missing in Claude | Old conversation, toolset not enabled, or connector switched off for the chat. | See "Tools are missing" below. |
+| The server registers a tool (the catalog and the `ready:` line say so) but the chat does not list it | The chat or the connector holds an older or smaller tool list than the server. | See "The chat does not show a tool that the server registers" below. |
 | Tool error `HTTP 403 ... does not have the 'Project' scope` (or `Forms`, or `Documents`) | The Gorelo key lacks that scope. The error names the missing access (read, write or delete) when Gorelo gives it. | Grant the scope on the key in Gorelo, or remove that toolset. |
 | Tool error `HTTP 403 ... does not have the 'Documents' scope with read access (Documents:read)` | The Gorelo key lacks the `Documents` scope. | Grant the scope on the key in Gorelo, or take `documents` out of `GORELO_TOOLSETS`. |
 | `health_check` returns `ok: false` with status 401, or a tool error `HTTP 401` | Gorelo did not accept the API key. | Check `GORELO_API_KEY`, and set `GORELO_BASE_URL` to the host of your account's region. See "API key rejected (HTTP 401)" below. |
@@ -127,6 +128,20 @@ The wrong-password limits count visitors by the address the server sees. The `au
 3. Check the `ready:` line: `journalctl -u gorelo-mcp.service --no-pager | grep ready | tail -n 1`. The `toolsets=` part must contain the toolset you expect (`projects`, `forms` and `documents` are off by default; see INSTALL step 8). The `tools=` number must match [tool-catalog.md](tool-catalog.md).
 4. Delete, void, approved-invoice, contract-write and sharing tools only exist when `GORELO_ENABLE_DESTRUCTIVE` switches them on: `1` for all of them, or a list that names the tool. The `gorelo-mcp gated tools:` line in the journal and the `gated_tools` field of `health_check` say which are on.
 5. After you change `.env`, restart the service: `systemctl restart gorelo-mcp.service`.
+
+## The chat does not show a tool that the server registers
+
+The server and the chat can disagree. The server registers its tools when it starts. claude.ai keeps the tool list it read from the server, an open chat keeps the list it started with, and the connector can hide single tools. So a tool can exist on the server and still be missing in a chat.
+
+How to tell. Ask Claude to run `health_check` and read `version`. Then read the `ready:` line of the journal: `journalctl -u gorelo-mcp.service --no-pager | grep "gorelo-mcp ready" | tail -n 1`. Its `version=` and `tools=` are what the server registers; compare `tools=` with [tool-catalog.md](tool-catalog.md) for your toolsets. If the chat lists fewer tools than `tools=` says, or lacks a tool that the catalog lists for your toolsets, the chat holds an older or smaller list. (Servers older than 1.7.0 print no `version=` and `health_check` has no `version`; use the `tools=` number alone.)
+
+Do these in order and stop when the tool appears:
+
+1. Confirm the server version. The `version` of `health_check` and the `version=` of the `ready:` line must both be the version you installed or updated to (INSTALL step 9). If they are older, the server has not been updated or was not restarted: finish the update first, then continue.
+2. In claude.ai: Settings, Connectors, open the connector, disconnect it and connect it again, so claude.ai reads the tool list again. Enter the password if it asks.
+3. Start a new chat. An open chat keeps the tool list it started with, so it never sees a tool added after that.
+4. Check the per-tool switches of the connector in claude.ai (the connector's settings list its tools). A tool switched off there is hidden from the chat even though the server registers it. Switch it on.
+5. For a gated tool (a delete, void, approved-invoice, contract-write or sharing tool), check `GORELO_ENABLE_DESTRUCTIVE` as [GATED-TOOLS.md](GATED-TOOLS.md) says. The `gorelo-mcp gated tools:` line of the journal and the `gated_tools` field of `health_check` name the gated tools that are on; a tool that is not named there is not registered, and `.env` needs its name (or `1`) and a restart.
 
 ## Gorelo errors
 

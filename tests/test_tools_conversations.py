@@ -50,9 +50,13 @@ SIDE_CONVERSATION = f"{CONVERSATIONS}/side-conversation"
 APPROVAL_CREATE = f"{CONVERSATIONS}/approval"
 APPROVAL_PATH = f"{BASE}/approvals/{APPROVAL}"
 
+EMPTY_TICKET = "ticket_id: must not be empty"
+
 TYPE_NAMES = {1: "Public", 2: "Private", 3: "Side Conversation", 4: "Approval"}
 
-EXPECTED = {
+TICKET_LIST = "GET /v1/tickets"  # the ticket reference lookup every tool of the module declares
+
+OWN_OPS = {
     "list_ticket_comments": ("read", ["GET /v1/tickets/{ticketId}/comments"]),
     "get_ticket_comment": ("read", ["GET /v1/tickets/{ticketId}/comments/{commentId}"]),
     "create_ticket_comment": (
@@ -78,6 +82,7 @@ EXPECTED = {
         ],
     ),
 }
+EXPECTED = {name: (kind, [*ops, TICKET_LIST]) for name, (kind, ops) in OWN_OPS.items()}
 # Write tools that overwrite existing data (update_*): they are not gated, but they carry destructiveHint.
 OVERWRITES = {"update_ticket_approval"}
 
@@ -293,7 +298,7 @@ async def test_the_docstrings_state_what_the_documentation_requires(server_facto
 @pytest.mark.parametrize(
     "name, param, fragments",
     [
-        ("list_ticket_comments", "ticket_id", ["list_tickets", "get_ticket"]),
+        ("list_ticket_comments", "ticket_id", ["GUID", "number (1234)", "display number (TCK-1234)"]),
         ("list_ticket_comments", "conversation_id", ["list_ticket_conversations", "conversation_types of that one type"]),
         ("get_ticket_comment", "comment_id", ["list_ticket_comments"]),
         ("create_ticket_comment", "conversation_id", ["side_conversation and approval", "list_ticket_conversations",
@@ -462,19 +467,20 @@ async def test_list_comments_accepts_the_id_in_any_uuid_spelling_and_sends_it_ca
 @pytest.mark.parametrize(
     "tool, arguments",
     [
-        ("list_ticket_comments", {"ticket_id": f"  {TICKET}\n"}),
-        ("list_ticket_conversations", {"ticket_id": f" {TICKET}"}),
-        ("get_ticket_comment", {"ticket_id": f"{TICKET} ", "comment_id": COMMENT}),
         ("get_ticket_comment", {"ticket_id": TICKET, "comment_id": f"\t{COMMENT}"}),
         ("get_ticket_approval", {"ticket_id": TICKET, "approval_id": f"{APPROVAL}\n"}),
-        ("create_ticket_comment", {"ticket_id": f" {TICKET}", "body": "<p>x</p>"}),
-        ("create_ticket_approval", {"ticket_id": f"{TICKET}\n", "name": "n", "contact_ids": [1]}),
-        ("create_ticket_side_conversation", {"ticket_id": f" {TICKET}", "name": "n", "email": "a@b.example"}),
     ],
 )
 async def test_an_id_with_surrounding_whitespace_is_refused_not_trimmed(server, mock_gorelo, tool, arguments):
-    # the shared guid() helper trims nothing and guesses nothing
+    # the shared guid() helper trims nothing and guesses nothing (the ticket reference is the one exception: the
+    # resolver trims it, see test_a_ticket_reference_with_surrounding_whitespace_is_trimmed)
     await refused(server, mock_gorelo, tool, arguments, "expected a GUID such as", "text that is not a GUID")
+
+
+async def test_a_ticket_reference_with_surrounding_whitespace_is_trimmed(server, mock_gorelo):
+    mock_gorelo.on("GET", COMMENTS, paged_envelope([]))
+    await call_tool(server, "list_ticket_comments", {"ticket_id": f"  {TICKET}\n"})
+    assert [r.path for r in mock_gorelo.requests] == [COMMENTS]
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
@@ -548,9 +554,8 @@ async def test_two_spellings_of_one_type_count_as_one_type_for_a_conversation_id
 @pytest.mark.parametrize(
     "arguments, fragments",
     [
-        ({"ticket_id": "TCK-4242"}, ["ticket_id: expected a GUID such as", "text that is not a GUID"]),
-        ({"ticket_id": "not-a-uuid"}, ["ticket_id: expected a GUID such as"]),
-        ({"ticket_id": ""}, ["ticket_id: expected a GUID such as", "an empty string"]),
+        ({"ticket_id": ""}, [EMPTY_TICKET, "a ticket GUID, a number such as 1234 or a display number such as TCK-1234"]),
+        ({"ticket_id": 0}, ["ticket_id: expected a positive whole number"]),
         ({"ticket_id": TICKET, "conversation_types": []}, ["conversation_types: must contain at least one of public, private, side_conversation, approval"]),
         ({"ticket_id": TICKET, "conversation_id": "  ", "conversation_types": ["approval"]}, ["conversation_id: must not be empty or whitespace only"]),
         ({"ticket_id": TICKET, "conversation_id": 0, "conversation_types": ["approval"]}, ["conversation_id: expected a positive whole number such as 123, got zero or a negative number"]),
@@ -628,7 +633,7 @@ async def test_get_comment_returns_the_record_unchanged(server, mock_gorelo):
 @pytest.mark.parametrize(
     "arguments, fragment",
     [
-        ({"ticket_id": "TCK-4242", "comment_id": COMMENT}, "ticket_id: expected a GUID such as"),
+        ({"ticket_id": "", "comment_id": COMMENT}, EMPTY_TICKET),
         ({"ticket_id": TICKET, "comment_id": "abc"}, "comment_id: expected a GUID such as"),
         ({"ticket_id": TICKET, "comment_id": ""}, "comment_id: expected a GUID such as"),
         ({"ticket_id": TICKET, "comment_id": COMMENT + "0"}, "comment_id: expected a GUID such as"),
@@ -895,8 +900,7 @@ async def test_create_comment_a_gateway_error_is_unconfirmed_and_is_not_retried(
     [
         ({"body": ""}, ["body: must not be empty or whitespace only"]),
         ({"body": "   \n\t"}, ["body: must not be empty or whitespace only"]),
-        ({"ticket_id": "TCK-4242"}, ["ticket_id: expected a GUID such as", "text that is not a GUID"]),
-        ({"ticket_id": ""}, ["ticket_id: expected a GUID such as"]),
+        ({"ticket_id": ""}, [EMPTY_TICKET]),
         ({"conversation_type": "bogus"}, ["conversation_type", "'private'", "'approval'"]),
         ({"conversation_type": "side_conversation"}, ["conversation_id: required when conversation_type is 'side_conversation'", "create_ticket_side_conversation"]),
         ({"conversation_type": "approval"}, ["conversation_id: required when conversation_type is 'approval'", "create_ticket_approval"]),
@@ -1009,9 +1013,9 @@ async def test_list_conversations_is_an_unpaged_list_with_no_query(server, mock_
     assert [row["Id"] for row in result["items"]] == [None, None, "4821", APPROVAL]  # Public and Private have a null Id
 
 
-@pytest.mark.parametrize("ticket_id", ["TCK-4242", "", "123", TICKET[:-1]])
-async def test_list_conversations_rejects_a_ticket_id_that_is_not_a_uuid(server, mock_gorelo, ticket_id):
-    await refused(server, mock_gorelo, "list_ticket_conversations", {"ticket_id": ticket_id}, "ticket_id: expected a GUID such as")
+@pytest.mark.parametrize("ticket_id", ["", "   ", 0, -5])
+async def test_list_conversations_rejects_a_blank_or_non_positive_ticket_reference_locally(server, mock_gorelo, ticket_id):
+    await refused(server, mock_gorelo, "list_ticket_conversations", {"ticket_id": ticket_id}, "ticket_id: ")
 
 
 async def test_list_conversations_maps_a_gorelo_error(server, mock_gorelo):
@@ -1117,7 +1121,7 @@ async def test_create_side_conversation_accepts_the_longest_allowed_values(serve
         ({"cc_emails": [""]}, ["cc_emails[0]: must not be empty or whitespace only"]),
         ({"cc_emails": ["a" * 39 + "@example.com"]}, ["cc_emails[0]: Gorelo accepts at most 50 characters"]),
         ({"cc_emails": "a@x.example"}, ["cc_emails"]),
-        ({"ticket_id": "TCK-4242"}, ["ticket_id: expected a GUID such as"]),
+        ({"ticket_id": ""}, [EMPTY_TICKET]),
     ],
 )
 async def test_create_side_conversation_local_validation_errors_make_no_http_call(server, mock_gorelo, arguments, fragments):
@@ -1265,7 +1269,7 @@ async def test_create_approval_a_success_without_an_id_is_unconfirmed(server, mo
         ({"contact_ids": ["5"]}, ["contact_ids.0", "valid integer"]),
         ({"contact_ids": [5.0]}, ["contact_ids.0", "valid integer"]),
         ({"contact_ids": [None]}, ["contact_ids.0"]),
-        ({"ticket_id": "TCK-4242"}, ["ticket_id: expected a GUID such as"]),
+        ({"ticket_id": ""}, [EMPTY_TICKET]),
     ],
 )
 async def test_create_approval_local_validation_errors_make_no_http_call(server, mock_gorelo, arguments, fragments):
@@ -1352,7 +1356,7 @@ def test_the_approval_status_words_are_the_ones_in_the_spec_summary():
 @pytest.mark.parametrize(
     "arguments, fragment",
     [
-        ({"ticket_id": "TCK-4242", "approval_id": APPROVAL}, "ticket_id: expected a GUID such as"),
+        ({"ticket_id": "", "approval_id": APPROVAL}, EMPTY_TICKET),
         ({"ticket_id": TICKET, "approval_id": "4821"}, "approval_id: expected a GUID such as"),
         ({"ticket_id": TICKET, "approval_id": ""}, "approval_id: expected a GUID such as"),
         ({"ticket_id": TICKET}, "approval_id"),
@@ -1565,11 +1569,9 @@ async def test_delete_comment_a_rate_limit_that_persists_is_not_an_unconfirmed_w
 @pytest.mark.parametrize(
     "arguments, fragment",
     [
-        ({"ticket_id": "TCK-4242", "comment_id": COMMENT}, "ticket_id: expected a GUID such as"),
         ({"ticket_id": TICKET, "comment_id": "abc"}, "comment_id: expected a GUID such as"),
         ({"ticket_id": TICKET, "comment_id": ".."}, "comment_id: expected a GUID such as"),
         ({"ticket_id": TICKET, "comment_id": f"{COMMENT}/.."}, "comment_id: expected a GUID such as"),
-        ({"ticket_id": f"{TICKET}/../{COMMENT}", "comment_id": COMMENT}, "ticket_id: expected a GUID such as"),
     ],
 )
 @pytest.mark.parametrize("confirm", [True, False])
@@ -1659,7 +1661,7 @@ async def test_update_approval_a_timeout_is_an_unconfirmed_write_and_is_not_retr
 @pytest.mark.parametrize(
     "arguments, fragment",
     [
-        ({"ticket_id": "nope", "approval_id": APPROVAL, "name": "n"}, "ticket_id: expected a GUID such as"),
+        ({"ticket_id": "", "approval_id": APPROVAL, "name": "n"}, EMPTY_TICKET),
         ({"ticket_id": TICKET, "approval_id": "nope", "name": "n"}, "approval_id: expected a GUID such as"),
         ({"ticket_id": TICKET, "approval_id": f"{APPROVAL}\n", "name": "n"}, "approval_id: expected a GUID such as"),
         ({"ticket_id": TICKET, "approval_id": APPROVAL, "name": ""}, "name: must not be empty or whitespace only"),
@@ -1761,3 +1763,142 @@ async def test_the_ticket_comment_body_tells_the_model_to_escape_angle_brackets(
     body = tools["create_ticket_comment"].inputSchema["properties"]["body"]["description"]
     assert body == "Comment body as HTML, not empty. " + ANGLE_BRACKET_TEXT
     assert len(body) <= 220
+
+
+# --------------------------------------------------------------------------
+# The ticket as a GUID, a number or a display number (resolve_ticket_id)
+# --------------------------------------------------------------------------
+
+TICKET_LIST_PATH = "/v1/tickets"
+TICKET_ROW = {"Id": TICKET, "Number": 4242, "DisplayNumber": "TCK-4242"}
+CONFIRM = {"confirm": True}
+
+# tool -> (arguments without ticket_id, routes: (method, path, answer)). Every route sits under BASE, the path of the
+# RESOLVED ticket GUID, so a request that went to any other ticket would find no route.
+REFERENCE_CASES = {
+    "list_ticket_comments": ({}, [("GET", COMMENTS, paged_envelope([]))]),
+    "get_ticket_comment": ({"comment_id": COMMENT}, [("GET", COMMENT_PATH, envelope(comment(2)))]),
+    "create_ticket_comment": (
+        {"body": "<p>x</p>"},
+        [("POST", COMMENTS, envelope({"Id": COMMENT})), ("GET", COMMENT_PATH, envelope(comment(2)))],
+    ),
+    "delete_ticket_comment": (
+        {"comment_id": COMMENT, **CONFIRM}, [("DELETE", COMMENT_PATH, envelope({"Id": COMMENT}))]
+    ),
+    "list_ticket_conversations": ({}, [("GET", CONVERSATIONS, envelope(conversation_rows()))]),
+    "create_ticket_side_conversation": (
+        {"name": "Vendor RMA", "email": "rma@vendor.example"}, [("POST", SIDE_CONVERSATION, envelope({"Id": 4821}))]
+    ),
+    "create_ticket_approval": (
+        {"name": "Approve", "contact_ids": [9103]},
+        [("POST", APPROVAL_CREATE, envelope({"Id": APPROVAL})), ("GET", APPROVAL_PATH, envelope(approval_record()))],
+    ),
+    "get_ticket_approval": ({"approval_id": APPROVAL}, [("GET", APPROVAL_PATH, envelope(approval_record()))]),
+    "update_ticket_approval": (
+        {"approval_id": APPROVAL, "name": "Renamed"},
+        [("PATCH", APPROVAL_PATH, envelope(approval_record())), ("GET", APPROVAL_PATH, envelope(approval_record()))],
+    ),
+}
+WRITE_TOOLS = ["create_ticket_comment", "delete_ticket_comment", "create_ticket_side_conversation",
+               "create_ticket_approval", "update_ticket_approval"]
+
+
+def mock_reference_tool(mock, tool, answer=None):
+    arguments, routes = REFERENCE_CASES[tool]
+    mock.on("GET", TICKET_LIST_PATH, answer if answer is not None else paged_envelope([TICKET_ROW]))
+    for method, path, body in routes:
+        mock.on(method, path, body)
+    return arguments, [(method, path) for method, path, _ in routes]
+
+
+def test_the_cases_cover_every_tool_of_the_module():
+    assert set(REFERENCE_CASES) == set(EXPECTED)
+
+
+@pytest.mark.parametrize("reference", ["TCK-4242", "tck-4242", "4242", 4242])
+@pytest.mark.parametrize("tool", sorted(REFERENCE_CASES))
+async def test_a_number_or_display_number_is_resolved_and_the_resolved_guid_is_used(
+    destructive_server, mock_gorelo, tool, reference
+):
+    arguments, routes = mock_reference_tool(mock_gorelo, tool)
+    await call_tool(destructive_server, tool, {"ticket_id": reference, **arguments})
+    lookup, *rest = mock_gorelo.requests
+    assert (lookup.method, lookup.path, lookup.query["Query"]) == ("GET", TICKET_LIST_PATH, str(reference))
+    assert [(r.method, r.path) for r in rest] == routes  # the tool's own requests, all on the resolved GUID
+
+
+async def test_the_result_of_list_comments_names_the_resolved_ticket(destructive_server, mock_gorelo):
+    mock_reference_tool(mock_gorelo, "list_ticket_comments")
+    result = await call_tool(destructive_server, "list_ticket_comments", {"ticket_id": "TCK-4242"})
+    assert result["filters"]["ticket_id"] == TICKET
+
+
+@pytest.mark.parametrize("spelling", [TICKET, TICKET.upper(), TICKET.replace("-", "")])
+@pytest.mark.parametrize("tool", sorted(REFERENCE_CASES))
+async def test_a_guid_makes_no_lookup_request(destructive_server, mock_gorelo, tool, spelling):
+    arguments, routes = mock_reference_tool(mock_gorelo, tool)
+    await call_tool(destructive_server, tool, {"ticket_id": spelling, **arguments})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == routes
+
+
+@pytest.mark.parametrize("tool", sorted(REFERENCE_CASES))
+async def test_an_unknown_number_is_an_error_naming_ticket_id(destructive_server, mock_gorelo, tool):
+    arguments, _ = mock_reference_tool(mock_gorelo, tool, answer=paged_envelope([]))
+    text = await call_tool_error(destructive_server, tool, {"ticket_id": "TCK-9999", **arguments})
+    assert text.startswith("ticket_id: no ticket has the number or display number 'TCK-9999'")
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", TICKET_LIST_PATH)]  # nothing written
+
+
+@pytest.mark.parametrize("tool", WRITE_TOOLS)
+async def test_an_ambiguous_number_stops_a_write_before_it(destructive_server, mock_gorelo, tool):
+    other = {"Id": uid(9), "Number": 4242, "DisplayNumber": "TCK-4242"}
+    arguments, _ = mock_reference_tool(mock_gorelo, tool, answer=paged_envelope([TICKET_ROW, other]))
+    text = await call_tool_error(destructive_server, tool, {"ticket_id": "4242", **arguments})
+    assert "ticket_id: '4242' matches several tickets" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+@pytest.mark.parametrize("extra", [{}, {"confirm": False}])
+async def test_delete_comment_without_confirm_makes_no_request_even_for_a_display_number(
+    destructive_server, mock_gorelo, extra
+):
+    mock_reference_tool(mock_gorelo, "delete_ticket_comment")
+    text = await call_tool_error(
+        destructive_server, "delete_ticket_comment", {"ticket_id": "TCK-4242", "comment_id": COMMENT, **extra}
+    )
+    assert text.startswith(f"confirm: refusing to delete comment {COMMENT} on ticket TCK-4242 without confirm=true.")
+    assert mock_gorelo.requests == []
+
+
+async def test_delete_comment_with_a_display_number_and_confirm_deletes_on_the_resolved_ticket(
+    destructive_server, mock_gorelo
+):
+    arguments, _ = mock_reference_tool(mock_gorelo, "delete_ticket_comment")
+    result = await call_tool(destructive_server, "delete_ticket_comment", {"ticket_id": "TCK-4242", **arguments})
+    assert result == {"Id": COMMENT}
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", TICKET_LIST_PATH), ("DELETE", COMMENT_PATH)]
+
+
+async def test_a_bad_other_parameter_is_refused_before_the_ticket_lookup(destructive_server, mock_gorelo):
+    mock_reference_tool(mock_gorelo, "create_ticket_comment")
+    await refused(
+        destructive_server, mock_gorelo, "create_ticket_comment", {"ticket_id": "TCK-4242", "body": "  "},
+        "body: must not be empty or whitespace only",
+    )
+    await refused(
+        destructive_server, mock_gorelo, "get_ticket_comment", {"ticket_id": "TCK-4242", "comment_id": "abc"},
+        "comment_id: expected a GUID such as",
+    )
+
+
+@pytest.mark.parametrize("tool", sorted(REFERENCE_CASES))
+def test_every_tool_declares_the_ticket_list_and_maps_ticket_id_to_query(tool):
+    spec = next(s for s in REGISTRY.specs if s.name == tool)
+    assert TICKET_LIST in spec.ops
+    assert spec.field_map["ticket_id"] == "Query"
+
+
+async def test_a_gorelo_400_on_the_ticket_lookup_names_ticket_id(destructive_server, mock_gorelo):
+    mock_gorelo.on("GET", TICKET_LIST_PATH, error_envelope(400, [("070101", "Query is too long.", "Query")]))
+    text = await call_tool_error(destructive_server, "list_ticket_comments", {"ticket_id": "TCK-4242"})
+    assert "ticket_id: Query is too long." in text and "Query:" not in text

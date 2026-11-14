@@ -79,6 +79,7 @@ from tools._common import (
     reread_after_write,
     require_confirm,
     server_info_of,
+    summary_rows,
     utc_iso,
 )
 
@@ -1402,9 +1403,71 @@ def test_server_info_of():
         sha256 = "abc"
 
     info = server_info_of(make_ctx(toolsets=["core"], destructive=True, gated_tools=["delete_item"], spec=Spec()))
-    assert info == {"toolsets": ["core"], "destructive": True, "gated_tools": ["delete_item"], "spec_sha256": "abc"}
+    assert info == {"toolsets": ["core"], "destructive": True, "gated_tools": ["delete_item"], "spec_sha256": "abc", "version": None}
+    assert server_info_of(make_ctx(version="1.7.0"))["version"] == "1.7.0"
     assert server_info_of(make_ctx(gated_tools=[]))["gated_tools"] == []  # none registered is an answer, not a missing value
-    assert server_info_of(make_ctx()) == {"toolsets": None, "destructive": None, "gated_tools": None, "spec_sha256": None}
+    assert server_info_of(make_ctx()) == {
+        "toolsets": None, "destructive": None, "gated_tools": None, "spec_sha256": None, "version": None,
+    }
+
+
+# --------------------------------------------------------------------------
+# summary_rows
+# --------------------------------------------------------------------------
+
+SUMMARY_OP = "GET /v1/tickets"
+
+
+def test_summary_rows_keeps_only_the_named_fields_in_the_given_order():
+    rows = [{"Title": "a", "Id": 1, "Body": "long text", "Status": {"Id": 2, "Name": "Open"}}, {"Id": 2, "Title": "b"}]
+    out = summary_rows(rows, ["Id", "Status", "Title"], op_key=SUMMARY_OP, tool="t")
+    assert out == [{"Id": 1, "Status": {"Id": 2, "Name": "Open"}, "Title": "a"}, {"Id": 2, "Title": "b"}]
+    assert [list(row) for row in out] == [["Id", "Status", "Title"], ["Id", "Title"]]  # the order of fields, not of the row
+    assert rows[0]["Body"] == "long text" and len(rows[0]) == 4  # the input is not changed
+    assert out is not rows
+
+
+def test_summary_rows_leaves_a_missing_field_out_and_keeps_a_null_one():
+    out = summary_rows([{"Id": 1, "ClosedOn": None}, {"Id": 2}], ["Id", "ClosedOn", "Nope"], op_key=SUMMARY_OP, tool="t")
+    assert out == [{"Id": 1, "ClosedOn": None}, {"Id": 2}]  # nothing is invented, not even a null
+    assert "ClosedOn" not in out[1] and all("Nope" not in row for row in out)
+
+
+def test_summary_rows_of_no_rows_is_no_rows_and_values_pass_through_unchanged():
+    assert summary_rows([], ("Id",), op_key=SUMMARY_OP, tool="t") == []
+    nested = {"A": [1, 2], "B": {"C": 0}}
+    out = summary_rows([{"Id": 0, "X": nested}], ("Id", "X"), op_key=SUMMARY_OP, tool="t")
+    assert out == [{"Id": 0, "X": nested}] and out[0]["X"] is nested
+
+
+@pytest.mark.parametrize("bad", [None, "x", 5, True, ["a"], [[1]], 1.5])
+def test_summary_rows_refuses_a_row_that_is_not_an_object_as_a_shape_error(bad):
+    with pytest.raises(GoreloAPIError) as info:
+        summary_rows([{"Id": 1}, bad], ["Id"], op_key=SUMMARY_OP, tool="list_tickets")
+    err = info.value
+    assert err.kind == "shape" and err.op_key == SUMMARY_OP and err.write_unconfirmed is False
+    assert str(err).startswith(f"{SUMMARY_OP}: row 1 is ") and str(err).endswith(", not an object; refusing to guess")
+
+
+def test_summary_rows_never_quotes_the_bad_row():
+    with pytest.raises(GoreloAPIError) as info:
+        summary_rows(["secret-value"], ["Id"], op_key=SUMMARY_OP, tool="t")
+    assert "secret-value" not in str(info.value) and "row 0 is a string, not an object" in str(info.value)
+
+
+def test_summary_rows_refuses_items_that_are_not_a_list():
+    for bad in (None, {"Id": 1}, "rows"):
+        with pytest.raises(GoreloAPIError, match="expected a list of rows but got") as info:
+            summary_rows(bad, ["Id"], op_key=SUMMARY_OP, tool="t")  # type: ignore[arg-type]
+        assert info.value.kind == "shape"
+
+
+@pytest.mark.parametrize("fields", [[], (), "Id", ["Id", "Id"], ["Id", ""], ["Id", "  "], ["Id", 3], None])
+def test_summary_rows_refuses_a_bad_field_list_before_reading_the_rows(fields):
+    with pytest.raises(ValueError, match="summary_rows: fields must be a non-empty list"):
+        summary_rows([{"Id": 1}], fields, op_key=SUMMARY_OP, tool="t")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="summary_rows: fields must be a non-empty list"):
+        summary_rows(["not a row"], fields, op_key=SUMMARY_OP, tool="t")  # type: ignore[arg-type]  # fields are checked first
 
 
 # --------------------------------------------------------------------------

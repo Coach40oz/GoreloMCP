@@ -36,7 +36,11 @@ Rules this module follows:
   positive_id/positive_ids; GUIDs go through guid/guids. This module keeps no copies of those helpers.
 * GET /v1/tickets filters on the server (ids, text, dates, close dates, sources). search_tickets sends everything the API can
   filter and applies only IsWaitingOnThem, LeadAssigneeId, IsUnread and ClosedOn on the rows it read; its
-  errors name the filter parameter involved.
+  errors name the filter parameter involved. It stops reading as soon as it holds limit + 1 matches (stopped_early; matched
+  is then a minimum), and exclude_closed without a status sends every status whose BaseStatus is not Closed (4).
+* list_tickets and search_tickets take view="summary": the rows keep only TICKET_SUMMARY_FIELDS (summary_rows).
+* A tool that takes one ticket (get_ticket, update_ticket) accepts a GUID, a number or a display number through
+  resolve_ticket_id (tools/_ticket_ref.py) and declares TICKET_LIST_OP. A list of ticket ids would stay GUID only.
 * POST and PATCH answer with only {"Id": ...}. created_id / expect_object refuse any other answer (a shape
   error that says the write may have been applied); then the record is read back with reread_after_write,
   which returns {"Id", "warning"} instead of raising when that read fails (the write already happened).
@@ -46,9 +50,13 @@ Rules this module follows:
   A record whose BillingOverride cannot be read with certainty (no such key, none of its four parts, a part
   that is not an object with an Id) is a shape error and no PATCH is sent; null, {}, null parts and an Id of
   null or 0 mean "not set".
-* Local validation errors name the snake_case parameter and happen before any write or scan. Only a status or
-  type NAME in search_tickets needs a lookup GET first (ids go through as they are), and only a partial
-  billing override in update_ticket needs a read before the write.
+* Local validation errors name the snake_case parameter and happen before any write, scan or lookup request (update_ticket
+  checks everything and builds its body first, and resolves a ticket number only then). The requests a call may spend before
+  its main one: search_tickets reads GET /v1/tickets/statuses or /types for a status or type NAME (ids go through as they are),
+  and GET /v1/tickets/statuses for exclude_closed without a status (it sends the ids of the statuses whose BaseStatus is not
+  Closed; with a status given by NAME the status row is read anyway and only decides a note); get_ticket and update_ticket
+  look a ticket number or display number up with GET /v1/tickets (Query, at most 20 pages, see tools/_ticket_ref.py), a GUID
+  costs nothing; and a partial billing override in update_ticket needs a read of the ticket before the write.
 * The read tools that take filters pass the query parameter names as their field_map, so a Gorelo 400 on
   StatusIds or PageSize reaches the model as status_ids or page_size.
 """
@@ -64,6 +72,7 @@ from pydantic import Field
 
 from gorelo_client import GoreloAPIError, GoreloClient
 from tools._common import (
+    FILTER_IDS_MAX,
     StrictBool,
     StrictId,
     all_result,
@@ -75,7 +84,6 @@ from tools._common import (
     describe_value,
     expect_object,
     gorelo_tool,
-    guid,
     guids,
     list_result,
     non_empty,
@@ -83,8 +91,10 @@ from tools._common import (
     positive_id,
     positive_ids,
     reread_after_write,
+    summary_rows,
     utc_iso,
 )
+from tools._ticket_ref import QUERY_MAX_CHARS, TICKET_LIST_OP, check_ticket_reference, resolve_ticket_id
 
 # --------------------------------------------------------------------------
 # Operations, tables and limits
@@ -136,7 +146,6 @@ BILLABLE_STATUSES: tuple[tuple[int, str], ...] = ((1, "Billable"), (2, "No charg
 BILLABLE_IDS = tuple(bid for bid, _ in BILLABLE_STATUSES)
 BILLABLE_HELP = ", ".join(f"{bid} {name}" for bid, name in BILLABLE_STATUSES)
 
-QUERY_MAX_CHARS = 200  # GET /v1/tickets Query: "Up to 200 characters"
 TITLE_MAX_CHARS = 250  # CreateTicketCommand.Title and UpdateTicketCommand.Title: "Maximum 250 characters"
 
 # search_tickets reads every page of the server-side matches, up to this many tickets, then filters.
@@ -144,11 +153,6 @@ SEARCH_SCAN_CAP = 5000
 SEARCH_PAGE_SIZE = 200
 SEARCH_LIMIT_DEFAULT = 50
 SEARCH_LIMIT_MAX = 500
-
-# get_ticket looks a number or display number up with Query (50 per page) and stops at the first page
-# that holds an exact match; this bounds the walk for a short number that matches many tickets.
-LOOKUP_PAGE_SIZE = 50
-LOOKUP_MAX_PAGES = 20
 
 # GET /v1/tickets DeviceIds: "Comma-separated agent ids (GUIDs, up to 100)".
 DEVICE_IDS_MAX = 100
@@ -182,13 +186,38 @@ SEARCH_ERROR_FIELDS: dict[str, str] = {
     "status": "StatusIds",
     "priority": "PriorityIds",
     "type": "TypeIds",
+    "lead_assignee_ids": "LeadAssigneeIds",
+    "contact_ids": "ContactIds",
+    "tag_ids": "TagIds",
+    "group_ids": "GroupIds",
+    "device_ids": "DeviceIds",
     "source_ids": "SourceIds",
     "query": "Query",
     "updated_since": "UpdatedSince",
+    "updated_before": "UpdatedBefore",
     "created_since": "CreatedSince",
+    "created_before": "CreatedBefore",
     "closed_since": "ClosedSince",
     "closed_before": "ClosedBefore",
 }
+
+# The filters list_tickets and search_tickets share, with the texts both show.
+LEAD_IDS_HELP = "Lead user ids (list_org_users)"
+CONTACT_IDS_HELP = "Primary contact ids (list_contacts)"
+TAG_IDS_HELP = "Tag ids, any match (list_ticket_tags)"
+GROUP_IDS_HELP = "Group ids, any match (list_org_groups)"
+DEVICE_IDS_HELP = "Agent asset GUIDs (list_agents), up to 100; a ticket matches if any is linked to it"
+
+# view="summary" keeps these fields of a ticket row (all are in TicketListItemModel), in this order.
+TICKET_SUMMARY_FIELDS: tuple[str, ...] = (
+    "Id", "Number", "DisplayNumber", "Title", "ClientId", "Status", "Priority", "Type", "LeadAssigneeId", "ContactId",
+    "CreatedOn", "UpdatedOn", "ClosedOn", "IsWaitingOnThem", "IsUnread",
+)
+VIEW_HELP = f"summary: only {', '.join(TICKET_SUMMARY_FIELDS)}. full: every field"
+
+# StatusListItemModel.BaseStatus {Id, Name}: the base status whose tickets exclude_closed leaves out (1 New, 2 Open, 3 Solved,
+# 4 Closed, 6 On Hold, measured 2026-11-09).
+BASE_STATUS_CLOSED = 4
 
 # The four search_tickets filters the API cannot do: parameter -> the ticket field it reads.
 CLIENT_SIDE_FILTERS: tuple[tuple[str, str], ...] = (
@@ -254,6 +283,10 @@ UPDATE_FIELDS: dict[str, str] = {
     "billing_work_type_id": "BillingOverride.WorkTypeId",
     "billable_status_id": "BillingOverride.BillableStatusId",
 }
+
+# ticket_id is looked up with the Query filter of GET /v1/tickets when it is a number or a display number, so a Gorelo 400 on
+# it reads as ticket_id.
+UPDATE_ERROR_FIELDS: dict[str, str] = {**UPDATE_FIELDS, "ticket_id": "Query"}
 
 # The billing_* parameters of update_ticket -> the part of GET /v1/tickets/{ticketId} BillingOverride
 # ({Id, Name} objects) that holds the current value.
@@ -404,6 +437,28 @@ def _shape_error(op_key: str, detail: str) -> GoreloAPIError:
     return GoreloAPIError(f"{op_key}: {detail}", status=200, op_key=op_key, kind="shape")
 
 
+def _entity_filters(
+    lead_assignee_ids: list[int] | None,
+    contact_ids: list[int] | None,
+    tag_ids: list[int] | None,
+    group_ids: list[int] | None,
+    device_ids: list[str] | None,
+) -> dict[str, list[Any] | None]:
+    """The checked lead, contact, tag, group and device filters of list_tickets and search_tickets, by parameter (None: not
+    given). Ids are positive whole numbers, devices are GUIDs, at most DEVICE_IDS_MAX of them."""
+    checked: dict[str, list[Any] | None] = {
+        "lead_assignee_ids": positive_ids("lead_assignee_ids", lead_assignee_ids),
+        "contact_ids": positive_ids("contact_ids", contact_ids),
+        "tag_ids": positive_ids("tag_ids", tag_ids),
+        "group_ids": positive_ids("group_ids", group_ids),
+    }
+    devices = guids("device_ids", device_ids)
+    if devices is not None and len(devices) > DEVICE_IDS_MAX:
+        raise ValueError(f"device_ids: at most {DEVICE_IDS_MAX} values, got {len(devices)}")
+    checked["device_ids"] = devices
+    return checked
+
+
 # --------------------------------------------------------------------------
 # Name resolution for search_tickets
 # --------------------------------------------------------------------------
@@ -455,11 +510,33 @@ def _match_name(param: str, name: str, entries: list[tuple[int, str]], *, noun: 
 
 
 async def _resolve_named(
-    client: GoreloClient, param: str, name: str, op_key: str, *, noun: str, plural: str, tool: str
+    client: GoreloClient,
+    param: str,
+    name: str,
+    op_key: str,
+    *,
+    noun: str,
+    plural: str,
+    tool: str,
+    rows_read: list[Any] | None = None,
 ) -> tuple[int, str]:
-    """Look a status or type NAME up in the tenant's list (GET op_key) and return its (id, canonical name)."""
+    """Look a status or type NAME up in the tenant's list (GET op_key) and return its (id, canonical name). When `rows_read`
+    is given the rows of that one read are put into it (search_tickets reads the BaseStatus of the status it found)."""
     rows = await client.get_list(op_key, tool=tool)
+    if rows_read is not None:
+        rows_read.extend(rows)
     return _match_name(param, name, _lookup_entries(rows), noun=noun, plural=plural)
+
+
+def _status_is_closed(rows: list[Any], status_id: int) -> bool:
+    """True when the status row with this Id has a BaseStatus whose Id is Closed (4); False when it has another base status or
+    the row cannot be read (no row, no BaseStatus): the caller then says nothing about it."""
+    for row in rows:
+        if isinstance(row, dict) and row.get("Id") == status_id:
+            base = row.get("BaseStatus")
+            base_id = base.get("Id") if isinstance(base, dict) else None
+            return isinstance(base_id, int) and not isinstance(base_id, bool) and base_id == BASE_STATUS_CLOSED
+    return False
 
 
 def _resolve_priority(param: str, value: str | int) -> tuple[int, str]:
@@ -497,27 +574,57 @@ def _flag(row: dict[str, Any], param: str, field: str) -> bool:
     )
 
 
-def _client_side_filter(
-    rows: list[Any], *, awaiting_client: bool | None, unassigned_only: bool, unread_only: bool, exclude_closed: bool
-) -> list[Any]:
-    """Apply the four filters the API cannot do. A field that no scanned row carries at all means Gorelo
-    renamed or dropped it (IsAwaitingClient became IsWaitingOnThem once), so that is an error, never a
-    silently wrong filter. Every error names the filter parameter it is about."""
+def _active_filters(
+    *, awaiting_client: bool | None, unassigned_only: bool, unread_only: bool, exclude_closed: bool
+) -> list[tuple[str, str]]:
+    """(parameter, ticket field) of every client-side filter that is on."""
     active = {
         "awaiting_client": awaiting_client is not None,
         "unassigned_only": unassigned_only,
         "unread_only": unread_only,
         "exclude_closed": exclude_closed,
     }
-    needed = [(param, field) for param, field in CLIENT_SIDE_FILTERS if active[param]]
-    if not needed:
-        return list(rows)
+    return [(param, field) for param, field in CLIENT_SIDE_FILTERS if active[param]]
+
+
+def _require_objects(rows: list[Any], needed: list[tuple[str, str]]) -> None:
+    """A row that is not an object cannot be filtered: an error that names the filters it blocks."""
     names = ", ".join(param for param, _ in needed)
     for row in rows:
         if not isinstance(row, dict):
             raise _shape_error(
                 OP_LIST, f"a ticket row is not an object, so the filter(s) {names} cannot be applied; refusing to guess"
             )
+
+
+def _row_passes(
+    row: dict[str, Any], *, awaiting_client: bool | None, unassigned_only: bool, unread_only: bool, exclude_closed: bool
+) -> bool:
+    if awaiting_client is not None and _flag(row, "awaiting_client", "IsWaitingOnThem") is not awaiting_client:
+        return False
+    if unassigned_only and row.get("LeadAssigneeId") is not None:
+        return False
+    if unread_only and not _flag(row, "unread_only", "IsUnread"):
+        return False
+    return not (exclude_closed and row.get("ClosedOn") is not None)
+
+
+def _client_side_filter(
+    rows: list[Any], *, awaiting_client: bool | None, unassigned_only: bool, unread_only: bool, exclude_closed: bool
+) -> list[Any]:
+    """Apply the four filters the API cannot do. A field that no scanned row carries at all means Gorelo
+    renamed or dropped it (IsAwaitingClient became IsWaitingOnThem once), so that is an error, never a
+    silently wrong filter. Every error names the filter parameter it is about."""
+    flags = {
+        "awaiting_client": awaiting_client,
+        "unassigned_only": unassigned_only,
+        "unread_only": unread_only,
+        "exclude_closed": exclude_closed,
+    }
+    needed = _active_filters(**flags)
+    if not needed:
+        return list(rows)
+    _require_objects(rows, needed)
     for param, field in needed:
         if rows and not any(field in row for row in rows):
             raise _shape_error(
@@ -525,18 +632,51 @@ def _client_side_filter(
                 f"none of the {len(rows)} scanned ticket rows has a {field} field, so the {param} filter "
                 "cannot be applied; Gorelo may have renamed it (refusing to guess)",
             )
-    kept: list[Any] = []
+    return [row for row in rows if _row_passes(row, **flags)]
+
+
+def _count_matches(
+    rows: list[Any], *, awaiting_client: bool | None, unassigned_only: bool, unread_only: bool, exclude_closed: bool
+) -> int:
+    """How many of `rows` pass the client-side filters (every row, when none is on). The scan calls it on each new page
+    only; _client_side_filter then runs once on all the rows and keeps the checks of a field that no row carries."""
+    flags = {
+        "awaiting_client": awaiting_client,
+        "unassigned_only": unassigned_only,
+        "unread_only": unread_only,
+        "exclude_closed": exclude_closed,
+    }
+    needed = _active_filters(**flags)
+    if not needed:
+        return len(rows)
+    _require_objects(rows, needed)
+    return sum(_row_passes(row, **flags) for row in rows)
+
+
+def _open_status_ids(rows: list[Any]) -> tuple[list[int] | None, str | None]:
+    """(the ids of every status whose BaseStatus is not Closed, None) or (None, why the search is not narrowed).
+
+    exclude_closed without a status sends these ids as StatusIds, so Gorelo leaves the tickets of a Closed status out. Not
+    narrowing is the old behaviour (every status is read, the ClosedOn check alone applies); it happens when a status row
+    has no BaseStatus {Id} that is a whole number or a kept row has no usable Id, when no status would remain, and when more
+    ids would remain than one id filter takes (FILTER_IDS_MAX)."""
+    open_ids: list[int] = []
     for row in rows:
-        if awaiting_client is not None and _flag(row, "awaiting_client", "IsWaitingOnThem") is not awaiting_client:
+        base = row.get("BaseStatus") if isinstance(row, dict) else None
+        base_id = base.get("Id") if isinstance(base, dict) else None
+        if isinstance(base_id, bool) or not isinstance(base_id, int):
+            return None, "a status row has no BaseStatus Id that is a whole number"
+        if base_id == BASE_STATUS_CLOSED:
             continue
-        if unassigned_only and row.get("LeadAssigneeId") is not None:
-            continue
-        if unread_only and not _flag(row, "unread_only", "IsUnread"):
-            continue
-        if exclude_closed and row.get("ClosedOn") is not None:
-            continue
-        kept.append(row)
-    return kept
+        status_id = row.get("Id")
+        if isinstance(status_id, bool) or not isinstance(status_id, int) or status_id < 1:
+            return None, "a status row has no usable Id"
+        open_ids.append(status_id)
+    if not open_ids:
+        return None, "no status would remain"
+    if len(open_ids) > FILTER_IDS_MAX:
+        return None, f"{len(open_ids)} statuses remain and one filter takes at most {FILTER_IDS_MAX} ids"
+    return open_ids, None
 
 
 def _search_limit(value: Any) -> int:
@@ -546,99 +686,6 @@ def _search_limit(value: Any) -> int:
             "or page through list_tickets with next_cursor, to read more"
         )
     return value
-
-
-# --------------------------------------------------------------------------
-# Lookups behind get_ticket
-# --------------------------------------------------------------------------
-
-
-def _ticket_reference(value: Any) -> str:
-    if isinstance(value, int) and not isinstance(value, bool):
-        positive_id("ticket_id", value)
-    text = str(value).strip() if isinstance(value, (str, int)) and not isinstance(value, bool) else ""
-    if not text:
-        raise ValueError(
-            "ticket_id: must not be empty; give a ticket GUID, a number such as 1234 or a display number such as "
-            "TCK-1234"
-        )
-    if len(text) > QUERY_MAX_CHARS:
-        raise ValueError(f"ticket_id: at most {QUERY_MAX_CHARS} characters, got {len(text)}")
-    return text
-
-
-def _is_reference_match(row: dict[str, Any], wanted: str) -> bool:
-    number = row.get("Number")
-    if number is not None and not isinstance(number, bool) and str(number).casefold() == wanted:
-        return True
-    display = row.get("DisplayNumber")
-    return isinstance(display, str) and display.strip().casefold() == wanted
-
-
-def _row_id(row: dict[str, Any]) -> str:
-    row_id = row.get("Id")
-    if not isinstance(row_id, str) or not row_id.strip():
-        raise _shape_error(OP_LIST, "a ticket row has no Id; refusing to guess")
-    return row_id.strip()
-
-
-def _label(row: dict[str, Any]) -> str:
-    return f"{row.get('DisplayNumber') or row.get('Number')} (Id {row.get('Id')})"
-
-
-async def _find_ticket_id(client: GoreloClient, reference: str) -> str:
-    """Resolve a ticket number or display number to the ticket GUID: search with Query, keep the rows whose
-    Number or DisplayNumber equals the text (case-insensitive). Stops at the first page with a match, and
-    never reads more than LOOKUP_MAX_PAGES pages."""
-    wanted = reference.casefold()
-    matches: dict[str, dict[str, Any]] = {}
-    seen_cursors: set[str] = set()
-    cursor: str | None = None
-    rows_read = 0
-    total: int | None = None
-    more = False
-    for _ in range(LOOKUP_MAX_PAGES):
-        page = await client.get_page(
-            OP_LIST, query={"Query": reference}, page_size=LOOKUP_PAGE_SIZE, cursor=cursor, tool="get_ticket"
-        )
-        rows_read += len(page.items)
-        total = page.total_count
-        for row in page.items:
-            if not isinstance(row, dict):
-                raise _shape_error(OP_LIST, "a ticket row is not an object; refusing to guess")
-            if _is_reference_match(row, wanted):
-                matches.setdefault(_row_id(row), row)
-        more = page.has_more
-        if matches or not more:
-            break
-        cursor = page.next_cursor
-        if cursor is None or cursor in seen_cursors:
-            raise _shape_error(OP_LIST, "Gorelo returned a cursor it had already served; refusing to loop")
-        seen_cursors.add(cursor)
-    if len(matches) == 1:
-        return next(iter(matches))
-    if matches:
-        listing = "; ".join(_label(row) for row in matches.values())
-        raise ValueError(
-            f"ticket_id: {reference!r} matches several tickets: {listing}. Pass the ticket GUID of the one you mean"
-        )
-    if more:
-        shown_total = f" of {total}" if total is not None else ""
-        raise ValueError(
-            f"ticket_id: {reference!r} was not found in the first {rows_read}{shown_total} tickets Gorelo returned for "
-            "that text (the lookup reads at most "
-            f"{LOOKUP_MAX_PAGES} pages), so it is inconclusive. Pass the ticket GUID, or a longer display number "
-            "such as TCK-1234"
-        )
-    found = (
-        f"Gorelo returned {rows_read} ticket(s) matching that text, none with that exact number"
-        if rows_read
-        else "Gorelo found no ticket matching that text"
-    )
-    raise ValueError(
-        f"ticket_id: no ticket has the number or display number {reference!r} ({found}). Pass a ticket GUID, "
-        "a number such as 1234 or a display number such as TCK-1234; to search titles use list_tickets with query"
-    )
 
 
 # --------------------------------------------------------------------------
@@ -656,13 +703,11 @@ async def list_tickets(
         Field(description="Priority ids: 0 None, 1 Urgent, 2 High, 3 Normal, 4 Low (list_ticket_priorities)"),
     ] = None,
     type_ids: Annotated[list[StrictId] | None, Field(description="Type ids (list_ticket_types)")] = None,
-    lead_assignee_ids: Annotated[list[StrictId] | None, Field(description="Lead user ids (list_org_users)")] = None,
-    contact_ids: Annotated[list[StrictId] | None, Field(description="Primary contact ids (list_contacts)")] = None,
-    tag_ids: Annotated[list[StrictId] | None, Field(description="Tag ids, any match (list_ticket_tags)")] = None,
-    group_ids: Annotated[list[StrictId] | None, Field(description="Group ids, any match (list_org_groups)")] = None,
-    device_ids: Annotated[
-        list[str] | None, Field(description="Agent asset GUIDs (list_agents), up to 100; a ticket matches if any is linked to it")
-    ] = None,
+    lead_assignee_ids: Annotated[list[StrictId] | None, Field(description=LEAD_IDS_HELP)] = None,
+    contact_ids: Annotated[list[StrictId] | None, Field(description=CONTACT_IDS_HELP)] = None,
+    tag_ids: Annotated[list[StrictId] | None, Field(description=TAG_IDS_HELP)] = None,
+    group_ids: Annotated[list[StrictId] | None, Field(description=GROUP_IDS_HELP)] = None,
+    device_ids: Annotated[list[str] | None, Field(description=DEVICE_IDS_HELP)] = None,
     source_ids: Annotated[
         list[StrictId] | None,
         Field(description="Source ids, up to 100: 1 Web, 2 Email, 3 Phone, 4 Chat, 5 Alert, 6 Api, 7 Messenger (list_ticket_sources)"),
@@ -678,6 +723,7 @@ async def list_tickets(
     sort_order: Annotated[Literal["asc", "desc"] | None, Field(description="Default desc")] = None,
     page_size: Annotated[int, Field(description="1-200")] = 50,
     cursor: Annotated[str | None, Field(description="next_cursor from the previous call, same filters")] = None,
+    view: Annotated[Literal["full", "summary"], Field(description=VIEW_HELP)] = "full",
 ) -> dict:
     """List one page of tickets, newest update first unless sorted. Returns items plus count, total_count, has_more,
     next_cursor.
@@ -696,15 +742,8 @@ async def list_tickets(
         "client_ids": positive_ids("client_ids", client_ids),
         "priority_ids": _each("priority_ids", priority_ids, _priority_id),
         "type_ids": positive_ids("type_ids", type_ids),
-        "lead_assignee_ids": positive_ids("lead_assignee_ids", lead_assignee_ids),
-        "contact_ids": positive_ids("contact_ids", contact_ids),
-        "tag_ids": positive_ids("tag_ids", tag_ids),
-        "group_ids": positive_ids("group_ids", group_ids),
     }
-    devices = guids("device_ids", device_ids)
-    if devices is not None and len(devices) > DEVICE_IDS_MAX:
-        raise ValueError(f"device_ids: at most {DEVICE_IDS_MAX} values, got {len(devices)}")
-    checked["device_ids"] = devices
+    checked.update(_entity_filters(lead_assignee_ids, contact_ids, tag_ids, group_ids, device_ids))
     checked["source_ids"] = _each("source_ids", source_ids, _source_filter_id)
     api_query: dict[str, Any] = {}
     filters: dict[str, Any] = {}
@@ -735,10 +774,16 @@ async def list_tickets(
         if value is not None:
             api_query[LIST_QUERY_FIELDS[param]] = value
             filters[param] = value
+    if view == "summary":
+        filters["view"] = view
     token = non_empty("cursor", cursor)
     page = await client_of(ctx).get_page(
         OP_LIST, query=api_query, page_size=clamp_page_size(page_size), cursor=token, tool="list_tickets"
     )
+    if view == "summary":
+        page = dataclasses.replace(
+            page, items=summary_rows(page.items, TICKET_SUMMARY_FIELDS, op_key=OP_LIST, tool="list_tickets")
+        )
     return paged_result(page, filters)
 
 
@@ -755,13 +800,20 @@ async def search_tickets(
     type: Annotated[
         str | StrictId | None, Field(description="Type name (exact, any case) or id (list_ticket_types)")
     ] = None,
+    lead_assignee_ids: Annotated[list[StrictId] | None, Field(description=LEAD_IDS_HELP)] = None,
+    contact_ids: Annotated[list[StrictId] | None, Field(description=CONTACT_IDS_HELP)] = None,
+    tag_ids: Annotated[list[StrictId] | None, Field(description=TAG_IDS_HELP)] = None,
+    group_ids: Annotated[list[StrictId] | None, Field(description=GROUP_IDS_HELP)] = None,
+    device_ids: Annotated[list[str] | None, Field(description=DEVICE_IDS_HELP)] = None,
     source_ids: Annotated[
         list[StrictId] | None,
         Field(description="Source ids, up to 100: 1 Web, 2 Email, 3 Phone, 4 Chat, 5 Alert, 6 Api, 7 Messenger (list_ticket_sources)"),
     ] = None,
     query: Annotated[str | None, Field(description="Text in title, number or display number (max 200)")] = None,
     updated_since: Annotated[str | None, Field(description="Updated at or after (ISO 8601)")] = None,
+    updated_before: Annotated[str | None, Field(description="Updated before (ISO 8601)")] = None,
     created_since: Annotated[str | None, Field(description="Created at or after (ISO 8601)")] = None,
+    created_before: Annotated[str | None, Field(description="Created before (ISO 8601)")] = None,
     closed_since: Annotated[str | None, Field(description="Closed at or after (ISO 8601); never-closed tickets are left out")] = None,
     closed_before: Annotated[str | None, Field(description="Closed before (ISO 8601); never-closed tickets are left out")] = None,
     unassigned_only: Annotated[bool, Field(description="True: only tickets with no lead assignee")] = False,
@@ -769,28 +821,43 @@ async def search_tickets(
         bool | None, Field(description="True: waiting on the client; false: not; omit: both")
     ] = None,
     unread_only: Annotated[bool, Field(description="True: only unread tickets")] = False,
-    exclude_closed: Annotated[bool, Field(description="True: drop tickets with a close date")] = False,
+    exclude_closed: Annotated[
+        bool,
+        Field(
+            description="True: with no status, ask only for non-Closed statuses; always drop tickets with a ClosedOn time "
+            "(with a status, that is the only check)"
+        ),
+    ] = False,
     limit: Annotated[int, Field(description="Most tickets returned, 1-500")] = SEARCH_LIMIT_DEFAULT,
+    view: Annotated[Literal["full", "summary"], Field(description=VIEW_HELP)] = "full",
 ) -> dict:
-    """Find tickets by client, status, priority, type, source, text, dates, waiting, unassigned, unread or open state,
-    scanning all matching pages. Returns items, count, total_count, matched, scanned, truncated, complete_scan,
-    count_mismatch, filters.
+    """Find tickets by client, status, priority, type, source, text, dates, lead, contact, tag, group, device or state.
+    Returns items, count, total_count, matched, scanned, truncated, complete_scan, stopped_early, count_mismatch, filters.
 
-    awaiting_client, unassigned_only, unread_only and exclude_closed are applied to the rows read, the rest on the
-    server (total_count counts those matches). Filters combine with AND.
-    The scan reads up to 5000 tickets. truncated true: matches are missing (limit reached, or complete_scan false
-    because of that cap): raise limit (max 500) or narrow the filters. count_mismatch true: tickets changed mid-scan,
-    repeat the search.
+    awaiting_client, unassigned_only, unread_only and the ClosedOn check of exclude_closed run on the rows read, the rest
+    on the server. Filters combine with AND. exclude_closed without status asks only for non-Closed statuses; with status it
+    drops only tickets with a ClosedOn time, so a Closed status can still be listed.
+    The scan stops once it holds limit + 1 matches: stopped_early is true and matched is a minimum (total_count is
+    Gorelo's count for the server-side filters). Otherwise it reads up to 5000 tickets. truncated true: matches are
+    missing: raise limit (max 500) or narrow the filters. count_mismatch true: repeat.
     Side effects: None (read-only).
     """
     client = client_of(ctx)
     wanted_limit = _search_limit(limit)
     client_value = _optional(positive_id, "client_id", client_id)
     query_text = _query_text("query", query)
-    updated = _instant("updated_since", updated_since)
-    created = _instant("created_since", created_since)
+    entities = _entity_filters(lead_assignee_ids, contact_ids, tag_ids, group_ids, device_ids)
+    updated = (_instant("updated_since", updated_since), _instant("updated_before", updated_before))
+    created = (_instant("created_since", created_since), _instant("created_before", created_before))
     closed = (_instant("closed_since", closed_since), _instant("closed_before", closed_before))
+    _check_window("updated_since", updated[0], "updated_before", updated[1])
+    _check_window("created_since", created[0], "created_before", created[1])
     _check_window("closed_since", closed[0], "closed_before", closed[1])
+    if unassigned_only and lead_assignee_ids is not None:
+        raise ValueError(
+            "unassigned_only: cannot be combined with lead_assignee_ids (unassigned_only keeps tickets with no lead "
+            "assignee, lead_assignee_ids keeps tickets with one of those leads, so nothing could match); drop one of them"
+        )
     if exclude_closed and (closed[0][0] is not None or closed[1][0] is not None):
         raise ValueError(
             "exclude_closed: cannot be combined with closed_since or closed_before (they keep only closed tickets, "
@@ -804,11 +871,19 @@ async def search_tickets(
     status_target = _id_or_name("status", status) if status is not None else None
     type_target = _id_or_name("type", type) if type is not None else None
     status_match: tuple[int, str | None] | None = None
+    status_rows: list[Any] = []  # the status list, when a status NAME made us read it
     if isinstance(status_target, int):
         status_match = (status_target, None)
     elif status_target is not None:
         status_match = await _resolve_named(
-            client, "status", status_target, OP_STATUSES, noun="status", plural="statuses", tool="search_tickets"
+            client,
+            "status",
+            status_target,
+            OP_STATUSES,
+            noun="status",
+            plural="statuses",
+            tool="search_tickets",
+            rows_read=status_rows,
         )
     type_match: tuple[int, str | None] | None = None
     if isinstance(type_target, int):
@@ -817,6 +892,21 @@ async def search_tickets(
         type_match = await _resolve_named(
             client, "type", type_target, OP_TYPES, noun="type", plural="types", tool="search_tickets"
         )
+    open_status_ids: list[int] | None = None
+    notes: list[str] = []
+    if exclude_closed and status_match is not None and _status_is_closed(status_rows, status_match[0]):
+        # exclude_closed never changes the status filter that was given: only the ClosedOn check applies, so say so.
+        notes.append(
+            f"status {status_match[1]!r} is a Closed status (BaseStatus 4): exclude_closed did not remove its tickets, it "
+            "only dropped those with a ClosedOn time, so closed tickets without one can still be listed"
+        )
+    if exclude_closed and status_match is None:  # no status given: ask Gorelo only for the tickets of a status that is not Closed
+        open_status_ids, why_not = _open_status_ids(await client.get_list(OP_STATUSES, tool="search_tickets"))
+        if why_not is not None:
+            notes.append(
+                f"exclude_closed did not narrow the search by status ({why_not}), so every status was read and only "
+                "the ClosedOn check applied"
+            )
 
     api_query: dict[str, Any] = {}
     filters: dict[str, Any] = {}
@@ -833,6 +923,13 @@ async def search_tickets(
             if match[1] is not None:  # an id given as such has no name to report
                 filters[param] = match[1]
             filters[f"{param}_id"] = match[0]
+    if open_status_ids is not None:
+        api_query["StatusIds"] = csv_ids("status_ids", open_status_ids)
+        filters["exclude_closed_status_ids"] = open_status_ids
+    for param, ids in entities.items():
+        if ids is not None:
+            api_query[LIST_QUERY_FIELDS[param]] = csv_ids(param, ids)
+            filters[param] = ids
     if sources is not None:
         api_query["SourceIds"] = csv_ids("source_ids", sources)
         filters["source_ids"] = sources
@@ -840,8 +937,10 @@ async def search_tickets(
         api_query["Query"] = query_text
         filters["query"] = query_text
     for param, key, (moment_text, _) in (
-        ("updated_since", "UpdatedSince", updated),
-        ("created_since", "CreatedSince", created),
+        ("updated_since", "UpdatedSince", updated[0]),
+        ("updated_before", "UpdatedBefore", updated[1]),
+        ("created_since", "CreatedSince", created[0]),
+        ("created_before", "CreatedBefore", created[1]),
         ("closed_since", "ClosedSince", closed[0]),
         ("closed_before", "ClosedBefore", closed[1]),
     ):
@@ -857,29 +956,53 @@ async def search_tickets(
     if exclude_closed:
         filters["exclude_closed"] = True
     filters["limit"] = wanted_limit
+    if view == "summary":
+        filters["view"] = view
+
+    client_side = {
+        "awaiting_client": awaiting_client,
+        "unassigned_only": unassigned_only,
+        "unread_only": unread_only,
+        "exclude_closed": exclude_closed,
+    }
+    rows_counted = 0
+    matches_counted = 0
+    limit_exceeded = False
+
+    def enough(rows: list[Any]) -> bool:
+        """get_all calls this after each page with every row read so far: count the matches of the new rows only."""
+        nonlocal rows_counted, matches_counted, limit_exceeded
+        matches_counted += _count_matches(rows[rows_counted:], **client_side)
+        rows_counted = len(rows)
+        limit_exceeded = matches_counted > wanted_limit
+        return limit_exceeded
 
     scan = await client.get_all(
-        OP_LIST, query=api_query, page_size=SEARCH_PAGE_SIZE, max_items=SEARCH_SCAN_CAP, tool="search_tickets"
+        OP_LIST, query=api_query, page_size=SEARCH_PAGE_SIZE, max_items=SEARCH_SCAN_CAP, until=enough, tool="search_tickets"
     )
-    matches = _client_side_filter(
-        scan.items,
-        awaiting_client=awaiting_client,
-        unassigned_only=unassigned_only,
-        unread_only=unread_only,
-        exclude_closed=exclude_closed,
-    )
+    matches = _client_side_filter(scan.items, **client_side)
+    stopped_early = limit_exceeded and not scan.complete  # on the last page the scan read everything, so it is exact
     shown = matches[:wanted_limit]
+    if view == "summary":
+        shown = summary_rows(shown, TICKET_SUMMARY_FIELDS, op_key=OP_LIST, tool="search_tickets")
     result = all_result(dataclasses.replace(scan, items=shown), filters)
     result["truncated"] = len(matches) > wanted_limit or not scan.complete
     result["matched"] = len(matches)
     result["scanned"] = len(scan.items)
-    notes: list[str] = []
-    if len(matches) > wanted_limit:
+    result["stopped_early"] = stopped_early
+    if stopped_early:
+        notes.append(
+            f"the scan stopped early after {len(scan.items)} tickets because more than {wanted_limit} matched: "
+            f"matched ({len(matches)}) is a minimum and {wanted_limit} are returned; total_count is Gorelo's count for "
+            "the server-side filters (it equals the number of matches when no client-side filter is active); raise "
+            f"limit (max {SEARCH_LIMIT_MAX}) or narrow the filters"
+        )
+    elif len(matches) > wanted_limit:
         notes.append(
             f"{len(matches)} tickets matched and {wanted_limit} are returned: raise limit (max {SEARCH_LIMIT_MAX}) "
             "or narrow the filters"
         )
-    if not scan.complete:
+    if not scan.complete and not stopped_early:
         of_total = f" of {scan.total_count}" if scan.total_count is not None else ""
         notes.append(
             f"the scan stopped after {len(scan.items)} tickets (cap {SEARCH_SCAN_CAP}){of_total}: "
@@ -911,11 +1034,7 @@ async def get_ticket(
     Side effects: None (read-only).
     """
     client = client_of(ctx)
-    reference = _ticket_reference(ticket_id)
-    try:
-        ticket = guid("ticket_id", reference)
-    except ValueError:  # not a GUID: a number or a display number, found with one search
-        ticket = await _find_ticket_id(client, reference)
+    ticket = await resolve_ticket_id(client, ticket_id, tool="get_ticket")
     record = await client.get_one(OP_GET, path_params={"ticketId": ticket}, tool="get_ticket")
     return expect_object(record, OP_GET, tool="get_ticket")
 
@@ -1108,10 +1227,16 @@ async def _current_billing(client: GoreloClient, ticket: str) -> dict[str, int]:
     return current
 
 
-@gorelo_tool(toolset="tickets", kind="write", ops=[OP_UPDATE, OP_GET], field_map=UPDATE_FIELDS, destructive_hint=True)
+@gorelo_tool(
+    toolset="tickets",
+    kind="write",
+    ops=[OP_UPDATE, OP_GET, TICKET_LIST_OP],
+    field_map=UPDATE_ERROR_FIELDS,
+    destructive_hint=True,
+)
 async def update_ticket(
     ctx: Context,
-    ticket_id: Annotated[str, Field(description="Ticket GUID (Id from get_ticket or list_tickets)")],
+    ticket_id: Annotated[str | StrictId, Field(description="Ticket GUID, display number (TCK-1234) or number (1234)")],
     title: Annotated[str | None, Field(description="New title, max 250 characters")] = None,
     status_id: Annotated[StrictId | None, Field(description="New status id (list_ticket_statuses)")] = None,
     priority_id: Annotated[StrictId | None, Field(description="0 None, 1 Urgent, 2 High, 3 Normal, 4 Low")] = None,
@@ -1214,12 +1339,8 @@ async def update_ticket(
     email the contact and fire automation under the tenant's rules (not for a close with closed_on).
     The record is read back; if that fails the result is {Id, warning}: the update WAS applied, do not repeat it.
     """
-    try:
-        ticket = guid("ticket_id", ticket_id)
-    except ValueError as err:
-        raise ValueError(
-            f"{err}; for a ticket number or display number such as TCK-1234, call get_ticket first and pass its Id"
-        ) from None
+    client = client_of(ctx)
+    check_ticket_reference("ticket_id", ticket_id)  # local only; the lookup waits until every other local check has passed
     closed_text, closed_at = _instant("closed_on", closed_on)
     updated_text, updated_at = _instant("updated_on", updated_on)
     _not_in_future("closed_on", closed_text, closed_at)
@@ -1277,7 +1398,8 @@ async def update_ticket(
             f"{', '.join(param for param in UPDATE_FIELDS if param not in ('updated_on', 'updated_by_name'))} "
             "or clear_fields"
         )
-    client = client_of(ctx)
+    # Every local check has passed and the body is built: only now may a number or display number cost lookup requests.
+    ticket = await resolve_ticket_id(client, ticket_id, tool="update_ticket")
     given = [param for param in BILLING_PARTS if values[param] is not None]
     if given and len(given) < len(BILLING_PARTS) and client_id is None:
         # A partial BillingOverride may reset the parts it leaves out: read the current ones and send them all.

@@ -21,6 +21,7 @@ from server import build_instructions, build_server, held_names_listed, resolve_
 from settings import TOOLSETS, Settings, SettingsError
 import tools._common as common
 from tools._common import REGISTRY, Registry, StrictBool, client_of, require_confirm, server_info_of
+from version import VERSION
 
 pytestmark = pytest.mark.anyio
 
@@ -286,7 +287,7 @@ def test_the_ready_line_keeps_its_shape_with_a_list_and_counts_what_is_registere
     )
     lines = [r.getMessage() for r in caplog.records if r.name == "gorelo-mcp"]
     # the gated tools are logged by main.py ("gorelo-mcp gated tools: ..."); the build adds no second line
-    assert lines == ["gorelo-mcp ready: toolsets=core,tickets,time,uptime destructive=True tools=4"]
+    assert lines == [f"gorelo-mcp ready: version={VERSION} toolsets=core,tickets,time,uptime destructive=True tools=4"]
 
 
 def test_the_server_instructions_do_not_depend_on_which_gated_tools_are_registered(make_settings, spec_index, mock_gorelo):

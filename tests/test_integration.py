@@ -48,6 +48,8 @@ EXPECTED = {
             # 1.5.0: client types, custom fields, locations, domains and contact tags
             "list_client_types", "list_client_custom_fields", "get_client_location", "create_client_location",
             "update_client_location", "create_client_domain", "update_client_domain", "list_contact_tags",
+            # 1.7.0: the agent search (posture, offline days, operating system)
+            "search_agents",
         },
         "gated": {"delete_asset_type", "delete_client_location", "delete_client_domain", "delete_contact"},  # delete_contact: 1.5.2
     },
@@ -267,10 +269,10 @@ def test_registry_matches_the_configured_surface_exactly():
         got_gated = {n for n, s in specs.items() if s.toolset == toolset and s.kind == "destructive"}
         assert got_regular == groups["regular"], (toolset, got_regular ^ groups["regular"])
         assert got_gated == groups["gated"], (toolset, got_gated ^ groups["gated"])
-    assert len(specs) == 162  # 92 tools in 1.2.0; 1.3.0 added get_custom_asset, list_deletions and the 17 document tools; 1.4.0 eight reads; 1.5.0 41 tools (1.5.1 and 1.5.2 held two of them back; 1.5.3 released them); 1.5.2 adds delete_contact; 1.6.0 adds list_sla_policies
+    assert len(specs) == 163  # 92 tools in 1.2.0; 1.3.0 added get_custom_asset, list_deletions and the 17 document tools; 1.4.0 eight reads; 1.5.0 41 tools (1.5.1 and 1.5.2 held two of them back; 1.5.3 released them); 1.5.2 adds delete_contact; 1.6.0 adds list_sla_policies; 1.7.0 adds search_agents
     regular = {n for n, s in specs.items() if s.kind != "destructive"}
-    assert (len(regular), len(specs) - len(regular)) == (144, 18)  # (109, 10) until 1.5.0, which added 34 regular and 7 gated tools; 1.5.2 adds the gated delete_contact
-    assert len(declared) == 162 and {declared[n].kind for n in HELD_BEFORE_1_5_3} == {"destructive"}  # every declared tool is registrable
+    assert (len(regular), len(specs) - len(regular)) == (145, 18)  # (109, 10) until 1.5.0, which added 34 regular and 7 gated tools; 1.5.2 adds the gated delete_contact
+    assert len(declared) == 163 and {declared[n].kind for n in HELD_BEFORE_1_5_3} == {"destructive"}  # every declared tool is registrable
 
 
 def test_all_24_legacy_tool_names_still_exist():
@@ -368,12 +370,12 @@ def test_each_operation_the_2026_10_29_spec_added_is_declared_by_exactly_the_too
 
 
 @pytest.mark.anyio
-async def test_default_toolsets_expose_99_tools_and_no_gated_ones(server_factory):
+async def test_default_toolsets_expose_100_tools_and_no_gated_ones(server_factory):
     server = server_factory(toolsets=frozenset(DEFAULT_TOOLSETS), destructive=False)
     names = {t.name for t in await list_tools(server)}
     expected = set().union(*(EXPECTED[ts]["regular"] for ts in DEFAULT_TOOLSETS))
     assert names == expected
-    assert len(names) == 99  # 98 until 1.6.0 added list_sla_policies; 71 until 1.5.0 added 27 default-toolset tools; 63 until 1.4.0 added eight core reads; 58 until the 2026-10-12 contract added the three custom asset tools, 61 until the 2026-10-17 one added get_custom_asset and list_deletions
+    assert len(names) == 100  # 99 until 1.7.0 added search_agents; 98 until 1.6.0 added list_sla_policies; 71 until 1.5.0 added 27 default-toolset tools; 63 until 1.4.0 added eight core reads; 58 until the 2026-10-12 contract added the three custom asset tools, 61 until the 2026-10-17 one added get_custom_asset and list_deletions
     assert {"list_alerts", "get_invoice", "create_invoice", "get_custom_asset", "list_deletions"} <= names
     assert "create_approved_invoice" not in names  # it needs GORELO_ENABLE_DESTRUCTIVE as well
     assert not any("document" in name for name in names)  # the documents toolset is off by default
@@ -421,7 +423,7 @@ async def test_held_tools_are_registered_under_no_setting(server_factory, monkey
     assert not {t.name for t in await list_tools(server_factory(toolsets=everything, destructive=False))} & held
     # only the view that tests use registers them
     names = {t.name for t in await list_tools(server_factory(registry=REGISTRY.with_held(), toolsets=everything, destructive=True))}
-    assert held <= names and len(names) == 162
+    assert held <= names and len(names) == 163
 
 
 @pytest.mark.anyio
@@ -429,7 +431,7 @@ async def test_nothing_is_held_back_and_the_flag_registers_every_declared_tool(s
     assert common.HELD_TOOLS == frozenset()
     everything = frozenset(TOOLSETS)
     on = {t.name for t in await list_tools(server_factory(toolsets=everything, destructive=True))}
-    assert on == {spec.name for spec in REGISTRY.specs} and len(on) == 162
+    assert on == {spec.name for spec in REGISTRY.specs} and len(on) == 163
     # a list of gated names registers exactly them, the two contract writes included
     one = {t.name for t in await list_tools(server_factory(toolsets=frozenset({"billing"}), destructive=True, destructive_tools=frozenset(HELD_BEFORE_1_5_3)))}
     assert HELD_BEFORE_1_5_3 <= one and "delete_invoice" not in one
@@ -487,13 +489,17 @@ async def test_destructive_tools_require_confirm_defaulting_to_false(server_fact
 async def test_default_tools_list_stays_within_budget(server_factory):
     tools_list = await list_tools(server_factory(toolsets=frozenset(DEFAULT_TOOLSETS), destructive=False))
     size = len(json.dumps([t.model_dump(mode="json", exclude_none=True) for t in tools_list]))
-    # The budget sits about 1 percent above the size measured for 1.5.0 (see the constant below). It
+    # The budget sits about 1 percent above the size measured for the current release (see the constant below). It
     # was raised once for the three default tools contract e15cb5a18ec2 added, once more for the custom properties of
     # contract 1b1c0cec0e9a and twice for release 1.3.0; growth beyond it needs a deliberate bump, because every byte here is
     # context claude.ai loads in every conversation that uses the connector.
     assert size < TOOLS_LIST_BUDGET_BYTES, size
 
 
+# For 1.7.0 the default tools/list measured 155_209 bytes (100 tools; 149_321 at 1.6.0): the new search_agents read, the ticket reference sentences on
+# the tools that take one ticket_id (a GUID, a number or a display number), the new search_tickets filters, the `view` parameter of
+# the list tools and auto_service_line on create_time_entry (the documents toolset, with the edits of update_document, is not in the
+# default list). The budget is that plus about 1 percent, rounded up to the next 100 (156_800).
 # For 1.6.0 the default tools/list measured 149_321 bytes after the merge of the six packages (148_554 at P0): the angle-bracket sentence on the
 # four comment body parameters, the strict bounds of actual_hours and distance, and the texts of the other packages. The budget is that plus
 # about 1 percent, rounded up to the next 100 (150_900).
@@ -519,7 +525,7 @@ async def test_default_tools_list_stays_within_budget(server_factory):
 # same contract's sentence on the two device tools, 108 bytes for the update_client sentence that has the model compare
 # the returned Values with what it sent, and 103 bytes for the one that says update_client reads the client first. At 1.2.0
 # the budget left 891 bytes (about 1 percent) above that.
-TOOLS_LIST_BUDGET_BYTES = 150900
+TOOLS_LIST_BUDGET_BYTES = 156_800
 MAX_TOOL_DESCRIPTION_CHARS = 900
 MAX_PARAM_DESCRIPTION_CHARS = 220
 

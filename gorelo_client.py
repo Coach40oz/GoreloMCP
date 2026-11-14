@@ -299,7 +299,7 @@ class Page:
 
 @dataclass(frozen=True)
 class AllResult:
-    """Every row of a paged list (get_all). `complete` is False if max_items cut the scan short.
+    """Every row of a paged list (get_all). `complete` is False if max_items or `until` cut the scan short.
 
     count_mismatch is True when the scan completed but len(items) differs from Gorelo's TotalCount.
     """
@@ -937,13 +937,17 @@ class GoreloClient:
         query: Mapping[str, Any] | None = None,
         page_size: int = 200,
         max_items: int | None = None,
+        until: Callable[[list[Any]], bool] | None = None,
         tool: str,
     ) -> AllResult:
         """Follow NextCursor while HasMore and return every row.
 
         A repeated cursor raises kind "shape" (Gorelo re-serves page 1 for a cursor it does not
-        recognise). max_items stops the scan early with complete=False. When the scan completes and
-        the row count differs from TotalCount, count_mismatch is True and a WARNING is logged.
+        recognise). max_items stops the scan early with complete=False. `until` is called after each page with a
+        copy of the rows read so far and must return a bool; when it returns True the scan stops there, with
+        complete=False unless that page was the last one (then complete=True, as when the scan runs out of pages).
+        When the scan completes and the row count differs from TotalCount, count_mismatch is True and a WARNING is
+        logged.
         """
         if max_items is not None and max_items < 1:
             raise ValueError("max_items must be at least 1 (or None for no cap)")
@@ -964,6 +968,13 @@ class GoreloClient:
                 complete = len(items) == max_items and not page.has_more
                 del items[max_items:]
                 break
+            if until is not None:
+                stop = until(list(items))
+                if not isinstance(stop, bool):
+                    raise TypeError(f"get_all: until must return a bool, got {type(stop).__name__}")
+                if stop:
+                    complete = not page.has_more
+                    break
             if not page.has_more:
                 complete = True
                 break

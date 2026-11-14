@@ -499,7 +499,7 @@ def test_the_module_declares_exactly_the_four_alert_tools_and_names_every_op():
         "post_alert": ("write", ["POST /v1/alerts"]),
         "list_alerts": ("read", ["GET /v1/alerts"]),
         "get_alert": ("read", ["GET /v1/alerts/{alertId}"]),
-        "set_alert_status": ("write", ["PATCH /v1/alerts"]),
+        "set_alert_status": ("write", ["PATCH /v1/alerts", "GET /v1/tickets"]),  # the ticket reference lookup
     }
     doc = alerts_module.__doc__
     assert all(op in doc for ops in (n[1] for n in names.values()) for op in ops)
@@ -1100,11 +1100,12 @@ def updated(*ids):
 
 def test_set_alert_status_is_a_core_write_over_the_bulk_patch_and_marked_destructive(spec_index):
     spec = next(s for s in REGISTRY.specs if s.name == "set_alert_status")
-    assert (spec.toolset, spec.kind, spec.ops) == ("core", "write", ["PATCH /v1/alerts"])
+    assert (spec.toolset, spec.kind, spec.ops) == ("core", "write", ["PATCH /v1/alerts", "GET /v1/tickets"])
     assert spec.destructive_hint is True
     assert not set(spec.ops) & FORBIDDEN_OPS
     op = spec_index.op("PATCH /v1/alerts")
     assert op.response["data"] == "UpdateAlertStatusesResult"
+    # TicketId stays the body field of ticket_id (a 400 on it names the parameter); the ticket lookup's Query shares the name
     assert set(spec.field_map.values()) == set(op.body["fields"]) == {"AlertIds", "StatusId", "TicketId"}
     assert spec.field_map == {"alert_ids": "AlertIds", "status": "StatusId", "ticket_id": "TicketId"}
 
@@ -1116,7 +1117,7 @@ async def test_set_alert_status_parameters_and_annotations(server):
     properties = tool.inputSchema["properties"]
     assert all(p.get("description") for p in properties.values())
     assert properties["status"]["enum"] == ["new", "dismissed", "ticketed"]
-    assert "list_alerts" in properties["alert_ids"]["description"] and "list_tickets" in properties["ticket_id"]["description"]
+    assert "list_alerts" in properties["alert_ids"]["description"] and "display number (TCK-1234)" in properties["ticket_id"]["description"]
     assert (tool.annotations.readOnlyHint, tool.annotations.destructiveHint) == (False, True)
 
 
@@ -1175,7 +1176,7 @@ async def test_set_alert_status_accepts_exactly_one_hundred_distinct_alerts(serv
         ({"alert_ids": IDS, "status": "ignored"}, "status"),
         ({"alert_ids": IDS, "status": 2}, "status"),
         ({"alert_ids": IDS, "status": "ticketed"}, "ticket_id"),
-        ({"alert_ids": IDS, "status": "ticketed", "ticket_id": "T-1"}, "ticket_id"),
+        ({"alert_ids": IDS, "status": "ticketed", "ticket_id": ""}, "ticket_id: must not be empty"),
         ({"alert_ids": IDS, "status": "dismissed", "ticket_id": TICKET}, "ticket_id"),
         ({"alert_ids": IDS, "status": "new", "ticket_id": TICKET}, "ticket_id"),
     ],
@@ -1245,3 +1246,49 @@ async def test_the_single_alert_patch_is_never_called(server, mock_gorelo):
     mock_gorelo.on("PATCH", ALERTS, updated(IDS[0]))
     await call_tool(server, "set_alert_status", {"alert_ids": [IDS[0]], "status": "dismissed"})
     assert [r.path for r in mock_gorelo.requests] == [ALERTS]
+
+
+# --------------------------------------------------------------------------
+# set_alert_status: the ticket as a GUID, a number or a display number (resolve_ticket_id)
+# --------------------------------------------------------------------------
+
+TICKETS = "/v1/tickets"
+TICKET_ROW = {"Id": TICKET, "Number": 4242, "DisplayNumber": "TCK-4242"}
+
+
+@pytest.mark.parametrize("reference", ["TCK-4242", "tck-4242", "4242", 4242])
+async def test_set_alert_status_resolves_a_number_or_display_number_and_tickets_the_alerts_on_it(server, mock_gorelo, reference):
+    mock_gorelo.on("GET", TICKETS, paged_envelope([TICKET_ROW]))
+    mock_gorelo.on("PATCH", ALERTS, updated(IDS[0]))
+    result = await call_tool(server, "set_alert_status", {"alert_ids": [IDS[0]], "status": "ticketed", "ticket_id": reference})
+    assert result == {"UpdatedIds": [IDS[0]]}
+    lookup, patch = mock_gorelo.requests
+    assert (lookup.method, lookup.path, lookup.query["Query"]) == ("GET", TICKETS, str(reference))
+    assert (patch.method, patch.path, patch.json) == ("PATCH", ALERTS, {"AlertIds": [IDS[0]], "StatusId": 3, "TicketId": TICKET})
+
+
+async def test_set_alert_status_with_a_guid_makes_no_lookup_request(server, mock_gorelo):
+    mock_gorelo.on("PATCH", ALERTS, updated(IDS[0]))
+    await call_tool(server, "set_alert_status", {"alert_ids": [IDS[0]], "status": "ticketed", "ticket_id": TICKET})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("PATCH", ALERTS)]
+
+
+async def test_set_alert_status_with_an_unknown_number_stops_before_the_patch(server, mock_gorelo):
+    mock_gorelo.on("GET", TICKETS, paged_envelope([]))
+    mock_gorelo.on("PATCH", ALERTS, updated(IDS[0]))
+    text = await call_tool_error(server, "set_alert_status", {"alert_ids": IDS, "status": "ticketed", "ticket_id": "TCK-9999"})
+    assert text.startswith("ticket_id: no ticket has the number or display number 'TCK-9999'")
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", TICKETS)]
+
+
+@pytest.mark.parametrize("status", ["new", "dismissed"])
+async def test_set_alert_status_refuses_a_reference_with_another_status_before_the_lookup(server, mock_gorelo, status):
+    text = await call_tool_error(server, "set_alert_status", {"alert_ids": IDS, "status": status, "ticket_id": "TCK-4242"})
+    assert "ticket_id: only for status 'ticketed'" in text
+    assert mock_gorelo.requests == []
+
+
+async def test_set_alert_status_other_statuses_make_no_lookup(server, mock_gorelo):
+    mock_gorelo.on("PATCH", ALERTS, updated(IDS[0]))
+    await call_tool(server, "set_alert_status", {"alert_ids": [IDS[0]], "status": "dismissed"})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("PATCH", ALERTS)]

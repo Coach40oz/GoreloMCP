@@ -9,7 +9,8 @@ no files written, no process-wide state. The Gorelo client is created when the s
 tool call through ctx.lifespan_context.
 
 Lifespan context keys: "gorelo" (the GoreloClient), "toolsets" (sorted list of enabled toolsets),
-"destructive" (bool), "gated_tools" (sorted names of the gated tools that are registered) and "spec" (the SpecIndex).
+"destructive" (bool), "gated_tools" (sorted names of the gated tools that are registered), "spec" (the SpecIndex) and
+"version" (version.VERSION, the version of pyproject.toml; FastMCP reports the same text in the MCP initialize result).
 Tools reach the client with tools._common.client_of(ctx).
 
 This module also holds the log filter main.py installs (install_log_value_filter): FastMCP logs a
@@ -39,6 +40,7 @@ from gorelo_client import GoreloClient, is_forbidden_op, is_side_effect_get
 from settings import ENV_DESTRUCTIVE, Settings, SettingsError
 from spec import SpecIndex, load_spec_index
 from tools._common import REGISTRY, Registry, ToolSpec
+from version import VERSION
 
 logger = logging.getLogger("gorelo-mcp")
 
@@ -423,14 +425,22 @@ def build_server(
                 "destructive": settings.destructive,
                 "gated_tools": list(gated),
                 "spec": spec,
+                "version": VERSION,
             }
 
-    mcp = FastMCP("Gorelo PSA", instructions=build_instructions(settings.toolsets), auth=auth, lifespan=lifespan)
+    mcp = FastMCP(
+        "Gorelo PSA",
+        version=VERSION,
+        instructions=build_instructions(settings.toolsets),
+        auth=auth,
+        lifespan=lifespan,
+    )
     for tool in selected:
         registered = mcp.add_tool(tool.fn)
         registered.parameters = compact_input_schema(registered.parameters)
     logger.info(
-        "gorelo-mcp ready: toolsets=%s destructive=%s tools=%d",
+        "gorelo-mcp ready: version=%s toolsets=%s destructive=%s tools=%d",
+        VERSION,
         ",".join(toolsets),
         settings.destructive,
         len(selected),

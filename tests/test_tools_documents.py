@@ -812,7 +812,7 @@ async def test_every_field_at_once_goes_out_under_its_spec_name(server, mock_gor
 
 
 UPDATE_ERRORS = [
-    pytest.param({}, "nothing to change: give at least one of title, body, alternate_name, is_starred, attachments, remove_attachment_names or clear_fields", id="nothing"),
+    pytest.param({}, "nothing to change: give at least one of title, body, edits, alternate_name, is_starred, attachments, remove_attachment_names or clear_fields", id="nothing"),
     pytest.param({"title": ""}, "title: must not be empty or whitespace only", id="blank-title"),
     pytest.param({"title": "x" * 201}, "title: at most 200 characters, got 201", id="long-title"),
     pytest.param({"body": "   "}, "body: must not be empty or whitespace only", id="blank-body"),
@@ -842,7 +842,8 @@ async def test_the_body_of_a_page_that_only_talks_about_data_urls_is_not_refused
 async def test_update_has_no_parameter_for_sharing_place_or_status(server):
     tools = await list_tools(server)
     assert set(tool_def("update_document", tools).inputSchema["properties"]) == {
-        "document_id", "title", "body", "alternate_name", "is_starred", "attachments", "remove_attachment_names", "clear_fields",
+        "document_id", "title", "body", "edits", "alternate_name", "is_starred", "attachments", "remove_attachment_names",
+        "clear_fields", "return_body",
     }
     clear = tool_def("update_document", tools).inputSchema["properties"]["clear_fields"]
     assert clear["items"]["enum"] == ["alternate_name", "attachments"]
@@ -1335,6 +1336,486 @@ async def test_the_body_text_never_reaches_the_logs_on_update(server, mock_gorel
     with caplog.at_level(logging.DEBUG):
         await call_tool(server, "update_document", {"document_id": DOC, "body": "<p>SECRET-BODY-123</p>"})
     assert "SECRET-BODY-123" not in " ".join(record.getMessage() for record in caplog.records)
+
+
+# ---- edits and return_body -----------------------------------------------------
+
+STORED = "<h1>Backup runbook</h1><p>Run the nightly job at 02:00.</p><p>Owner: Ana</p><p>Owner: Ben</p>"
+
+
+def edit(find, replace):
+    return {"find": find, "replace": replace}
+
+
+async def edited(server, mock_gorelo, edits, stored=STORED, **extra):
+    """update_document with edits on a document holding `stored`; Gorelo answers with the body the PATCH sent."""
+    get_route(mock_gorelo, detail(Body=stored))
+    new = stored
+    for pair in edits:
+        new = new.replace(pair["find"], pair["replace"], 1)
+    patch_route(mock_gorelo, detail(Body=new))
+    return await call_tool(server, "update_document", {"document_id": DOC, "edits": edits, **extra})
+
+
+async def test_edits_read_the_document_once_and_patch_only_the_new_body(server, mock_gorelo):
+    result = await edited(server, mock_gorelo, [edit("02:00", "03:30"), edit("<h1>Backup runbook</h1>", "<h1>Backup runbook v2</h1>")])
+    first, second = mock_gorelo.requests
+    assert (first.method, first.path, first.json) == ("GET", DOC_PATH, None)
+    assert (second.method, second.path, second.query) == ("PATCH", DOC_PATH, {})
+    assert second.json == {"Body": "<h1>Backup runbook v2</h1><p>Run the nightly job at 03:30.</p><p>Owner: Ana</p><p>Owner: Ben</p>"}
+    assert len(mock_gorelo.requests) == 2
+    assert result["Body"] == second.json["Body"]
+
+
+async def test_an_empty_replace_deletes_the_found_text(server, mock_gorelo):
+    await edited(server, mock_gorelo, [edit("<p>Owner: Ana</p>", "")])
+    assert mock_gorelo.last.json == {"Body": "<h1>Backup runbook</h1><p>Run the nightly job at 02:00.</p><p>Owner: Ben</p>"}
+
+
+async def test_edits_are_applied_in_order_and_each_find_is_checked_on_the_text_as_it_stands(server, mock_gorelo):
+    # the second find only exists because the first edit wrote it
+    await edited(server, mock_gorelo, [edit("02:00", "<b>soon</b>"), edit("<b>soon</b>", "<b>03:30</b>")])
+    assert mock_gorelo.last.json["Body"] == "<h1>Backup runbook</h1><p>Run the nightly job at <b>03:30</b>.</p><p>Owner: Ana</p><p>Owner: Ben</p>"
+
+
+async def test_a_replacement_that_creates_a_second_occurrence_of_a_later_find_refuses_that_later_edit(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Body=STORED))
+    # "Owner: Ben" occurs once in the stored body; the first edit writes a second one
+    text = await call_tool_error(
+        server, "update_document",
+        {"document_id": DOC, "edits": [edit("Owner: Ana", "Owner: Ben"), edit("Owner: Ben", "Owner: Cy")]},
+    )
+    assert text == (
+        "edits (item 2): its find (10 characters) occurs more than once in the body as edit 1 left it, and it must occur "
+        "exactly once there (exact match, case-sensitive, on the HTML text). It occurs exactly once in the stored body, so "
+        "edit 1 of this call made a second occurrence of it: reorder or merge the edits. Nothing was changed."
+    )
+    assert "get_document" not in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+FIRST_ADVICE = "Call get_document and copy a longer, unique piece of the stored body. Nothing was changed."
+
+
+@pytest.mark.parametrize(
+    "edits, fragment",
+    [
+        pytest.param([edit("no such text", "x")], "edits (item 1): its find (12 characters) does not occur in the stored body, and it must occur exactly once (", id="absent"),
+        pytest.param([edit("Owner: ", "x")], "edits (item 1): its find (7 characters) occurs more than once in the stored body, and it must occur exactly once (", id="twice"),
+        pytest.param([edit("<p>", "x")], "edits (item 1): its find (3 characters) occurs more than once in the stored body, and it must occur exactly once (", id="three-times"),
+        pytest.param([edit("OWNER: Ana", "x")], "edits (item 1): its find (10 characters) does not occur in the stored body", id="case-sensitive"),
+    ],
+)
+async def test_a_find_that_does_not_occur_exactly_once_is_refused_before_any_write(server, mock_gorelo, edits, fragment):
+    get_route(mock_gorelo, detail(Body=STORED))
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": edits})
+    assert fragment in text
+    assert text.endswith(FIRST_ADVICE)
+    assert "edits" in text.split(":")[0]
+    assert "times" not in text  # a count is not given: only none, one and more than once matter
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]  # the one read, no PATCH
+
+
+@pytest.mark.parametrize(
+    "edits, head, advice",
+    [
+        pytest.param(
+            [edit("02:00", "x"), edit("nightly", "x"), edit("02:00", "y")],
+            "edits (item 3): its find (5 characters) does not occur in the body as edits 1 to 2 left it, and it must occur exactly once there",
+            "It occurs exactly once in the stored body, so edits 1 to 2 of this call removed it: reorder or merge the edits.",
+            id="removed-by-earlier-edits",
+        ),
+        pytest.param(
+            [edit("Run", "Go"), edit("Run", "Go")],
+            "edits (item 2): its find (3 characters) does not occur in the body as edit 1 left it",
+            "It occurs exactly once in the stored body, so edit 1 of this call removed it: reorder or merge the edits.",
+            id="removed-by-the-first",
+        ),
+        pytest.param(
+            [edit("Ana", "Ben"), edit("Ben", "Cy")],
+            "edits (item 2): its find (3 characters) occurs more than once in the body as edit 1 left it",
+            "It occurs exactly once in the stored body, so edit 1 of this call made a second occurrence of it: reorder or merge the edits.",
+            id="second-occurrence-made",
+        ),
+        pytest.param(
+            [edit("02:00", "03:00"), edit("no such text", "x")],
+            "edits (item 2): its find (12 characters) does not occur in the body as edit 1 left it",
+            "Call get_document and copy a longer, unique piece; the earlier edits of this call change the text first.",
+            id="absent-from-the-stored-body-too",
+        ),
+        pytest.param(
+            [edit("02:00", "03:00"), edit("Owner: ", "x")],
+            "edits (item 2): its find (7 characters) occurs more than once in the body as edit 1 left it",
+            "Call get_document and copy a longer, unique piece; the earlier edits of this call change the text first.",
+            id="twice-in-the-stored-body-too",
+        ),
+    ],
+)
+async def test_a_later_find_is_judged_on_the_text_the_earlier_edits_left(server, mock_gorelo, edits, head, advice):
+    get_route(mock_gorelo, detail(Body=STORED))
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": edits})
+    assert text.startswith(head)
+    assert f" {advice} Nothing was changed." in text
+    assert "in the stored body, and" not in text  # it does not claim the count was taken on the stored body
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_overlapping_occurrences_count_as_several(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Body="<p>aaa</p>"))
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": [edit("aa", "b")]})
+    assert text.startswith("edits (item 1): its find (2 characters) occurs more than once in the stored body")
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+class FindCounter(str):
+    """A text that counts how often it is searched."""
+
+    searches = 0
+
+    def find(self, *args):
+        type(self).searches += 1
+        return super().find(*args)
+
+
+@pytest.mark.parametrize("text, find, expected", [
+    ("", "a", 0), ("abc", "x", 0), ("abc", "b", 1), ("abab", "ab", 2), ("aaa", "aa", 2), ("a" * 50, "a", 2), ("<p>x</p>", "<p>", 1),
+], ids=["empty", "absent", "once", "twice", "overlapping", "many", "markup"])
+def test_the_occurrence_count_is_none_one_or_more_than_once(text, find, expected):
+    assert documents._occurrences(text, find) == expected
+
+
+def test_a_find_is_not_searched_for_beyond_its_second_occurrence():
+    # on a large repetitive body one edit took seconds of CPU when every occurrence was counted
+    FindCounter.searches = 0
+    assert documents._occurrences(FindCounter("a" * 1_000_000), "a") == 2
+    assert FindCounter.searches == 2
+
+
+async def test_a_find_that_fills_a_large_repetitive_body_is_refused_as_more_than_once(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Body="<p>" + "a" * 800_000 + "</p>"))
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": [edit("a", "b")]})
+    assert text.startswith("edits (item 1): its find (1 characters) occurs more than once in the stored body")
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_overlapping_finds_work_while_each_is_unique_at_its_turn(server, mock_gorelo):
+    # the first edit removes the text the second find overlaps with, so the second one is then refused ...
+    get_route(mock_gorelo, detail(Body="<p>abcd</p>"))
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": [edit("abc", "X"), edit("bcd", "Y")]})
+    assert text.startswith("edits (item 2): its find (3 characters) does not occur in the body as edit 1 left it")
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_a_find_that_only_occurs_in_the_title_is_not_found(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Title="Weekly rota", Body="<p>Run the job.</p>"))
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": [edit("Weekly rota", "x")]})
+    assert text.startswith("edits (item 1): its find (11 characters) does not occur in the stored body")
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_a_refusal_never_quotes_the_document_or_the_find(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Body="<p>SECRET-BODY-123 and SECRET-BODY-123</p>"))
+    for find in ("SECRET-BODY-123", "SECRET-FIND-456"):
+        text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": [edit(find, "x")]})
+        assert "SECRET" not in text and "<p>" not in text
+
+
+@pytest.mark.parametrize("edits", [[edit("02:00", "02:00")], [edit("02:00", "03:00"), edit("03:00", "02:00")]], ids=["same-text", "there-and-back"])
+async def test_edits_that_leave_the_body_unchanged_are_refused(server, mock_gorelo, edits):
+    get_route(mock_gorelo, detail(Body=STORED))
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": edits})
+    assert text == "edits: applied in order they leave the body as it is, so drop them. Nothing was changed."
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"title": "New title"}, {"is_starred": True}, {"alternate_name": "Portal name"}, {"clear_fields": ["alternate_name"]}],
+    ids=["title", "star", "alternate-name", "clear"],
+)
+async def test_edits_that_change_nothing_are_refused_whatever_else_the_call_carries(server, mock_gorelo, extra):
+    # the refusal names edits and says what they do; it must not say there is nothing to change when a title changes
+    get_route(mock_gorelo, detail(Body=STORED))
+    text = await call_tool_error(
+        server, "update_document", {"document_id": DOC, "edits": [edit("02:00", "02:00")], **extra}
+    )
+    assert text.startswith("edits:") and "leave the body as it is, so drop them" in text
+    assert "nothing to change" not in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]  # nothing was written
+
+
+async def test_the_other_fields_go_out_once_the_idle_edits_are_dropped(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Body=STORED))
+    patch_route(mock_gorelo, detail(Body=STORED, Title="New title"))
+    await call_tool(server, "update_document", {"document_id": DOC, "title": "New title"})
+    assert mock_gorelo.last.json == {"Title": "New title"}
+
+
+# ---- the longest body (BODY_MAX, measured live: Gorelo answers 400 "Body can be at most 900,000 characters.") ----
+
+
+def html_of(length):
+    """An HTML body of exactly `length` characters."""
+    filler = length - len("<p></p>")
+    return "<p>" + "x" * filler + "</p>"
+
+
+def test_the_body_limit_is_the_one_measured_live():
+    assert documents.BODY_MAX == 900_000
+
+
+async def test_a_body_of_exactly_the_limit_is_accepted_on_update(server, mock_gorelo):
+    body = html_of(900_000)
+    get_route(mock_gorelo)
+    patch_route(mock_gorelo, detail(Body=body))
+    await call_tool(server, "update_document", {"document_id": DOC, "body": body, "return_body": False})
+    assert mock_gorelo.last.json == {"Body": body}
+
+
+async def test_a_body_of_exactly_the_limit_is_accepted_on_create(server, mock_gorelo):
+    body = html_of(900_000)
+    mock_gorelo.on("POST", DOCS, envelope(detail(NEW, Title="T", Body=body)))
+    await call_tool(server, "create_document", {"title": "T", "client_id": CLIENT, "body": body})
+    assert mock_gorelo.last.json["Body"] == body
+
+
+@pytest.mark.parametrize("tool, args", [("update_document", {"document_id": DOC}), ("create_document", {"title": "T", "client_id": CLIENT})])
+async def test_a_body_one_character_over_the_limit_is_refused_before_any_request(server, mock_gorelo, tool, args):
+    body = html_of(900_001)
+    text = await call_tool_error(server, tool, {**args, "body": body})
+    assert text.startswith("body: at most 900000 characters, got 900001")
+    assert "<p>" not in text and "xxxx" not in text
+    assert mock_gorelo.requests == []
+
+
+EDIT_STORED = "<h1>Title</h1>" + html_of(899_000)
+
+
+async def test_edits_that_build_a_body_of_exactly_the_limit_are_accepted(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Body=EDIT_STORED))
+    patch_route(mock_gorelo, detail(Body="<p>ok</p>"))
+    replace = "z" * (900_000 - len(EDIT_STORED) + len("<h1>Title</h1>"))
+    await call_tool(server, "update_document", {"document_id": DOC, "edits": [edit("<h1>Title</h1>", replace)], "return_body": False})
+    sent = mock_gorelo.last.json["Body"]
+    assert len(sent) == 900_000 and sent.startswith("z") and sent.endswith("</p>")
+
+
+async def test_edits_that_build_a_body_one_over_the_limit_are_refused_with_both_lengths(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Body=EDIT_STORED))
+    replace = "z" * (900_001 - len(EDIT_STORED) + len("<h1>Title</h1>"))
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": [edit("<h1>Title</h1>", replace)]})
+    assert text == (
+        "edits: the body they would build is 900001 characters and Gorelo accepts at most 900000 "
+        f"(the stored body has {len(EDIT_STORED)}). Shorten the replacements. Nothing was changed."
+    )
+    assert "zzzz" not in text and "<h1>" not in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]  # the read, no PATCH
+
+
+@pytest.mark.parametrize(
+    "replace, message",
+    [
+        pytest.param('<img src="data:image/png;base64,AAAA">', "edits: the body they would build is refused (embeds an image as a data: URL", id="data-image"),
+        pytest.param("  ", "edits: the body they would build is refused (must not be empty or whitespace only). Nothing was changed.", id="blank"),
+    ],
+)
+async def test_the_new_body_meets_the_checks_of_a_given_body(server, mock_gorelo, replace, message):
+    get_route(mock_gorelo, detail(Body="<p>x</p>"))
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": [edit("<p>x</p>", replace)]})
+    assert text.startswith(message) and text.endswith("Nothing was changed.")
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_edits_and_body_together_are_refused_before_any_request(server, mock_gorelo):
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "body": "<p>x</p>", "edits": [edit("a", "b")]})
+    assert text.startswith("edits: cannot be given together with body")
+    assert mock_gorelo.requests == []
+
+
+EDIT_ERRORS = [
+    pytest.param([], "edits: at least one edit is required (1 to 50)", id="empty"),
+    pytest.param([edit("a", str(i)) for i in range(51)], "edits: at most 50 edits per call, got 51", id="over-50"),
+    pytest.param([edit("a", "b"), edit("  ", "b")], "edits (item 2, find): must be text that is not empty or whitespace only", id="blank-find"),
+    pytest.param([edit("", "b")], "edits (item 1, find): must be text that is not empty or whitespace only", id="empty-find"),
+    pytest.param([edit("x" * 2001, "b")], "edits (item 1, find): at most 2000 characters, got 2001", id="long-find"),
+]
+
+
+@pytest.mark.parametrize("edits, fragment", EDIT_ERRORS)
+async def test_invalid_edits_are_refused_before_any_request(server, mock_gorelo, edits, fragment):
+    assert fragment in await call_tool_error(server, "update_document", {"document_id": DOC, "edits": edits})
+    assert mock_gorelo.requests == []
+
+
+@pytest.mark.parametrize(
+    "edits",
+    [
+        pytest.param([{"find": "a"}], id="no-replace"),
+        pytest.param([{"replace": "a"}], id="no-find"),
+        pytest.param([{"find": "a", "replace": "b", "all": True}], id="unknown-key"),
+        pytest.param([{"find": 5, "replace": "b"}], id="find-not-text"),
+        pytest.param([{"find": "a", "replace": None}], id="replace-null"),
+        pytest.param([{"find": "a", "replace": 7}], id="replace-number"),
+        pytest.param(["a"], id="not-an-object"),
+        pytest.param("a", id="not-a-list"),
+    ],
+)
+async def test_edits_of_the_wrong_shape_are_refused_before_any_request(server, mock_gorelo, edits):
+    assert "edits" in await call_tool_error(server, "update_document", {"document_id": DOC, "edits": edits})
+    assert mock_gorelo.requests == []
+
+
+async def test_a_find_of_exactly_2000_characters_is_accepted(server, mock_gorelo):
+    long = "y" * 2000
+    await edited(server, mock_gorelo, [edit(long, "z")], stored=f"<p>{long}</p>")
+    assert mock_gorelo.last.json == {"Body": "<p>z</p>"}
+
+
+async def test_fifty_edits_are_accepted(server, mock_gorelo):
+    stored = "".join(f"<p>item-{i:02d}</p>" for i in range(50))
+    await edited(server, mock_gorelo, [edit(f"item-{i:02d}", f"done-{i:02d}") for i in range(50)], stored=stored)
+    assert mock_gorelo.last.json["Body"] == "".join(f"<p>done-{i:02d}</p>" for i in range(50))
+
+
+@pytest.mark.parametrize("stored", ["missing", None, 5, ["<p>x</p>"], {"a": 1}], ids=["missing", "null", "number", "list", "object"])
+async def test_a_stored_body_that_is_missing_or_not_text_stops_the_edit_before_any_write(server, mock_gorelo, stored):
+    record = detail()
+    if stored == "missing":
+        del record["Body"]
+    else:
+        record["Body"] = stored
+    get_route(mock_gorelo, record)
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": [edit("x", "y")]})
+    assert text.startswith("Gorelo returned an unexpected response for update_document") and "nothing was changed" in text
+    assert "write may have been applied" not in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_edits_together_with_title_and_attachments_go_out_in_one_patch_after_one_read(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Body=STORED, Attachments=[PLAN]))
+    patch_route(mock_gorelo, detail(Title="New title", Body=STORED.replace("02:00", "03:30"), Attachments=[PLAN, NEW_FILE]))
+    await call_tool(
+        server, "update_document",
+        {"document_id": DOC, "title": "New title", "edits": [edit("02:00", "03:30")],
+         "attachments": [{"name": "plan.pdf", "url": URL_PLAN}, {"name": "new.txt", "url": URL_NEW}]},
+    )
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
+    assert mock_gorelo.last.json == {"Title": "New title", "Body": STORED.replace("02:00", "03:30"), "Attachments": [PLAN, NEW_FILE]}
+
+
+async def test_edits_with_clear_fields_attachments_still_read_the_document_once(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Body=STORED, Attachments=[PLAN]))
+    patch_route(mock_gorelo, detail(Body=STORED.replace("02:00", "03:30"), Attachments=[]))
+    await call_tool(server, "update_document", {"document_id": DOC, "edits": [edit("02:00", "03:30")], "clear_fields": ["attachments"]})
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
+    assert mock_gorelo.last.json == {"Body": STORED.replace("02:00", "03:30"), "Attachments": []}
+
+
+async def test_edits_keep_the_attachment_checks_of_a_body_change(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Body=STORED, Attachments=[PLAN]))
+    patch_route(mock_gorelo, detail(Body=STORED.replace("02:00", "03:30"), Attachments=[]))  # the files were lost
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": [edit("02:00", "03:30")]})
+    assert "Attachments are not the ones that were asked for" in text and "verify it with a read before repeating it" in text
+
+
+async def test_edits_with_an_unusable_attachment_list_in_the_read_stop_before_any_write(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Body=STORED, Attachments=None))
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": [edit("02:00", "03:30")]})
+    assert "nothing was changed" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_the_answer_of_an_edit_is_checked_like_the_answer_of_a_body_change(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Body=STORED))
+    patch_route(mock_gorelo, detail(Body=""))
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "edits": [edit("02:00", "03:30")]})
+    assert "Body is missing or blank" in text and "verify it with a read before repeating it" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "PATCH"]
+
+
+async def test_an_edit_of_a_shared_document_carries_the_exposure_note_and_return_body_keeps_it(server, mock_gorelo):
+    get_route(mock_gorelo, detail(Body=STORED))
+    patch_route(mock_gorelo, detail(Body=STORED.replace("02:00", "03:30"), PublishToPortalEnabled=True))
+    result = await call_tool(server, "update_document", {"document_id": DOC, "edits": [edit("02:00", "03:30")], "return_body": False})
+    assert result["note"] == "The answer shows that it is published to the client portal. Tell the user; unshare_document turns it off."
+    assert "Body" not in result and result["BodyLength"] == len(STORED)
+
+
+async def test_the_body_and_the_find_texts_never_reach_the_logs_on_edit(server, mock_gorelo, caplog):
+    get_route(mock_gorelo, detail(Body="<p>SECRET-BODY-123</p>"))
+    patch_route(mock_gorelo, detail(Body="<p>SECRET-NEW-456</p>"))
+    with caplog.at_level(logging.DEBUG):
+        await call_tool(server, "update_document", {"document_id": DOC, "edits": [edit("SECRET-BODY-123", "SECRET-NEW-456")]})
+        await call_tool_error(server, "update_document", {"document_id": DOC, "edits": [edit("SECRET-ABSENT-789", "x")]})
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert not any(secret in logged for secret in ("SECRET-BODY-123", "SECRET-NEW-456", "SECRET-ABSENT-789"))
+
+
+async def test_return_body_defaults_to_true_and_the_record_is_unchanged(server, mock_gorelo):
+    result = await edited(server, mock_gorelo, [edit("02:00", "03:30")])
+    assert "Body" in result and "BodyLength" not in result
+
+
+async def test_return_body_false_swaps_the_body_for_its_length_in_place(server, mock_gorelo):
+    get_route(mock_gorelo)
+    patch_route(mock_gorelo, detail(Body="<p>New body \u00e9</p>"))
+    result = await call_tool(server, "update_document", {"document_id": DOC, "body": "<p>New body \u00e9</p>", "return_body": False})
+    assert "Body" not in result and result["BodyLength"] == len("<p>New body \u00e9</p>")
+    expected = detail(Body="<p>New body \u00e9</p>")
+    assert list(result) == ["BodyLength" if key == "Body" else key for key in expected]
+    assert {k: v for k, v in result.items() if k != "BodyLength"} == {k: v for k, v in expected.items() if k != "Body"}
+
+
+@pytest.mark.parametrize("args", [{"is_starred": True}, {"title": "T2"}, {"clear_fields": ["alternate_name"]}], ids=["star", "title", "clear"])
+async def test_return_body_false_applies_to_every_write_that_returns_the_record(server, mock_gorelo, args):
+    get_route(mock_gorelo)
+    patch_route(mock_gorelo, detail(Title="T2", IsStarred=True, Body="<p>Run the nightly job.</p>"))
+    result = await call_tool(server, "update_document", {"document_id": DOC, **args, "return_body": False})
+    assert "Body" not in result and result["BodyLength"] == len("<p>Run the nightly job.</p>")
+
+
+@pytest.mark.parametrize("body", ["missing", None, 5], ids=["missing", "null", "number"])
+async def test_return_body_false_leaves_a_record_without_a_text_body_as_it_is(server, mock_gorelo, body):
+    answer = detail(IsStarred=True)
+    if body == "missing":
+        del answer["Body"]
+    else:
+        answer["Body"] = body
+    patch_route(mock_gorelo, answer)
+    result = await call_tool(server, "update_document", {"document_id": DOC, "is_starred": True, "return_body": False})
+    assert "BodyLength" not in result
+    assert result.get("Body", "missing") == body
+
+
+@pytest.mark.parametrize("flag", ["false", "no", 0, 1, None])
+async def test_return_body_is_a_strict_boolean(server, mock_gorelo, flag):
+    assert "return_body" in await call_tool_error(server, "update_document", {"document_id": DOC, "is_starred": True, "return_body": flag})
+    assert mock_gorelo.requests == []
+
+
+async def test_an_error_does_not_depend_on_return_body(server, mock_gorelo):
+    patch_route(mock_gorelo, detail(IsStarred=False))
+    text = await call_tool_error(server, "update_document", {"document_id": DOC, "is_starred": True, "return_body": False})
+    assert "IsStarred is not the value that was sent" in text
+
+
+async def test_the_update_texts_stay_within_the_caps_and_name_the_edit_workflow(server):
+    tool = tool_def("update_document", await list_tools(server))
+    assert len(tool.description) <= 900
+    assert "get_document once" in tool.description and "edits" in tool.description and "return_body=false" in tool.description
+    for name in ("edits", "return_body", "body"):
+        assert len(tool.inputSchema["properties"][name]["description"]) <= 220
+    # a find must not carry a url whose token changes on every read
+    assert "no image or attachment url" in tool.inputSchema["properties"]["edits"]["description"]
+    # a change that someone else saves between the read and the write is replaced, and the tool that recovers it is named
+    assert "someone else saves between the tool's read and its write is replaced" in tool.description
+    assert "restore_document_version" in tool.description
+    assert any(spec.name == "restore_document_version" for spec in module_specs())
+    # the item schema: two required text fields, nothing else accepted
+    item = tool.inputSchema["properties"]["edits"]["items"]
+    assert item["additionalProperties"] is False and sorted(item["required"]) == ["find", "replace"]
+    assert {name: prop["type"] for name, prop in item["properties"].items()} == {"find": "string", "replace": "string"}
+    assert tool.inputSchema["properties"]["return_body"]["default"] is True
 
 
 # --------------------------------------------------------------------------

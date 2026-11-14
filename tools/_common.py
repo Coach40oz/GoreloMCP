@@ -568,7 +568,7 @@ def client_of(ctx: Context) -> GoreloClient:
 def server_info_of(ctx: Context) -> dict[str, Any]:
     """What the lifespan exposes besides the client, for diagnostics such as health_check: {"toolsets": sorted
     list or None, "destructive": bool or None, "gated_tools": sorted list of the registered gated tool names (empty
-    when none) or None, "spec_sha256": str or None}."""
+    when none) or None, "spec_sha256": str or None, "version": the server version text or None}."""
     state = _lifespan_dict(ctx)
     spec = state.get("spec")
     return {
@@ -576,6 +576,7 @@ def server_info_of(ctx: Context) -> dict[str, Any]:
         "destructive": state.get("destructive"),
         "gated_tools": state.get("gated_tools"),
         "spec_sha256": getattr(spec, "sha256", None),
+        "version": state.get("version"),
     }
 
 
@@ -1137,6 +1138,30 @@ def all_result(
         "count_mismatch": res.count_mismatch,
         "filters": _present(filters),
     }
+
+
+def summary_rows(items: list[Any], fields: list[str] | tuple[str, ...], *, op_key: str, tool: str) -> list[dict[str, Any]]:
+    """The rows of a list reduced to a summary: only the named top-level `fields` of each row object, in the order of `fields`.
+
+    A field a row does not have is left out of that row (nothing is invented, not even null), so a summary never says
+    more than Gorelo's row did; a field the row has with a null value stays null. Values are passed through unchanged.
+    A row that is not an object (and `items` that is not a list) raises the usual GoreloAPIError(kind="shape") for
+    `op_key`, naming what came back without quoting it. `fields` must be a non-empty list or tuple of
+    non-blank names without repeats, else ValueError: that is a mistake of the tool, not of Gorelo. Returns a new list.
+    """
+    names = list(fields) if isinstance(fields, (list, tuple)) else []
+    if not names or any(not isinstance(name, str) or not name.strip() for name in names) or len(set(names)) != len(names):
+        raise ValueError("summary_rows: fields must be a non-empty list of distinct, non-blank field names")
+    if not isinstance(items, list):
+        raise _shape_error(op_key, f"expected a list of rows but got {describe_value(items)}", tool=tool, write=False)
+    rows: list[dict[str, Any]] = []
+    for position, row in enumerate(items):
+        if not isinstance(row, Mapping):
+            raise _shape_error(
+                op_key, f"row {position} is {describe_value(row)}, not an object", tool=tool, write=False
+            )
+        rows.append({name: row[name] for name in names if name in row})
+    return rows
 
 
 def ok_result(value: Any) -> dict[str, Any]:

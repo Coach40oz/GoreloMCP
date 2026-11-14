@@ -50,6 +50,8 @@ names, never the text of a record):
                    location of the TEST CLIENT, list_payments and get_payment, list_product_charges and get_product_charge, and the
                    structured documents of the Documents scope (list_structured_documents, get_structured_document, its submissions
                    and the first submission). Each single read uses the first id its list taught; an empty list skips it
+    1.7.0 reads       search_agents asks for agents with a failing antivirus (limit 5): it scans the agent list, 200 per request, so the row costs
+                   one request per 200 agents; the note holds counts only (count, total_count, matched, scanned)
     others         get_custom_asset (the first listed custom asset) and list_deletions (types 1 Client and 2 Contact only: a key
                    without the scope of a type gets a 403 for the whole call)
     test client    its status has a row of its own: the check of the site clients that runs first reads each configured client
@@ -701,6 +703,8 @@ CASES: tuple[Case, ...] = (
         extra=rows_without_custom_properties_note,
     ),
     Case("get_agent", "record", args=_by("agent", "an agent", "agent_id"), same_id="agent", extra=custom_properties_note),
+    # 1.7.0: the agent search scans the agents (200 per request); a failing antivirus is the common question, the answer is counts only
+    Case("search_agents", "search", args=lambda found: {"posture_failing": ["antivirus"], "limit": 5}),
     # 1.4.0 (contract 05200951c89e): the per-agent reads of the first listed agent, answers shown as counts only
     Case("list_agent_apps", "object", args=_by("agent", "an agent", "agent_id"), nonempty=True),
     Case("get_agent_hardware", "object", args=_by("agent", "an agent", "agent_id")),

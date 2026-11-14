@@ -517,6 +517,91 @@ async def test_an_empty_page_is_reported_as_one_with_its_total(server, mock_gore
     assert result["items"] == [] and result["count"] == 0 and result["total_count"] == 0 and result["has_more"] is False
 
 
+SUMMARY_FIELDS = [
+    "Id", "Number", "DisplayNumber", "ClientId", "ContractId", "Status", "InvoiceDate", "DueDate", "SubTotal", "TotalDiscount",
+    "TotalTax", "Total", "AmountPaid", "AmountDue", "Reference",
+]
+
+
+def test_the_invoice_summary_fields_are_pinned_and_are_fields_of_the_spec_model(spec_index):
+    assert list(invoices.INVOICE_SUMMARY_FIELDS) == SUMMARY_FIELDS
+    assert set(SUMMARY_FIELDS) <= set(spec_index.schema("InvoiceModel")["fields"])
+    assert spec_index.op("GET /v1/invoices").response["data"] == "[InvoiceModel]"
+
+
+async def test_list_invoices_view_is_a_full_or_summary_choice_that_defaults_to_full(server):
+    prop = tool_def("list_invoices", await list_tools(server)).inputSchema["properties"]["view"]
+    assert prop["enum"] == ["full", "summary"] and prop["default"] == "full" and prop["description"]
+    assert len(prop["description"]) <= 220
+    assert "view=summary keeps only the identifying, date and amount fields" in " ".join(inspect.getdoc(invoices.list_invoices).split())
+
+
+async def test_list_invoices_summary_keeps_only_the_named_fields_in_order_and_says_so_in_filters(server, mock_gorelo):
+    rows = [invoice(1043, (5, "Approved"), uid(6), Reference="PO-7"), invoice(1042)]
+    mock_gorelo.on("GET", INVOICES, paged_envelope(rows, total_count=2))
+    result = await call_tool(server, "list_invoices", {"view": "summary", "status_ids": [1, 5]})
+    assert mock_gorelo.last.query == {"StatusIds": "1,5", "PageSize": "50"}  # view is not a Gorelo parameter
+    assert [list(item) for item in result["items"]] == [SUMMARY_FIELDS, SUMMARY_FIELDS]
+    assert result["items"][0] == {name: rows[0][name] for name in SUMMARY_FIELDS}
+    assert result["items"][1]["Reference"] is None  # a null stays null
+    for dropped in ("ExternalId", "PaymentLink", "InvoiceTemplateId", "IsEmailSent", "CreatedOn", "UpdatedOn"):
+        assert all(dropped not in item for item in result["items"])
+    assert result["filters"] == {"status_ids": [1, 5], "view": "summary"}
+    assert (result["count"], result["total_count"], result["has_more"], result["page_size"]) == (2, 2, False, 50)
+
+
+async def test_list_invoices_summary_of_a_discounted_invoice_adds_up_from_the_summary_alone(server, mock_gorelo):
+    row = invoice(1042, SubTotal=100.0, TotalDiscount=10.0, TotalTax=9.0, Total=99.0)
+    mock_gorelo.on("GET", INVOICES, paged_envelope([row]))
+    item = (await call_tool(server, "list_invoices", {"view": "summary"}))["items"][0]
+    assert list(item).index("SubTotal") + 1 == list(item).index("TotalDiscount")  # right after SubTotal
+    assert item["TotalDiscount"] == 10.0
+    assert item["SubTotal"] - item["TotalDiscount"] + item["TotalTax"] == item["Total"]
+
+
+async def test_the_summary_view_text_names_the_money_fields(server):
+    prop = tool_def("list_invoices", await list_tools(server)).inputSchema["properties"]["view"]
+    for name in ("SubTotal", "TotalDiscount", "TotalTax", "Total", "AmountPaid", "AmountDue"):
+        assert name in prop["description"], name
+    assert len(prop["description"]) <= 160  # the cap this module's texts keep
+
+
+async def test_list_invoices_summary_leaves_out_a_field_the_row_does_not_have(server, mock_gorelo):
+    row = invoice(1042)
+    del row["ContractId"], row["Reference"]
+    mock_gorelo.on("GET", INVOICES, paged_envelope([row]))
+    result = await call_tool(server, "list_invoices", {"view": "summary"})
+    assert list(result["items"][0]) == [name for name in SUMMARY_FIELDS if name not in ("ContractId", "Reference")]
+
+
+@pytest.mark.parametrize("arguments", [{}, {"view": "full"}])
+async def test_list_invoices_full_view_returns_the_rows_unchanged_and_keeps_view_out_of_filters(server, mock_gorelo, arguments):
+    rows = [invoice(1042)]
+    mock_gorelo.on("GET", INVOICES, paged_envelope(rows))
+    result = await call_tool(server, "list_invoices", arguments)
+    assert result["items"] == rows and result["filters"] == {}
+
+
+async def test_list_invoices_summary_filters_can_be_repeated_for_the_next_page(server, mock_gorelo):
+    mock_gorelo.on("GET", INVOICES, paged_envelope([invoice()], next_cursor="c-2", total_count=2))
+    first = await call_tool(server, "list_invoices", {"view": "summary", "page_size": 1})
+    again = await call_tool(server, "list_invoices", {**first["filters"], "page_size": 1, "cursor": first["next_cursor"]})
+    assert again["filters"] == first["filters"] == {"view": "summary"}
+    assert mock_gorelo.last.query == {"PageSize": "1", "Cursor": "c-2"}
+
+
+@pytest.mark.parametrize("bad", ["brief", "", "SUMMARY", None, 1])
+async def test_list_invoices_refuses_a_view_that_is_not_full_or_summary(server, mock_gorelo, bad):
+    await call_tool_error(server, "list_invoices", {"view": bad})
+    assert mock_gorelo.requests == []
+
+
+async def test_list_invoices_summary_of_a_row_that_is_not_an_object_is_a_shape_error(server, mock_gorelo):
+    mock_gorelo.on("GET", INVOICES, paged_envelope([invoice(1042), "oops"]))
+    text = await call_tool_error(server, "list_invoices", {"view": "summary"})
+    assert "list_invoices" in text and "oops" not in text
+
+
 async def test_list_invoices_refuses_an_answer_that_is_not_a_list(server, mock_gorelo):
     mock_gorelo.on("GET", INVOICES, envelope({"Id": INVOICE_ID}, pagination(None, 1, has_more=False)))
     text = await call_tool_error(server, "list_invoices")

@@ -265,7 +265,7 @@ You should see `Active: active (running)`.
 journalctl -u gorelo-mcp.service --since "5 minutes ago" --no-pager
 ```
 
-You should see a line like `gorelo-mcp ready: toolsets=billing,core,tickets,time,uptime destructive=False tools=99` and a line containing `oauth state loaded`. Two more lines come before the ready line: `gorelo-mcp settings: api_host=api.usw.gorelo.io extra_redirect_domains=none` (the Gorelo host this server calls, and the extra sign-in domains you added, if any) and `gorelo-mcp gated tools: none` (the gated tools that are switched on: delete, void, approved-invoice, contract-write, sharing and related-item tools; none by default). If the start line's `api_host` is not the host of your region, fix `GORELO_BASE_URL` (step 3.3). If you see `refusing to start`, the line names every setting that is wrong: fix `.env` and run `systemctl restart gorelo-mcp.service`.
+You should see a line like `gorelo-mcp ready: version=1.7.0 toolsets=billing,core,tickets,time,uptime destructive=False tools=100` (the version is the one you installed; versions older than 1.7.0 print the line without `version=`) and a line containing `oauth state loaded`. Two more lines come before the ready line: `gorelo-mcp settings: api_host=api.usw.gorelo.io extra_redirect_domains=none` (the Gorelo host this server calls, and the extra sign-in domains you added, if any) and `gorelo-mcp gated tools: none` (the gated tools that are switched on: delete, void, approved-invoice, contract-write, sharing and related-item tools; none by default). If the start line's `api_host` is not the host of your region, fix `GORELO_BASE_URL` (step 3.3). If you see `refusing to start`, the line names every setting that is wrong: fix `.env` and run `systemctl restart gorelo-mcp.service`.
 
 ### 4.4 Check the local endpoint
 
@@ -526,7 +526,7 @@ sleep 5
 journalctl -u gorelo-mcp.service --since "1 minute ago" --no-pager | grep -E "gorelo-mcp (settings|gated tools|ready)|refusing"
 ```
 
-The `gorelo-mcp settings:` line shows the Gorelo host this server calls and the extra sign-in domains, the `gorelo-mcp ready:` line shows your toolsets and the `destructive=` flag, the `gorelo-mcp gated tools:` line names the gated tools that are on (or `none`), and a line with `refusing to start` names a wrong value. Start a new conversation in Claude to see the new tool list.
+The `gorelo-mcp settings:` line shows the Gorelo host this server calls and the extra sign-in domains, the `gorelo-mcp ready:` line shows the server version, your toolsets and the `destructive=` flag, the `gorelo-mcp gated tools:` line names the gated tools that are on (or `none`), and a line with `refusing to start` names a wrong value. Start a new conversation in Claude to see the new tool list.
 
 The full list of tools is in [tool-catalog.md](tool-catalog.md).
 
@@ -574,7 +574,7 @@ You should see the `ready:` line and `401`.
 
 Read the release notes (the commit messages or the GitHub release page) for any steps specific to the version.
 
-Then start a new conversation in Claude, since tool lists are read when a conversation starts.
+Then start a new conversation in Claude, since tool lists are read when a conversation starts. If a chat still lacks a tool the server registers, see "The chat does not show a tool that the server registers" in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ### 9.2 Roll back
 

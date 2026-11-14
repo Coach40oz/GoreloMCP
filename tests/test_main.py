@@ -36,6 +36,7 @@ from scripts import oauth_state
 from server import build_server as real_build_server
 import tools._common as common
 from tools._common import REGISTRY
+from version import VERSION
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATE_FILE = oauth_store.STATE_FILE_NAME
@@ -515,7 +516,7 @@ def test_the_start_logs_the_listed_gated_tools_sorted_and_keeps_the_ready_line_s
     assert launch.errors() == [] and launch.served
     assert gated_lines(launch) == ["gorelo-mcp gated tools: delete_item,delete_time_entry"]
     (ready,) = ready_lines(launch)
-    assert re.fullmatch(r"gorelo-mcp ready: toolsets=billing,core,tickets,time,uptime destructive=True tools=\d+", ready)
+    assert re.fullmatch(rf"gorelo-mcp ready: version={re.escape(VERSION)} toolsets=billing,core,tickets,time,uptime destructive=True tools=\d+", ready)
     (built,) = launch.built
     assert built.destructive is True and built.destructive_tools == frozenset({"delete_item", "delete_time_entry"})
 
@@ -557,7 +558,7 @@ def test_a_list_with_every_gated_name_starts_with_no_held_line_since_nothing_is_
     declared = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive")
     assert len(declared) == 18 and {"create_contract", "update_contract", "delete_contact"} <= set(declared)
     ready = _start_with_list(launch, monkeypatch, declared)
-    assert ready.endswith(" destructive=True tools=162")  # 144 regular tools and the 18 gated ones
+    assert ready.endswith(" destructive=True tools=163")  # 145 regular tools and the 18 gated ones
     assert gated_lines(launch) == ["gorelo-mcp gated tools: " + ",".join(declared)]
     assert [m for m in launch.messages() if "held" in m] == []  # an empty held set logs nothing
 
@@ -568,18 +569,18 @@ def test_the_gated_list_of_1_5_0_still_starts_cleanly_and_registers_17(launch, m
     listed = [name for name in declared if name != "delete_contact"]
     assert len(listed) == 17
     ready = _start_with_list(launch, monkeypatch, listed)
-    assert ready.endswith(" destructive=True tools=161")  # 144 regular tools and the 17 gated ones listed
+    assert ready.endswith(" destructive=True tools=162")  # 145 regular tools and the 17 gated ones listed
     assert [m for m in launch.messages() if "held" in m] == []
 
 
-def test_the_gated_list_of_1_5_2_starts_cleanly_registers_160_and_logs_no_held_line(launch, monkeypatch):
+def test_the_gated_list_of_1_5_2_starts_cleanly_registers_161_and_logs_no_held_line(launch, monkeypatch):
     # the production .env since the 1.5.2 deploy: 16 names, delete_contact in and the two contract writes out (the 1.5.3 code registers
     # the two only when the list names them)
     declared = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive")
     listed = [name for name in declared if name not in ("create_contract", "update_contract")]
     assert len(listed) == 16 and "delete_contact" in listed
     ready = _start_with_list(launch, monkeypatch, listed)
-    assert ready.endswith(" destructive=True tools=160")  # 144 regular tools and the 16 gated ones listed
+    assert ready.endswith(" destructive=True tools=161")  # 145 regular tools and the 16 gated ones listed
     assert gated_lines(launch) == ["gorelo-mcp gated tools: " + ",".join(listed)]
     assert [m for m in launch.messages() if "held" in m] == []
 
@@ -603,13 +604,13 @@ def test_a_list_with_held_names_starts_with_one_warning_between_the_gated_and_re
     declared = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive")
     listed = [name for name in declared if name != "delete_contact"]
     ready = _held_list_start(launch, monkeypatch, listed)
-    assert ready.endswith(" destructive=True tools=159")  # 144 regular tools and the 15 gated ones the list names that are not held
+    assert ready.endswith(" destructive=True tools=160")  # 145 regular tools and the 15 gated ones the list names that are not held
 
 
 def test_a_held_set_with_a_list_that_names_delete_contact_registers_it_next_to_the_other_gated_tools(launch, monkeypatch):
     declared = sorted(spec.name for spec in REGISTRY.specs if spec.kind == "destructive")
     ready = _held_list_start(launch, monkeypatch, declared)
-    assert ready.endswith(" destructive=True tools=160")
+    assert ready.endswith(" destructive=True tools=161")
     assert "delete_contact" in gated_lines(launch)[0].split(": ", 1)[1].split(",")
 
 

@@ -32,6 +32,7 @@ from conftest import (
 from fastmcp.exceptions import ToolError
 
 import tools._common as common
+import tools._ticket_ref as ticket_ref
 import tools.tickets as tickets  # importing it also imports the package, which registers every tool
 from gorelo_client import FORBIDDEN_OPS
 from pydantic import Strict
@@ -54,6 +55,8 @@ STATUSES_PATH = "/v1/tickets/statuses"
 TYPES_PATH = "/v1/tickets/types"
 TAGS_PATH = "/v1/tickets/tags"
 T1, T2, T3 = uid(1), uid(2), uid(3)
+OPEN_STATUS_IDS = [1, 2, 3, 6, 7301]  # the ids of STATUSES whose BaseStatus is not 4 (Closed), in the order Gorelo lists them
+OPEN_STATUS_CSV = "1,2,3,6,7301"
 
 # What the shared positive_id / positive_ids / guid / guids helpers say (tools/_common.py).
 NOT_POSITIVE = "expected a positive whole number such as 123, got zero or a negative number"
@@ -241,7 +244,7 @@ EXPECTED_TOOLS = {
     "search_tickets": ("read", ["GET /v1/tickets", "GET /v1/tickets/statuses", "GET /v1/tickets/types"]),
     "get_ticket": ("read", ["GET /v1/tickets/{ticketId}", "GET /v1/tickets"]),
     "create_ticket": ("write", ["POST /v1/tickets", "GET /v1/tickets/{ticketId}"]),
-    "update_ticket": ("write", ["PATCH /v1/tickets/{ticketId}", "GET /v1/tickets/{ticketId}"]),
+    "update_ticket": ("write", ["PATCH /v1/tickets/{ticketId}", "GET /v1/tickets/{ticketId}", "GET /v1/tickets"]),
     "list_ticket_statuses": ("read", ["GET /v1/tickets/statuses"]),
     "list_ticket_types": ("read", ["GET /v1/tickets/types"]),
     "list_ticket_tags": ("read", ["GET /v1/tickets/tags"]),
@@ -254,11 +257,13 @@ EXPECTED_PARAMS = {
     "list_tickets": [
         "status_ids", "client_ids", "priority_ids", "type_ids", "lead_assignee_ids", "contact_ids", "tag_ids",
         "group_ids", "device_ids", "source_ids", "query", "updated_since", "updated_before", "created_since",
-        "created_before", "closed_since", "closed_before", "sort_by", "sort_order", "page_size", "cursor",
+        "created_before", "closed_since", "closed_before", "sort_by", "sort_order", "page_size", "cursor", "view",
     ],
     "search_tickets": [
-        "client_id", "status", "priority", "type", "source_ids", "query", "updated_since", "created_since",
+        "client_id", "status", "priority", "type", "lead_assignee_ids", "contact_ids", "tag_ids", "group_ids",
+        "device_ids", "source_ids", "query", "updated_since", "updated_before", "created_since", "created_before",
         "closed_since", "closed_before", "unassigned_only", "awaiting_client", "unread_only", "exclude_closed", "limit",
+        "view",
     ],
     "get_ticket": ["ticket_id"],
     "create_ticket": [
@@ -359,11 +364,18 @@ def test_the_field_maps_name_real_spec_fields_and_cover_every_field(spec_index):
     assert {"SourceIds", "ClosedSince", "ClosedBefore"} <= set(listing.query_params)  # new in 6c30770dffc0
     assert set(tickets.LIST_QUERY_FIELDS.values()) | {"PageSize", "Cursor"} == set(listing.query_params)
     assert set(tickets.LIST_ERROR_FIELDS.values()) == set(listing.query_params)
-    assert set(tickets.SEARCH_ERROR_FIELDS.values()) <= {
-        "ClientIds", "StatusIds", "PriorityIds", "TypeIds", "SourceIds", "Query", "UpdatedSince", "CreatedSince",
+    assert set(tickets.SEARCH_ERROR_FIELDS.values()) == {
+        "ClientIds", "StatusIds", "PriorityIds", "TypeIds", "LeadAssigneeIds", "ContactIds", "TagIds", "GroupIds",
+        "DeviceIds", "SourceIds", "Query", "UpdatedSince", "UpdatedBefore", "CreatedSince", "CreatedBefore",
         "ClosedSince", "ClosedBefore",
     }
     assert set(tickets.SEARCH_ERROR_FIELDS.values()) <= set(listing.query_params)
+    # the new search filters keep the query name list_tickets sends for the same parameter
+    for param in ("lead_assignee_ids", "contact_ids", "tag_ids", "group_ids", "device_ids", "updated_before", "created_before"):
+        assert tickets.SEARCH_ERROR_FIELDS[param] == tickets.LIST_QUERY_FIELDS[param], param
+    # update_ticket maps ticket_id to the Query filter its number lookup sends, like get_ticket
+    assert tickets.UPDATE_ERROR_FIELDS == {**tickets.UPDATE_FIELDS, "ticket_id": "Query"}
+    assert "Query" in listing.query_params
     for path in ("/v1/tickets/priorities", "/v1/tickets/sources"):
         lookup = spec_index.op(f"GET {path}")
         assert not lookup.paged and not lookup.query_params
@@ -396,7 +408,7 @@ def test_the_docstrings_carry_what_the_documentation_requires():
     ):
         assert fragment in doc["list_tickets"], fragment
     for fragment in (
-        "awaiting_client, unassigned_only, unread_only and exclude_closed are applied to the rows read",
+        "awaiting_client, unassigned_only, unread_only and the ClosedOn check of exclude_closed run on the rows read",
         "complete_scan",
         "truncated",
         "total_count",
@@ -407,13 +419,24 @@ def test_the_docstrings_carry_what_the_documentation_requires():
     ):
         assert fragment in doc["search_tickets"], fragment
     assert f"reads up to {tickets.SEARCH_SCAN_CAP} tickets" in doc["search_tickets"]
+    # 1.7.0: the early stop, said plainly, and what exclude_closed leaves out
+    for fragment in (
+        "stopped_early",
+        "The scan stops once it holds limit + 1 matches: stopped_early is true and matched is a minimum",
+        "total_count is Gorelo's count for the server-side filters",
+        # what exclude_closed really does: without a status it asks only for non-Closed statuses; with one only ClosedOn applies
+        "exclude_closed without status asks only for non-Closed statuses; with status it drops only tickets with a ClosedOn time",
+        "so a Closed status can still be listed",
+    ):
+        assert fragment in doc["search_tickets"], fragment
+    assert "exclude_closed" not in doc["list_tickets"]
     assert f"raise limit (max {tickets.SEARCH_LIMIT_MAX})" in doc["search_tickets"]
     # prefer the GUID or the display number; a bare number scans several pages, and the scan is capped
     for fragment in (
         "Description", "Time", "Products", "BillingOverride", "Shipments", "Banner",
         "Prefer the GUID or the display number (TCK-1234)",
         "A bare number (1234) is searched with Query and can scan several pages",
-        f"capped at {tickets.LOOKUP_MAX_PAGES} pages of {tickets.LOOKUP_PAGE_SIZE} tickets",
+        f"capped at {ticket_ref.LOOKUP_MAX_PAGES} pages of {ticket_ref.LOOKUP_PAGE_SIZE} tickets",
         "no match or several matches is an error",
     ):
         assert fragment in doc["get_ticket"], fragment
@@ -492,6 +515,8 @@ RESOLVERS = {
     "search_tickets": {
         "client_id": "list_clients", "status": "list_ticket_statuses", "type": "list_ticket_types",
         "source_ids": "list_ticket_sources",
+        "lead_assignee_ids": "list_org_users", "contact_ids": "list_contacts", "tag_ids": "list_ticket_tags",
+        "group_ids": "list_org_groups", "device_ids": "list_agents",
     },
     "create_ticket": {
         "client_id": "list_clients", "status_id": "list_ticket_statuses", "type_id": "list_ticket_types",
@@ -508,7 +533,7 @@ RESOLVERS = {
         "assisting_assignee_ids": "list_org_users", "watcher_ids": "list_org_users", "tag_ids": "list_ticket_tags",
         "agent_asset_ids": "list_agents", "custom_asset_ids": "list_custom_assets", "uptime_ids": "list_uptime_checks",
         "billing_service_line_id": "list_contracts", "billing_role_id": "list_billing_roles",
-        "billing_work_type_id": "list_work_types", "ticket_id": "get_ticket",
+        "billing_work_type_id": "list_work_types",
     },
 }
 
@@ -556,6 +581,11 @@ async def test_the_parameter_descriptions_carry_the_warnings_and_the_scales(serv
     assert "Not also a watcher: " + conflict in describe["update_ticket"]["lead_assignee_id"]
     assert "Not also a watcher: " + conflict in describe["update_ticket"]["assisting_assignee_ids"]
     assert "Not also lead or assisting: " + conflict in describe["update_ticket"]["watcher_ids"]
+    exclude_closed_text = describe["search_tickets"]["exclude_closed"]
+    assert "with no status, ask only for non-Closed statuses" in exclude_closed_text
+    assert "with a status, that is the only check" in exclude_closed_text and len(exclude_closed_text) <= 220
+    assert "drop tickets in a Closed status" not in exclude_closed_text  # that is not what happens when a status is given
+    assert describe["update_ticket"]["ticket_id"] == describe["get_ticket"]["ticket_id"] == "Ticket GUID, display number (TCK-1234) or number (1234)"
     assert "needs created_on and a closed status_id" in describe["create_ticket"]["closed_on"]
     assert "needs a closed status" in describe["update_ticket"]["closed_on"]
     assert describe["update_ticket"]["closed_on"] == (
@@ -1147,6 +1177,7 @@ async def test_search_tickets_without_filters_scans_with_the_page_size_only_and_
         "filters": {"limit": 50},
         "matched": 2,
         "scanned": 2,
+        "stopped_early": False,
     }
 
 
@@ -1410,15 +1441,18 @@ def mixed_rows():
     ],
 )
 async def test_search_tickets_applies_the_four_client_side_filters_to_the_scanned_rows(server, mock_gorelo, args, wanted):
+    lookups(mock_gorelo)  # exclude_closed without a status reads the statuses first
     mock_gorelo.on("GET", LIST, paged_envelope(mixed_rows()))
     result = await call_tool(server, "search_tickets", args)
     assert ids_of(result) == [uid(n) for n in wanted]
     assert result["count"] == len(wanted) == result["matched"]
     assert result["scanned"] == 5 and result["total_count"] == 5
     assert result["truncated"] is False and result["complete_scan"] is True
-    assert "note" not in result
-    # the client-side flags never reach the API: only the page size is sent
-    assert mock_gorelo.last.query == {"PageSize": "200"} and len(mock_gorelo.requests) == 1
+    assert "note" not in result and result["stopped_early"] is False
+    # the client-side flags never reach the API: only the page size is sent (and, for exclude_closed, the open status ids)
+    narrowed = args.get("exclude_closed") is True
+    assert mock_gorelo.last.query == ({"StatusIds": OPEN_STATUS_CSV, "PageSize": "200"} if narrowed else {"PageSize": "200"})
+    assert len(mock_gorelo.requests) == (2 if narrowed else 1)
 
 
 SINGLE_SEARCH_FILTERS = [
@@ -1453,9 +1487,15 @@ async def test_search_tickets_a_null_or_missing_boolean_counts_as_false(server, 
 
 
 async def test_search_tickets_reports_the_active_client_side_filters_and_omits_the_inactive_ones(server, mock_gorelo):
+    lookups(mock_gorelo)
     mock_gorelo.on("GET", LIST, paged_envelope(mixed_rows()))
     result = await call_tool(server, "search_tickets", {"unassigned_only": True, "awaiting_client": False, "exclude_closed": True})
-    assert result["filters"] == {"unassigned_only": True, "awaiting_client": False, "exclude_closed": True, "limit": 50}
+    assert result["filters"] == {
+        "unassigned_only": True, "awaiting_client": False, "exclude_closed": True,
+        "exclude_closed_status_ids": OPEN_STATUS_IDS, "limit": 50,
+    }
+    result = await call_tool(server, "search_tickets", {"unassigned_only": True, "awaiting_client": False})
+    assert result["filters"] == {"unassigned_only": True, "awaiting_client": False, "limit": 50}
 
 
 async def test_search_tickets_combines_server_side_and_client_side_filters_with_and(server, mock_gorelo):
@@ -1575,6 +1615,7 @@ async def test_search_tickets_an_empty_result_is_explicit(server, mock_gorelo):
         "filters": {"client_id": 9101, "status": "Closed", "status_id": 4, "unassigned_only": True, "limit": 50},
         "matched": 0,
         "scanned": 0,
+        "stopped_early": False,
     }
 
 
@@ -1597,6 +1638,7 @@ async def test_search_tickets_returns_gorelo_records_unchanged(server, mock_gore
 async def test_search_tickets_refuses_a_filter_whose_field_no_row_carries_and_names_the_parameter(
     server, mock_gorelo, args, param, field
 ):
+    lookups(mock_gorelo)
     rows = []
     for n in (1, 2, 3):
         row = ticket_row(n)
@@ -1611,6 +1653,7 @@ async def test_search_tickets_refuses_a_filter_whose_field_no_row_carries_and_na
 
 
 async def test_search_tickets_names_only_the_filter_whose_field_is_missing(server, mock_gorelo):
+    lookups(mock_gorelo)
     rows = [ticket_row(n) for n in (1, 2)]
     for row in rows:
         del row["IsUnread"]
@@ -1628,6 +1671,7 @@ async def test_search_tickets_does_not_need_the_field_when_that_filter_is_off(se
 
 
 async def test_search_tickets_a_row_that_lacks_a_nullable_field_is_treated_as_null_when_others_have_it(server, mock_gorelo):
+    lookups(mock_gorelo)
     sparse = ticket_row(2)
     del sparse["ClosedOn"]
     mock_gorelo.on("GET", LIST, paged_envelope([ticket_row(1, ClosedOn="2026-09-01T00:00:00Z"), sparse]))
@@ -1659,6 +1703,7 @@ async def test_search_tickets_refuses_a_flag_that_is_not_a_boolean_and_names_the
     ],
 )
 async def test_search_tickets_refuses_a_row_that_is_not_an_object_and_names_the_filters_it_blocks(server, mock_gorelo, args, names):
+    lookups(mock_gorelo)
     mock_gorelo.on("GET", LIST, paged_envelope(["not a ticket"]))
     text = await call_tool_error(server, "search_tickets", args)
     assert f"a ticket row is not an object, so the filter(s) {names} cannot be applied; refusing to guess" in text
@@ -1708,6 +1753,527 @@ async def test_search_tickets_a_repeated_cursor_is_an_error_not_a_loop(server, m
     text = await call_tool_error(server, "search_tickets")
     assert "cursor it had already served" in text
     assert len(mock_gorelo.calls("GET", LIST)) == 2
+
+
+# --------------------------------------------------------------------------
+# search_tickets: the filters it shares with list_tickets (1.7.0)
+# --------------------------------------------------------------------------
+
+NEW_FILTERS_ARGS = {
+    "lead_assignee_ids": [9201, 9202],
+    "contact_ids": [7001, 7002],
+    "tag_ids": [5, 6],
+    "group_ids": [7201],
+    "device_ids": [T1.upper(), T2.replace("-", "")],
+    "updated_before": "2026-10-02T02:00:00+02:00",
+    "created_before": "2026-09-30T20:00:00-04:00",
+}
+
+
+async def test_search_tickets_sends_the_new_filters_with_the_names_and_values_list_tickets_uses(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_envelope([ticket_row(1)]))
+    result = await call_tool(server, "search_tickets", NEW_FILTERS_ARGS)
+    assert mock_gorelo.last.query == {
+        "LeadAssigneeIds": "9201,9202",
+        "ContactIds": "7001,7002",
+        "TagIds": "5,6",
+        "GroupIds": "7201",
+        "DeviceIds": f"{T1},{T2}",
+        "UpdatedBefore": "2026-10-02T00:00:00Z",
+        "CreatedBefore": "2026-10-01T00:00:00Z",
+        "PageSize": "200",
+    }
+    assert result["filters"] == {
+        "lead_assignee_ids": [9201, 9202], "contact_ids": [7001, 7002], "tag_ids": [5, 6], "group_ids": [7201],
+        "device_ids": [T1, T2], "updated_before": "2026-10-02T00:00:00Z", "created_before": "2026-10-01T00:00:00Z",
+        "limit": 50,
+    }
+    # the same arguments to list_tickets send the same query names and values
+    searched = {name: value for name, value in mock_gorelo.last.query.items() if name != "PageSize"}
+    await call_tool(server, "list_tickets", NEW_FILTERS_ARGS)
+    assert {name: value for name, value in mock_gorelo.last.query.items() if name != "PageSize"} == searched
+
+
+@pytest.mark.parametrize(
+    "param, value, sent",
+    [
+        ("lead_assignee_ids", [9201], {"LeadAssigneeIds": "9201"}),
+        ("contact_ids", [7001, 7002], {"ContactIds": "7001,7002"}),
+        ("tag_ids", [5], {"TagIds": "5"}),
+        ("group_ids", [7201], {"GroupIds": "7201"}),
+        ("device_ids", [T3], {"DeviceIds": T3}),
+        ("updated_before", "2026-10-01T02:00:00+02:00", {"UpdatedBefore": "2026-10-01T00:00:00Z"}),
+        ("created_before", "2026-09-30T20:00:00-04:00", {"CreatedBefore": "2026-10-01T00:00:00Z"}),
+    ],
+)
+async def test_search_tickets_each_new_filter_alone_sends_only_its_own_query_name(server, mock_gorelo, param, value, sent):
+    mock_gorelo.on("GET", LIST, paged_envelope([]))
+    await call_tool(server, "search_tickets", {param: value})
+    assert mock_gorelo.last.query == {**sent, "PageSize": "200"}
+
+
+async def test_search_tickets_the_new_filters_combine_with_the_older_ones_and_the_client_side_flags(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_envelope(mixed_rows()))
+    result = await call_tool(server, "search_tickets", {"client_id": 9102, "tag_ids": [5], "unread_only": True})
+    assert mock_gorelo.last.query == {"ClientIds": "9102", "TagIds": "5", "PageSize": "200"}
+    assert ids_of(result) == [uid(1), uid(4), uid(5)]
+
+
+NEW_FILTER_VALIDATION = [
+    pytest.param({"lead_assignee_ids": [0]}, f"lead_assignee_ids[0]: {NOT_POSITIVE}", id="lead-zero"),
+    pytest.param({"lead_assignee_ids": []}, f"lead_assignee_ids: {NO_IDS}", id="lead-empty"),
+    pytest.param({"contact_ids": [-1]}, f"contact_ids[0]: {NOT_POSITIVE}", id="contact-negative"),
+    pytest.param({"tag_ids": []}, f"tag_ids: {NO_IDS}", id="tag-empty"),
+    pytest.param({"group_ids": [0]}, f"group_ids[0]: {NOT_POSITIVE}", id="group-zero"),
+    pytest.param({"group_ids": [1] * 101}, "group_ids: Gorelo accepts at most 100 ids in one filter, got 101", id="too-many-groups"),
+    pytest.param({"device_ids": ["not-a-guid"]}, f"device_ids[0]: {NOT_A_GUID}", id="device-not-a-guid"),
+    pytest.param({"device_ids": []}, "device_ids:", id="device-empty"),
+    pytest.param({"device_ids": [uid(n) for n in range(1, 102)]}, "device_ids: at most 100 values, got 101", id="too-many-devices"),
+    pytest.param({"updated_before": "2026-10-01"}, "updated_before: '2026-10-01' has no UTC offset", id="naive-updated-before"),
+    pytest.param({"created_before": "soon"}, "created_before: 'soon' is not an ISO 8601 datetime", id="bad-created-before"),
+    pytest.param(
+        {"updated_since": "2026-10-02T00:00:00Z", "updated_before": "2026-10-02T00:00:00Z"},
+        "updated_since: 2026-10-02T00:00:00Z is not earlier than updated_before",
+        id="updated-range-empty",
+    ),
+    pytest.param(
+        {"created_since": "2026-10-03T00:00:00Z", "created_before": "2026-10-02T00:00:00Z"},
+        "created_since: 2026-10-03T00:00:00Z is not earlier than created_before",
+        id="created-range-empty",
+    ),
+    pytest.param(
+        {"unassigned_only": True, "lead_assignee_ids": [9201]},
+        "unassigned_only: cannot be combined with lead_assignee_ids",
+        id="unassigned-with-lead",
+    ),
+]
+
+
+@pytest.mark.parametrize("args, fragment", NEW_FILTER_VALIDATION)
+async def test_search_tickets_new_filter_errors_name_the_parameter_and_send_nothing(server, mock_gorelo, args, fragment):
+    text = await call_tool_error(server, "search_tickets", args)
+    assert fragment in text
+    assert mock_gorelo.requests == []
+
+
+async def test_search_tickets_unassigned_only_with_lead_assignee_ids_is_refused_before_a_status_lookup(server, mock_gorelo):
+    lookups(mock_gorelo)
+    text = await call_tool_error(
+        server, "search_tickets", {"unassigned_only": True, "lead_assignee_ids": [9201], "status": "Closed", "exclude_closed": True}
+    )
+    assert "nothing could match" in text and "drop one of them" in text
+    assert mock_gorelo.requests == []
+    mock_gorelo.on("GET", LIST, paged_envelope([]))
+    await call_tool(server, "search_tickets", {"unassigned_only": True, "tag_ids": [5]})  # other filters are fine
+    assert mock_gorelo.last.query == {"TagIds": "5", "PageSize": "200"}
+
+
+@pytest.mark.parametrize(
+    "prop, param",
+    [("LeadAssigneeIds", "lead_assignee_ids"), ("ContactIds", "contact_ids"), ("TagIds", "tag_ids"), ("GroupIds", "group_ids"), ("DeviceIds", "device_ids"), ("UpdatedBefore", "updated_before"), ("CreatedBefore", "created_before")],
+)
+async def test_search_tickets_maps_a_gorelo_error_on_a_new_filter_to_its_parameter(server, mock_gorelo, prop, param):
+    mock_gorelo.on("GET", LIST, error_envelope(400, [("070101", "rejected", prop)]))
+    text = await call_tool_error(server, "search_tickets")
+    assert f"{param}: rejected" in text
+
+
+async def test_search_tickets_shares_the_texts_of_the_filters_it_has_in_common_with_list_tickets(server):
+    props = {tool.name: tool.inputSchema["properties"] for tool in await list_tools(server) if tool.name in ("list_tickets", "search_tickets")}
+    for param in ("lead_assignee_ids", "contact_ids", "tag_ids", "group_ids", "device_ids", "source_ids", "query", "updated_since", "updated_before", "created_since", "created_before", "closed_since", "closed_before", "view"):
+        assert props["search_tickets"][param]["description"] == props["list_tickets"][param]["description"], param
+    for param in ("lead_assignee_ids", "contact_ids", "tag_ids", "group_ids"):
+        assert props["search_tickets"][param]["items"]["type"] == "integer"
+    assert props["search_tickets"]["device_ids"]["items"]["type"] == "string"
+
+
+# --------------------------------------------------------------------------
+# search_tickets: the scan stops as soon as it holds limit + 1 matches (stopped_early)
+# --------------------------------------------------------------------------
+
+
+def pages_of(size, count, **over):
+    """`count` pages of `size` tickets each, numbered from 1 (the tickets of one page are consecutive)."""
+    number = iter(range(1, size * count + 1))
+    return [[ticket_row(next(number), **over) for _ in range(size)] for _ in range(count)]
+
+
+async def test_search_tickets_stops_after_the_page_that_holds_more_than_limit_matches_and_reads_no_further(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_responder(pages_of(3, 4)))
+    result = await call_tool(server, "search_tickets", {"limit": 2})
+    assert [r.query for r in mock_gorelo.calls("GET", LIST)] == [{"PageSize": "200"}]  # one request of four pages
+    assert result["stopped_early"] is True and result["truncated"] is True and result["complete_scan"] is False
+    assert ids_of(result) == [uid(1), uid(2)] and result["count"] == 2
+    assert (result["matched"], result["scanned"], result["total_count"]) == (3, 3, 12)
+    assert result["count_mismatch"] is False and result["filters"] == {"limit": 2}
+    assert result["note"] == (
+        "the scan stopped early after 3 tickets because more than 2 matched: matched (3) is a minimum and 2 are "
+        "returned; total_count is Gorelo's count for the server-side filters (it equals the number of matches when no "
+        "client-side filter is active); raise limit (max 500) or narrow the filters"
+    )
+
+
+async def test_search_tickets_reads_only_the_pages_it_needs_to_pass_the_limit(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_responder(pages_of(3, 6)))
+    result = await call_tool(server, "search_tickets", {"limit": 4})  # 3 matches after page 1, 6 after page 2
+    assert [r.query.get("Cursor") for r in mock_gorelo.calls("GET", LIST)] == [None, "c1"]
+    assert result["stopped_early"] is True and (result["matched"], result["scanned"], result["count"]) == (6, 6, 4)
+    assert ids_of(result) == [uid(n) for n in range(1, 5)] and result["total_count"] == 18
+
+
+async def test_search_tickets_counts_only_the_rows_that_pass_the_client_side_filters(server, mock_gorelo):
+    pages = [
+        [ticket_row(1, IsUnread=True), ticket_row(2), ticket_row(3)],
+        [ticket_row(4), ticket_row(5, IsUnread=True), ticket_row(6, IsUnread=True)],
+        [ticket_row(7, IsUnread=True), ticket_row(8), ticket_row(9, IsUnread=True)],
+    ]
+    mock_gorelo.on("GET", LIST, paged_responder(pages))
+    result = await call_tool(server, "search_tickets", {"unread_only": True, "limit": 2})
+    assert len(mock_gorelo.calls("GET", LIST)) == 2  # 1 match after page 1, 3 after page 2
+    assert ids_of(result) == [uid(1), uid(5)] and (result["matched"], result["scanned"]) == (3, 6)
+    assert result["stopped_early"] is True and result["truncated"] is True and result["total_count"] == 9
+    assert "matched (3) is a minimum" in result["note"] and "total_count is Gorelo's count" in result["note"]
+    assert result["filters"] == {"unread_only": True, "limit": 2}
+
+
+async def test_search_tickets_a_scan_that_holds_exactly_limit_matches_reads_every_page_and_is_exact(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_responder(pages_of(3, 3)))
+    result = await call_tool(server, "search_tickets", {"limit": 9})
+    assert len(mock_gorelo.calls("GET", LIST)) == 3
+    assert result == {
+        "items": [row for page in pages_of(3, 3) for row in page], "count": 9, "total_count": 9, "truncated": False,
+        "complete_scan": True, "count_mismatch": False, "filters": {"limit": 9}, "matched": 9, "scanned": 9,
+        "stopped_early": False,
+    }
+
+
+async def test_search_tickets_the_limit_plus_one_match_on_the_last_page_is_an_exact_complete_scan(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_responder(pages_of(3, 2)))
+    result = await call_tool(server, "search_tickets", {"limit": 5})  # the 6th ticket arrives with the last page
+    assert len(mock_gorelo.calls("GET", LIST)) == 2
+    assert result["stopped_early"] is False and result["complete_scan"] is True and result["truncated"] is True
+    assert (result["matched"], result["scanned"], result["count"]) == (6, 6, 5)
+    assert result["note"] == "6 tickets matched and 5 are returned: raise limit (max 500) or narrow the filters"
+
+
+async def test_search_tickets_a_scan_that_never_reaches_the_limit_is_what_it_was_before_stopped_early_aside(server, mock_gorelo):
+    pages = [[ticket_row(1, IsUnread=True), ticket_row(2)], [ticket_row(3), ticket_row(4, IsUnread=True)], [ticket_row(5)]]
+    mock_gorelo.on("GET", LIST, paged_responder(pages))
+    result = await call_tool(server, "search_tickets", {"unread_only": True, "limit": 3})
+    assert [r.query.get("Cursor") for r in mock_gorelo.calls("GET", LIST)] == [None, "c1", "c2"]
+    assert result.pop("stopped_early") is False
+    assert result == {
+        "items": [pages[0][0], pages[1][1]], "count": 2, "total_count": 5, "truncated": False, "complete_scan": True,
+        "count_mismatch": False, "filters": {"unread_only": True, "limit": 3}, "matched": 2, "scanned": 5,
+    }
+
+
+async def test_search_tickets_the_scan_cap_still_ends_a_scan_that_never_reaches_the_limit(server, mock_gorelo, monkeypatch):
+    monkeypatch.setattr(tickets, "SEARCH_SCAN_CAP", 4)
+    mock_gorelo.on("GET", LIST, paged_responder(pages_of(3, 3)))
+    result = await call_tool(server, "search_tickets", {"limit": 10})
+    assert len(mock_gorelo.calls("GET", LIST)) == 2 and result["scanned"] == 4
+    assert result["stopped_early"] is False and result["truncated"] is True and result["complete_scan"] is False
+    assert "the scan stopped after 4 tickets (cap 4) of 9" in result["note"] and "early" not in result["note"]
+
+
+async def test_search_tickets_when_the_cap_and_the_limit_are_reached_on_the_same_page_the_cap_note_stays(server, mock_gorelo, monkeypatch):
+    monkeypatch.setattr(tickets, "SEARCH_SCAN_CAP", 2)
+    mock_gorelo.on("GET", LIST, paged_responder(pages_of(3, 2)))
+    result = await call_tool(server, "search_tickets", {"limit": 1})
+    assert len(mock_gorelo.calls("GET", LIST)) == 1
+    assert result["stopped_early"] is False and result["truncated"] is True and result["scanned"] == 2 and result["matched"] == 2
+    assert result["note"].startswith("2 tickets matched and 1 are returned") and "(cap 2) of 6" in result["note"]
+
+
+async def test_search_tickets_stopping_early_still_refuses_a_filter_whose_field_no_row_carries(server, mock_gorelo):
+    lookups(mock_gorelo)
+    rows = [ticket_row(n) for n in (1, 2, 3)]
+    for row in rows:
+        del row["ClosedOn"]
+    mock_gorelo.on("GET", LIST, paged_responder([rows, [ticket_row(4)]]))
+    text = await call_tool_error(server, "search_tickets", {"exclude_closed": True, "limit": 1})
+    assert "none of the 3 scanned ticket rows has a ClosedOn field, so the exclude_closed filter cannot be applied" in text
+    assert len(mock_gorelo.calls("GET", LIST)) == 1
+
+
+async def test_search_tickets_stopping_early_with_a_summary_view_cuts_the_rows_after_the_limit(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_responder(pages_of(3, 2)))
+    result = await call_tool(server, "search_tickets", {"limit": 2, "view": "summary"})
+    assert result["stopped_early"] is True and result["count"] == 2 and result["matched"] == 3
+    assert [list(row) for row in result["items"]] == [[f for f in tickets.TICKET_SUMMARY_FIELDS]] * 2
+
+
+# --------------------------------------------------------------------------
+# search_tickets: exclude_closed without a status sends the ids of every status that is not Closed
+# --------------------------------------------------------------------------
+
+
+async def test_search_tickets_exclude_closed_without_a_status_sends_every_status_whose_base_status_is_not_closed(server, mock_gorelo):
+    lookups(mock_gorelo)
+    mock_gorelo.on("GET", LIST, paged_envelope(mixed_rows()))
+    result = await call_tool(server, "search_tickets", {"exclude_closed": True})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", STATUSES_PATH), ("GET", LIST)]
+    assert mock_gorelo.last.query == {"StatusIds": OPEN_STATUS_CSV, "PageSize": "200"}
+    assert result["filters"] == {"exclude_closed": True, "exclude_closed_status_ids": OPEN_STATUS_IDS, "limit": 50}
+    assert "status_id" not in result["filters"] and "status" not in result["filters"]
+    # the ClosedOn check stays the authority: tickets 3 and 4 have a close time whatever their status
+    assert ids_of(result) == [uid(1), uid(2), uid(5)] and "note" not in result
+
+
+async def test_search_tickets_exclude_closed_keeps_a_status_whose_base_is_not_closed_even_when_it_is_named_closed_like(server, mock_gorelo):
+    statuses = [status_row(10, "Done", 4), status_row(11, "Archived", 4), status_row(12, "Waiting", 6), status_row(13, "Parked", 3)]
+    lookups(mock_gorelo, statuses=statuses)
+    mock_gorelo.on("GET", LIST, paged_envelope([]))
+    await call_tool(server, "search_tickets", {"exclude_closed": True})
+    assert mock_gorelo.last.query == {"StatusIds": "12,13", "PageSize": "200"}
+
+
+async def test_search_tickets_exclude_closed_next_to_other_filters_adds_the_status_ids_and_reads_the_statuses_once(server, mock_gorelo):
+    lookups(mock_gorelo)
+    mock_gorelo.on("GET", LIST, paged_envelope([]))
+    result = await call_tool(server, "search_tickets", {"exclude_closed": True, "priority": "High", "type": "Incident", "client_id": 9102})
+    assert len(mock_gorelo.calls("GET", STATUSES_PATH)) == 1 and len(mock_gorelo.calls("GET", TYPES_PATH)) == 1
+    assert mock_gorelo.calls("GET", LIST)[0].query == {
+        "ClientIds": "9102", "PriorityIds": "2", "TypeIds": "7101", "StatusIds": OPEN_STATUS_CSV, "PageSize": "200",
+    }
+    assert result["filters"]["exclude_closed_status_ids"] == OPEN_STATUS_IDS
+
+
+@pytest.mark.parametrize("status, sent", [(4, "4"), ("In Progress", "2")])
+async def test_search_tickets_exclude_closed_with_a_status_changes_nothing(server, mock_gorelo, status, sent):
+    lookups(mock_gorelo)
+    mock_gorelo.on("GET", LIST, paged_envelope(mixed_rows()))
+    result = await call_tool(server, "search_tickets", {"exclude_closed": True, "status": status})
+    assert mock_gorelo.calls("GET", LIST)[0].query == {"StatusIds": sent, "PageSize": "200"}
+    assert len(mock_gorelo.calls("GET", STATUSES_PATH)) == (1 if isinstance(status, str) else 0)  # the name lookup only
+    assert "exclude_closed_status_ids" not in result["filters"] and "note" not in result
+    assert ids_of(result) == [uid(1), uid(2), uid(5)]
+
+
+async def test_search_tickets_exclude_closed_with_a_status_name_whose_base_status_is_closed_says_it_removed_no_closed_status(server, mock_gorelo):
+    # exclude_closed never changes a status that was given: Closed (BaseStatus 4) is still asked for, only ClosedOn drops rows,
+    # and the result must not read as "closed tickets were removed" (the texts and the note say what really happened)
+    lookups(mock_gorelo)
+    mock_gorelo.on("GET", LIST, paged_envelope(mixed_rows()))
+    result = await call_tool(server, "search_tickets", {"exclude_closed": True, "status": "closed"})
+    assert mock_gorelo.calls("GET", LIST)[0].query == {"StatusIds": "4", "PageSize": "200"}  # behavior unchanged
+    assert len(mock_gorelo.calls("GET", STATUSES_PATH)) == 1
+    assert ids_of(result) == [uid(1), uid(2), uid(5)]  # only the rows with a ClosedOn time were dropped
+    assert result["filters"]["status"] == "Closed" and result["filters"]["status_id"] == 4 and "exclude_closed_status_ids" not in result["filters"]
+    assert result["note"] == (
+        "status 'Closed' is a Closed status (BaseStatus 4): exclude_closed did not remove its tickets, it only dropped those "
+        "with a ClosedOn time, so closed tickets without one can still be listed"
+    )
+
+
+async def test_search_tickets_exclude_closed_with_a_status_id_has_no_status_row_and_adds_no_note(server, mock_gorelo):
+    lookups(mock_gorelo)
+    mock_gorelo.on("GET", LIST, paged_envelope(mixed_rows()))
+    result = await call_tool(server, "search_tickets", {"exclude_closed": True, "status": 4})
+    assert not mock_gorelo.calls("GET", STATUSES_PATH) and "note" not in result  # nothing was read, so nothing is claimed
+
+
+async def test_search_tickets_the_closed_status_note_needs_both_a_closed_base_status_and_exclude_closed(server, mock_gorelo):
+    lookups(mock_gorelo)
+    mock_gorelo.on("GET", LIST, paged_envelope(mixed_rows()))
+    assert "note" not in await call_tool(server, "search_tickets", {"status": "Closed"})  # no exclude_closed
+    assert "note" not in await call_tool(server, "search_tickets", {"status": "Solved", "exclude_closed": True})  # BaseStatus 3
+
+
+async def test_search_tickets_an_early_stop_on_the_last_page_with_a_different_total_count_is_a_count_mismatch(server, mock_gorelo):
+    # the page that holds more than `limit` matches is the last one, so the scan is complete (stopped_early false) and the
+    # TotalCount (5) that disagrees with the 3 rows read is reported, with its note, next to the other note
+    mock_gorelo.on("GET", LIST, envelope([ticket_row(1), ticket_row(2), ticket_row(3)], pagination(None, 5)))
+    result = await call_tool(server, "search_tickets", {"limit": 2})
+    assert len(mock_gorelo.calls("GET", LIST)) == 1
+    assert result["stopped_early"] is False and result["complete_scan"] is True and result["count_mismatch"] is True
+    assert (result["matched"], result["scanned"], result["total_count"], result["count"]) == (3, 3, 5, 2)
+    assert result["truncated"] is True and ids_of(result) == [uid(1), uid(2)]
+    assert result["note"] == (
+        "3 tickets matched and 2 are returned: raise limit (max 500) or narrow the filters; "
+        "Gorelo reported 5 matches but 3 rows were read (tickets changed during the scan): repeat the search"
+    )
+
+
+async def test_search_tickets_without_exclude_closed_never_reads_the_statuses(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_envelope([]))
+    await call_tool(server, "search_tickets", {"unassigned_only": True, "unread_only": True})
+    assert [r.path for r in mock_gorelo.requests] == [LIST]
+
+
+def open_statuses(count):
+    return [status_row(100 + n, f"Open {n}", 2) for n in range(count)]
+
+
+UNUSABLE_STATUSES = [
+    pytest.param([status_row(1, "New", 1), {"Id": 2, "Name": "No base"}], "a status row has no BaseStatus Id that is a whole number", id="missing-base-status"),
+    pytest.param([status_row(1, "New", 1), status_row(2, "Odd", 2, BaseStatus=None)], "a status row has no BaseStatus Id that is a whole number", id="null-base-status"),
+    pytest.param([status_row(1, "New", 1), status_row(2, "Odd", 2, BaseStatus=2)], "a status row has no BaseStatus Id that is a whole number", id="base-status-is-a-bare-number"),
+    pytest.param([status_row(1, "New", 1), status_row(2, "Odd", 2, BaseStatus={"Id": True, "Name": "x"})], "a status row has no BaseStatus Id that is a whole number", id="base-status-id-is-a-bool"),
+    pytest.param([status_row(1, "New", 1), status_row(2, "Odd", 2, BaseStatus={"Id": "2"})], "a status row has no BaseStatus Id that is a whole number", id="base-status-id-is-text"),
+    pytest.param([status_row(1, "New", 1), status_row(2, "Odd", 2, BaseStatus={"Id": 2.0})], "a status row has no BaseStatus Id that is a whole number", id="base-status-id-is-a-decimal"),
+    pytest.param([status_row(1, "New", 1), "not a status"], "a status row has no BaseStatus Id that is a whole number", id="row-not-an-object"),
+    pytest.param([status_row(None, "Idless", 2)], "a status row has no usable Id", id="kept-row-without-id"),
+    pytest.param([status_row(True, "Boolean id", 2)], "a status row has no usable Id", id="kept-row-with-a-bool-id"),
+    pytest.param([status_row(0, "Zero id", 2)], "a status row has no usable Id", id="kept-row-with-id-zero"),
+    pytest.param([status_row(4, "Closed", 4), status_row(5, "Done", 4)], "no status would remain", id="every-status-is-closed"),
+    pytest.param([], "no status would remain", id="no-status-at-all"),
+    pytest.param(open_statuses(101), "101 statuses remain and one filter takes at most 100 ids", id="more-ids-than-one-filter-takes"),
+]
+
+
+@pytest.mark.parametrize("statuses, why", UNUSABLE_STATUSES)
+async def test_search_tickets_exclude_closed_does_not_narrow_when_the_statuses_cannot_be_used_and_says_so(server, mock_gorelo, statuses, why):
+    lookups(mock_gorelo, statuses=statuses)
+    mock_gorelo.on("GET", LIST, paged_envelope(mixed_rows()))
+    result = await call_tool(server, "search_tickets", {"exclude_closed": True})
+    assert mock_gorelo.calls("GET", LIST)[0].query == {"PageSize": "200"}  # the old behaviour: no StatusIds
+    assert result["filters"] == {"exclude_closed": True, "limit": 50}
+    assert result["note"] == (
+        f"exclude_closed did not narrow the search by status ({why}), so every status was read and only the ClosedOn "
+        "check applied"
+    )
+    assert ids_of(result) == [uid(1), uid(2), uid(5)]  # the ClosedOn check still drops the closed ones
+
+
+async def test_search_tickets_exclude_closed_narrows_to_exactly_the_most_ids_one_filter_takes(server, mock_gorelo):
+    lookups(mock_gorelo, statuses=[status_row(4, "Closed", 4), *open_statuses(100)])
+    mock_gorelo.on("GET", LIST, paged_envelope([]))
+    result = await call_tool(server, "search_tickets", {"exclude_closed": True})
+    assert mock_gorelo.last.query["StatusIds"] == ",".join(str(100 + n) for n in range(100))
+    assert len(result["filters"]["exclude_closed_status_ids"]) == 100 and "note" not in result
+
+
+async def test_search_tickets_exclude_closed_reports_a_failing_status_read_and_never_scans(server, mock_gorelo):
+    mock_gorelo.on("GET", STATUSES_PATH, error_envelope(500, [("070001", "Internal error")], trace_id="00-s-5"))
+    text = await call_tool_error(server, "search_tickets", {"exclude_closed": True})
+    assert text.startswith("Gorelo rejected search_tickets (HTTP 500, code 070001): Internal error")
+    assert not mock_gorelo.calls("GET", LIST)
+
+
+async def test_search_tickets_exclude_closed_refuses_a_status_list_that_is_not_a_list(server, mock_gorelo):
+    mock_gorelo.on("GET", STATUSES_PATH, envelope({"Id": 1}))
+    text = await call_tool_error(server, "search_tickets", {"exclude_closed": True})
+    assert "expected Data to be a list" in text and not mock_gorelo.calls("GET", LIST)
+
+
+async def test_search_tickets_exclude_closed_notes_join_the_other_notes_of_the_result(server, mock_gorelo):
+    lookups(mock_gorelo, statuses=[status_row(4, "Closed", 4)])
+    mock_gorelo.on("GET", LIST, paged_responder(pages_of(3, 2)))
+    result = await call_tool(server, "search_tickets", {"exclude_closed": True, "limit": 1})
+    assert result["note"].startswith("exclude_closed did not narrow the search by status (no status would remain)")
+    assert "; the scan stopped early after 3 tickets because more than 1 matched" in result["note"]
+
+
+async def test_search_tickets_exclude_closed_stops_early_on_the_rows_that_have_no_close_time(server, mock_gorelo):
+    lookups(mock_gorelo)
+    pages = [
+        [ticket_row(1, ClosedOn="2026-09-01T00:00:00Z"), ticket_row(2, ClosedOn="2026-09-01T00:00:00Z"), ticket_row(3)],
+        [ticket_row(4), ticket_row(5), ticket_row(6)],
+        [ticket_row(7)],
+    ]
+    mock_gorelo.on("GET", LIST, paged_responder(pages))
+    result = await call_tool(server, "search_tickets", {"exclude_closed": True, "limit": 2})
+    assert len(mock_gorelo.calls("GET", LIST)) == 2  # 1 open ticket after page 1, 4 after page 2
+    assert ids_of(result) == [uid(3), uid(4)] and (result["matched"], result["scanned"]) == (4, 6)
+    assert result["stopped_early"] is True
+
+
+# --------------------------------------------------------------------------
+# view: "summary" on list_tickets and search_tickets
+# --------------------------------------------------------------------------
+
+SUMMARY_FIELDS = [
+    "Id", "Number", "DisplayNumber", "Title", "ClientId", "Status", "Priority", "Type", "LeadAssigneeId", "ContactId",
+    "CreatedOn", "UpdatedOn", "ClosedOn", "IsWaitingOnThem", "IsUnread",
+]
+
+
+def test_the_summary_fields_are_the_documented_ones_and_all_are_in_the_spec_model(spec_index):
+    assert list(tickets.TICKET_SUMMARY_FIELDS) == SUMMARY_FIELDS
+    assert set(SUMMARY_FIELDS) <= set(spec_index.schema("TicketListItemModel")["fields"])
+
+
+async def test_the_view_parameter_is_full_or_summary_in_that_order_with_full_as_the_default(server):
+    props = {tool.name: tool.inputSchema["properties"] for tool in await list_tools(server) if tool.name in ("list_tickets", "search_tickets")}
+    for name in ("list_tickets", "search_tickets"):
+        view = props[name]["view"]
+        assert view["enum"] == ["full", "summary"] and view["default"] == "full" and view["type"] == "string", name
+        assert view["description"].startswith("summary: only Id, Number, DisplayNumber, Title, ClientId, Status")
+        assert view["description"].endswith("IsUnread. full: every field")
+
+
+@pytest.mark.parametrize("tool", ["list_tickets", "search_tickets"])
+@pytest.mark.parametrize("bad", ["brief", "", "Summary", None, True, 1])
+async def test_a_view_that_is_not_full_or_summary_is_refused_before_any_http_call(server, mock_gorelo, tool, bad):
+    text = await call_tool_error(server, tool, {"view": bad})
+    assert "view" in text and mock_gorelo.requests == []
+
+
+async def test_list_tickets_view_summary_keeps_only_the_summary_fields_in_the_documented_order(server, mock_gorelo):
+    rows = [ticket_row(1, ContactId=9301, LeadAssigneeId=9201), ticket_row(2, ClosedOn="2026-09-30T10:00:00Z")]
+    mock_gorelo.on("GET", LIST, paged_envelope(rows, next_cursor="c9", total_count=40))
+    result = await call_tool(server, "list_tickets", {"view": "summary", "page_size": 2})
+    assert [list(row) for row in result["items"]] == [SUMMARY_FIELDS, SUMMARY_FIELDS]
+    assert result["items"][0] == {name: rows[0][name] for name in SUMMARY_FIELDS}
+    assert result["items"][1]["ClosedOn"] == "2026-09-30T10:00:00Z" and result["items"][0]["ContactId"] == 9301
+    assert (result["count"], result["total_count"], result["has_more"], result["next_cursor"], result["page_size"]) == (2, 40, True, "c9", 2)
+    assert result["filters"] == {"view": "summary"}
+    assert mock_gorelo.last.query == {"PageSize": "2"}  # the view is never sent to Gorelo
+
+
+async def test_list_tickets_view_full_is_the_default_and_leaves_the_rows_and_filters_alone(server, mock_gorelo):
+    rows = [ticket_row(1)]
+    mock_gorelo.on("GET", LIST, paged_envelope(rows))
+    default = await call_tool(server, "list_tickets")
+    explicit = await call_tool(server, "list_tickets", {"view": "full"})
+    assert default == explicit and default["items"] == rows and default["filters"] == {}
+
+
+async def test_list_tickets_view_summary_shows_the_other_filters_next_to_view(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_envelope([ticket_row(1)]))
+    result = await call_tool(server, "list_tickets", {"view": "summary", "client_ids": [9102]})
+    assert result["filters"] == {"client_ids": [9102], "view": "summary"}
+
+
+async def test_view_summary_leaves_out_a_field_the_row_does_not_have_and_keeps_a_null(server, mock_gorelo):
+    row = ticket_row(1, ContactId=None)
+    del row["UpdatedOn"]
+    mock_gorelo.on("GET", LIST, paged_envelope([row]))
+    for tool in ("list_tickets", "search_tickets"):
+        item = (await call_tool(server, tool, {"view": "summary"}))["items"][0]
+        assert "UpdatedOn" not in item and item["ContactId"] is None and item["ClosedOn"] is None, tool
+        assert list(item) == [name for name in SUMMARY_FIELDS if name != "UpdatedOn"], tool
+
+
+async def test_list_tickets_view_summary_refuses_a_row_that_is_not_an_object(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_envelope(["not a ticket"]))
+    text = await call_tool_error(server, "list_tickets", {"view": "summary"})
+    assert text.startswith("Gorelo returned an unexpected response for list_tickets: GET /v1/tickets: row 0 is")
+    assert "not an object" in text
+
+
+async def test_search_tickets_view_summary_applies_to_the_rows_returned_after_the_filters_and_the_limit(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_envelope(mixed_rows()))
+    result = await call_tool(server, "search_tickets", {"view": "summary", "unread_only": True, "limit": 2})
+    assert [row["Id"] for row in result["items"]] == [uid(1), uid(4)]
+    assert all(list(row) == SUMMARY_FIELDS for row in result["items"])
+    assert (result["matched"], result["scanned"], result["count"], result["truncated"]) == (3, 5, 2, True)
+    assert result["filters"] == {"unread_only": True, "limit": 2, "view": "summary"}
+    assert "note" in result and result["stopped_early"] is False
+
+
+async def test_search_tickets_view_full_adds_nothing_to_the_filters(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_envelope([ticket_row(1)]))
+    result = await call_tool(server, "search_tickets", {"view": "full"})
+    assert result["filters"] == {"limit": 50} and result["items"] == [ticket_row(1)]
+
+
+async def test_search_tickets_view_summary_refuses_a_row_that_is_not_an_object(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_envelope(["not a ticket"]))
+    text = await call_tool_error(server, "search_tickets", {"view": "summary"})
+    assert "row 0 is" in text and "not an object" in text
 
 
 # --------------------------------------------------------------------------
@@ -1843,7 +2409,7 @@ async def test_get_ticket_reaching_the_end_of_the_pages_without_a_match_is_no_ma
 
 
 async def test_get_ticket_stopping_at_the_page_limit_is_called_inconclusive_not_no_match(server, mock_gorelo, monkeypatch):
-    monkeypatch.setattr(tickets, "LOOKUP_MAX_PAGES", 2)
+    monkeypatch.setattr(ticket_ref, "LOOKUP_MAX_PAGES", 2)
     pages = [[ticket_row(n, Number=100 + n, DisplayNumber=f"TCK-{100 + n}")] for n in range(1, 5)]
     mock_gorelo.on("GET", LIST, paged_responder(pages))
     text = await call_tool_error(server, "get_ticket", {"ticket_id": "9"})
@@ -1856,7 +2422,7 @@ async def test_get_ticket_stopping_at_the_page_limit_is_called_inconclusive_not_
 
 
 def test_get_ticket_the_lookup_walk_is_bounded_by_default():
-    assert tickets.LOOKUP_PAGE_SIZE == 50 and 10 <= tickets.LOOKUP_MAX_PAGES <= 100
+    assert ticket_ref.LOOKUP_PAGE_SIZE == 50 and 10 <= ticket_ref.LOOKUP_MAX_PAGES <= 100
 
 
 async def test_get_ticket_a_repeated_cursor_in_the_lookup_is_an_error(server, mock_gorelo):
@@ -2754,10 +3320,10 @@ async def test_update_ticket_sends_the_canonical_guid_in_the_path_and_the_reread
 
 
 @pytest.mark.parametrize("given", [f"  {T1}  ", f"{T1}\n", f" {T1}"])
-async def test_update_ticket_does_not_trim_a_padded_guid(server, mock_gorelo, given):
-    text = await call_tool_error(server, "update_ticket", {"ticket_id": given, "title": "x"})
-    assert text.startswith(f"ticket_id: {NOT_A_GUID}; for a ticket number or display number")
-    assert mock_gorelo.requests == []
+async def test_update_ticket_trims_a_padded_guid_like_get_ticket_and_makes_no_lookup(server, mock_gorelo, given):
+    updated(mock_gorelo)
+    await call_tool(server, "update_ticket", {"ticket_id": given, "title": "x"})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("PATCH", f"{LIST}/{T1}"), ("GET", f"{LIST}/{T1}")]
 
 
 @pytest.mark.parametrize(
@@ -2888,18 +3454,162 @@ async def test_update_ticket_the_two_stamp_fields_are_fine_next_to_a_real_change
     assert mock_gorelo.calls("PATCH")[0].json == {"StatusId": 2, "UpdatedOn": "2020-01-01T00:00:00Z", "UpdatedByName": "Bot"}
 
 
-@pytest.mark.parametrize("given", ["1234", "TCK-1234", "", "   ", "not-a-guid", "3f2b8c1e-0d4a-4b7e-9a51", f"{T1}/comments", f"{T1}%2F.."])
-async def test_update_ticket_ticket_id_must_be_a_guid_and_the_error_points_to_get_ticket(server, mock_gorelo, given):
+@pytest.mark.parametrize("given", ["1234", 1234, "  1234 "])
+async def test_update_ticket_with_a_number_looks_it_up_with_query_then_patches_the_ticket_it_found(server, mock_gorelo, given):
+    rows = [
+        ticket_row(1, Number=11234, DisplayNumber="TCK-11234", Title="Printer 1234 offline"),
+        ticket_row(2, Number=1234, DisplayNumber="TCK-1234"),
+    ]
+    mock_gorelo.on("GET", LIST, paged_envelope(rows), query={"Query": "1234"})
+    updated(mock_gorelo, ticket=T2, n=2)
+    result = await call_tool(server, "update_ticket", {"ticket_id": given, "title": "New"})
+    assert result == ticket_detail(2)
+    lookup, patch, read = mock_gorelo.requests
+    assert (lookup.method, lookup.path, lookup.query) == ("GET", LIST, {"Query": "1234", "PageSize": "50"})
+    assert (patch.method, patch.path, patch.json) == ("PATCH", f"{LIST}/{T2}", {"Title": "New"})
+    assert (read.method, read.path) == ("GET", f"{LIST}/{T2}")
+
+
+@pytest.mark.parametrize("given", ["TCK-1234", "tck-1234", " Tck-1234 "])
+async def test_update_ticket_with_a_display_number_matches_it_case_insensitively(server, mock_gorelo, given):
+    rows = [ticket_row(1, Number=1233, DisplayNumber="TCK-1233"), ticket_row(2, Number=1234, DisplayNumber="TCK-1234")]
+    mock_gorelo.on("GET", LIST, paged_envelope(rows))
+    updated(mock_gorelo, ticket=T2, n=2)
+    await call_tool(server, "update_ticket", {"ticket_id": given, "status_id": 3})
+    assert mock_gorelo.calls("GET", LIST)[0].query == {"Query": given.strip(), "PageSize": "50"}
+    assert mock_gorelo.calls("PATCH")[0].path == f"{LIST}/{T2}"
+
+
+async def test_update_ticket_a_number_with_a_partial_billing_override_reads_the_found_ticket_before_the_write(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_envelope([ticket_row(2, Number=1234, DisplayNumber="TCK-1234")]))
+    updated(mock_gorelo, ticket=T2, n=2)
+    await call_tool(server, "update_ticket", {"ticket_id": "TCK-1234", "billing_role_id": 22})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [
+        ("GET", LIST), ("GET", f"{LIST}/{T2}"), ("PATCH", f"{LIST}/{T2}"), ("GET", f"{LIST}/{T2}"),
+    ]
+
+
+async def test_update_ticket_no_match_is_an_error_that_names_ticket_id_and_nothing_is_written(server, mock_gorelo):
+    rows = [ticket_row(1, Number=11234, DisplayNumber="TCK-11234"), ticket_row(2, Number=1235, DisplayNumber="TCK-1235")]
+    mock_gorelo.on("GET", LIST, paged_envelope(rows))
+    text = await call_tool_error(server, "update_ticket", {"ticket_id": "1234", "title": "x"})
+    assert text.startswith("ticket_id: no ticket has the number or display number '1234'")
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [("GET", LIST)]
+
+
+async def test_update_ticket_several_matches_is_an_error_and_nothing_is_written(server, mock_gorelo):
+    rows = [ticket_row(1, Number=1234, DisplayNumber="TCK-1234"), ticket_row(2, Number=7, DisplayNumber="1234")]
+    mock_gorelo.on("GET", LIST, paged_envelope(rows))
+    text = await call_tool_error(server, "update_ticket", {"ticket_id": "1234", "title": "x"})
+    assert text == (
+        f"ticket_id: '1234' matches several tickets: TCK-1234 (Id {T1}); 1234 (Id {T2}). "
+        "Pass the ticket GUID of the one you mean"
+    )
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_update_ticket_an_inconclusive_lookup_stops_before_any_write(server, mock_gorelo, monkeypatch):
+    monkeypatch.setattr(ticket_ref, "LOOKUP_MAX_PAGES", 2)
+    pages = [[ticket_row(n, Number=50 + n, DisplayNumber=f"TCK-{50 + n}")] for n in range(1, 4)]
+    mock_gorelo.on("GET", LIST, paged_responder(pages))
+    text = await call_tool_error(server, "update_ticket", {"ticket_id": "TCK-1234", "title": "x"})
+    assert "was not found in the first 2 of 3 tickets" in text and "inconclusive" in text
+    assert [r.method for r in mock_gorelo.requests] == ["GET", "GET"]
+
+
+async def test_update_ticket_a_failing_lookup_is_reported_by_update_ticket_and_nothing_is_written(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, error_envelope(500, [("070001", "Internal error")], trace_id="00-l-5"))
+    text = await call_tool_error(server, "update_ticket", {"ticket_id": "1234", "title": "x"})
+    assert text.startswith("Gorelo rejected update_ticket (HTTP 500, code 070001): Internal error")
+    assert [r.method for r in mock_gorelo.requests] == ["GET"]
+
+
+async def test_update_ticket_maps_a_gorelo_error_on_the_lookup_filter_to_ticket_id(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, error_envelope(400, [("070101", "rejected", "Query")]))
+    text = await call_tool_error(server, "update_ticket", {"ticket_id": "1234", "title": "x"})
+    assert "ticket_id: rejected" in text and not mock_gorelo.calls("PATCH")
+
+
+@pytest.mark.parametrize(
+    "given, fragment",
+    [
+        ("", "ticket_id: must not be empty; give a ticket GUID, a number such as 1234 or a display number such as TCK-1234"),
+        ("   ", "ticket_id: must not be empty"),
+        ("T" * 201, "ticket_id: at most 200 characters, got 201"),
+        (0, "ticket_id: expected a positive whole number such as 123"),
+        (-5, "ticket_id: expected a positive whole number such as 123"),
+    ],
+)
+async def test_update_ticket_a_ticket_id_that_cannot_be_a_reference_is_refused_without_any_http_call(server, mock_gorelo, given, fragment):
     text = await call_tool_error(server, "update_ticket", {"ticket_id": given, "title": "x"})
-    assert text.startswith("ticket_id: expected a GUID such as 3f2b8c1e-0d4a-4b7e-9a51-2c6d8e9f0a1b, got ")
-    assert "call get_ticket first and pass its Id" in text
+    assert fragment in text
     assert mock_gorelo.requests == []
 
 
-async def test_update_ticket_checks_ticket_id_before_anything_else(server, mock_gorelo):
+async def test_update_ticket_a_guid_with_other_local_errors_is_refused_with_no_request_at_all(server, mock_gorelo):
+    text = await call_tool_error(server, "update_ticket", {"ticket_id": T1})
+    assert text.startswith("update_ticket: nothing to change")
+    assert mock_gorelo.requests == []
+
+
+LOCAL_REFUSALS = [
+    pytest.param({}, "update_ticket: nothing to change", id="nothing-to-change"),
+    pytest.param({"updated_on": "2020-01-01T00:00:00Z"}, "update_ticket: nothing to change", id="only-a-stamp"),
+    pytest.param({"closed_on": "2026-09-30T12:00:00"}, "closed_on: '2026-09-30T12:00:00' has no UTC offset", id="naive-closed-on"),
+    pytest.param({"closed_on": "2099-01-01T00:00:00Z"}, "closed_on: 2099-01-01T00:00:00Z is in the future", id="future-closed-on"),
+    pytest.param({"clear_fields": ["status_id"]}, "clear_fields.0", id="bad-clear-field"),  # the Literal of the schema refuses it first
+    pytest.param({"clear_fields": []}, "clear_fields", id="empty-clear-fields"),
+    pytest.param({"tag_ids": []}, "tag_ids: an empty list is not accepted here", id="empty-list-without-clear"),
+    pytest.param({"status_id": 0}, f"status_id: {NOT_POSITIVE}", id="bad-status-id"),
+    pytest.param({"group_ids": [7201, 0]}, f"group_ids[1]: {NOT_POSITIVE}", id="bad-group-id"),
+    pytest.param({"agent_asset_ids": ["nope"]}, f"agent_asset_ids[0]: {NOT_A_GUID}", id="bad-guid-list"),
+    pytest.param({"priority_id": 9}, "priority_id: must be one of 0 None", id="bad-priority"),
+    pytest.param({"billable_status_id": 4, "billing_role_id": 2}, "billable_status_id: must be one of 1 Billable", id="bad-billing-part"),
+]
+
+
+@pytest.mark.parametrize("given", ["1234", 1234, "TCK-1234"])
+@pytest.mark.parametrize("extra, fragment", LOCAL_REFUSALS)
+async def test_update_ticket_refuses_locally_before_it_looks_a_number_up(server, mock_gorelo, given, extra, fragment):
+    # a refusal that needs no Gorelo answer must not first spend up to 20 lookup requests of the key-wide rate limit
+    mock_gorelo.on("GET", LIST, paged_envelope([ticket_row(2, Number=1234, DisplayNumber="TCK-1234")]))
+    text = await call_tool_error(server, "update_ticket", {"ticket_id": given, **extra})
+    assert fragment in text
+    assert mock_gorelo.requests == []
+
+
+MALFORMED_GUIDS = [
+    pytest.param(T1[:-1], id="one-character-short"),
+    pytest.param(T1.replace("-", "")[:-1], id="bare-one-character-short"),
+    pytest.param("{" + T1 + "}", id="braces"),
+    pytest.param("urn:uuid:" + T1, id="urn-prefix"),
+    pytest.param(T1 + "0", id="one-character-long"),
+]
+
+
+@pytest.mark.parametrize("given", MALFORMED_GUIDS)
+async def test_get_ticket_and_update_ticket_refuse_a_malformed_guid_instead_of_searching_it_as_a_number(server, mock_gorelo, given):
+    for tool, extra in (("get_ticket", {}), ("update_ticket", {"title": "x"})):
+        text = await call_tool_error(server, tool, {"ticket_id": given, **extra})
+        assert text.startswith("ticket_id: the ticket GUID is malformed (it must look like ") and given not in text
+    assert mock_gorelo.requests == []
+
+
+async def test_update_ticket_with_a_number_and_nothing_to_change_sends_no_request_at_all(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_envelope([ticket_row(2, Number=1234, DisplayNumber="TCK-1234")]))
     text = await call_tool_error(server, "update_ticket", {"ticket_id": "1234"})
-    assert text.startswith("ticket_id: expected a GUID")
+    assert text.startswith("update_ticket: nothing to change")
     assert mock_gorelo.requests == []
+
+
+async def test_update_ticket_looks_a_number_up_only_after_every_local_check_and_then_writes(server, mock_gorelo):
+    mock_gorelo.on("GET", LIST, paged_envelope([ticket_row(2, Number=1234, DisplayNumber="TCK-1234")]))
+    updated(mock_gorelo, ticket=T2, n=2)
+    await call_tool(server, "update_ticket", {"ticket_id": "1234", "title": "New", "tag_ids": [5]})
+    assert [(r.method, r.path) for r in mock_gorelo.requests] == [
+        ("GET", LIST), ("PATCH", f"{LIST}/{T2}"), ("GET", f"{LIST}/{T2}"),
+    ]
+    assert mock_gorelo.calls("PATCH")[0].json == {"Title": "New", "TagIds": [5]}
 
 
 UPDATE_VALIDATION = [
@@ -3117,7 +3827,7 @@ async def test_an_explicit_null_means_not_given_for_every_optional_parameter(ser
     mock_gorelo.on("GET", f"{LIST}/{uid(5)}", envelope(ticket_detail(5)))
     mock_gorelo.on("PATCH", f"{LIST}/{T1}", envelope({"Id": T1}))
     mock_gorelo.on("GET", f"{LIST}/{T1}", envelope(ticket_detail(1)))
-    listing = {name: None for name in EXPECTED_PARAMS["list_tickets"] if name != "page_size"}
+    listing = {name: None for name in EXPECTED_PARAMS["list_tickets"] if name not in ("page_size", "view")}  # view is a plain choice, not nullable
     await call_tool(server, "list_tickets", listing)
     assert mock_gorelo.last.query == {"PageSize": "50"}
     searching = {name: None for name in ("client_id", "status", "priority", "type", "query", "updated_since", "created_since", "awaiting_client")}
@@ -3174,10 +3884,10 @@ async def test_every_tool_only_sends_operations_it_declared(server, mock_gorelo)
     mock_gorelo.on("PATCH", f"{LIST}/{T2}", envelope({"Id": T2}))
     calls = {
         "list_tickets": {},
-        "search_tickets": {"status": "New", "type": "Incident"},
+        "search_tickets": {"type": "Incident", "exclude_closed": True},
         "get_ticket": {"ticket_id": "1234"},
         "create_ticket": CREATE_MIN,
-        "update_ticket": {"ticket_id": T2, "title": "x"},
+        "update_ticket": {"ticket_id": "1234", "title": "x"},
         "list_ticket_statuses": {},
         "list_ticket_types": {},
         "list_ticket_tags": {},
@@ -3208,8 +3918,11 @@ def test_the_module_never_hardcodes_tenant_ids():
 
 
 def test_the_module_uses_the_shared_helpers_and_keeps_no_private_copies():
-    for name in ("positive_id", "positive_ids", "guid", "guids", "created_id", "expect_object", "describe_value", "StrictId", "StrictBool"):
+    for name in ("positive_id", "positive_ids", "guids", "created_id", "expect_object", "describe_value", "StrictId", "StrictBool", "summary_rows", "FILTER_IDS_MAX"):
         assert getattr(tickets, name) is getattr(common, name), name
+    assert tickets.resolve_ticket_id is ticket_ref.resolve_ticket_id and tickets.TICKET_LIST_OP is ticket_ref.TICKET_LIST_OP
+    for private in ("_ticket_reference", "_find_ticket_id", "_is_reference_match"):
+        assert not hasattr(tickets, private), private
     for private in ("_positive_id", "_opt_id", "_filter_ids", "_priority_filter_ids", "_uuid_text", "_ticket_guid", "_shown", "_UUID_TEXT", "_write_list"):
         assert not hasattr(tickets, private), private
 
@@ -3262,10 +3975,13 @@ SCALAR_ID_PARAMS = {
 }
 LIST_ID_PARAMS = {
     "list_tickets": ["status_ids", "client_ids", "priority_ids", "type_ids", "lead_assignee_ids", "contact_ids", "tag_ids", "group_ids"],
+    "search_tickets": ["lead_assignee_ids", "contact_ids", "tag_ids", "group_ids", "source_ids"],
     "create_ticket": ["cc_contact_ids", "assisting_assignee_ids", "watcher_ids", "tag_ids"],
     "update_ticket": ["cc_contact_ids", "group_ids", "assisting_assignee_ids", "watcher_ids", "tag_ids"],
 }
-TEXT_OR_ID_PARAMS = {"search_tickets": ["status", "priority", "type"], "get_ticket": ["ticket_id"]}
+TEXT_OR_ID_PARAMS = {
+    "search_tickets": ["status", "priority", "type"], "get_ticket": ["ticket_id"], "update_ticket": ["ticket_id"],
+}
 BASE_ARGS = {
     "list_tickets": {}, "search_tickets": {}, "get_ticket": {}, "create_ticket": CREATE_MIN,
     "update_ticket": {"ticket_id": T1, "title": "x"},
@@ -3351,7 +4067,7 @@ NEUTRAL_TEXT_NUMBERS = {
     "080203",  # Gorelo notification code for a missing scope (public error code, not a tenant value)
     "070208",  # Gorelo notification code of a record type the key cannot read (list_deletions; a public error code, not a tenant value)
     "070101",  # example Gorelo notification code in a docstring
-    "100", "200", "250", "255", "500", "5000", "10485760", "65535",  # limits and sizes
+    "100", "200", "250", "255", "500", "2000", "3650", "5000", "10485760", "65535",  # limits and sizes
     "400", "403", "404", "405", "409", "429",  # HTTP status codes
     "123", "456",  # the neutral id examples ("such as 123", "[123, 456]")
     "1042",  # INV-1042 example invoice number
@@ -3445,20 +4161,23 @@ def test_the_helpers_still_refuse_what_strict_typing_already_stops_before_the_to
     with pytest.raises(ValueError, match="priority_ids: expected a non-empty list of ids, got a string"):
         tickets._each("priority_ids", "2", tickets._priority_id)
     with pytest.raises(ValueError, match="ticket_id: expected a positive whole number such as 123, got zero or a negative number"):
-        tickets._ticket_reference(0)
+        ticket_ref._ticket_reference("ticket_id", 0)
     with pytest.raises(ValueError, match="ticket_id: must not be empty"):
-        tickets._ticket_reference(True)
-    assert tickets._ticket_reference(" TCK-1234 ") == "TCK-1234" and tickets._ticket_reference(1234) == "1234"
+        ticket_ref._ticket_reference("ticket_id", True)
+    assert ticket_ref._ticket_reference("ticket_id", " TCK-1234 ") == "TCK-1234"
+    assert ticket_ref._ticket_reference("ticket_id", 1234) == "1234"
 
 
-DESCRIPTION_LIMITS = {"update_ticket": 900, "list_tickets": 850}  # every other tool: 700 characters (list_tickets: the Sla fields of contract b0850edb962d)
-PARAM_LIMIT = 160
+DESCRIPTION_LIMITS = {"update_ticket": 900, "list_tickets": 850, "search_tickets": 900}  # every other tool: 700 characters (list_tickets: the Sla fields of contract b0850edb962d; search_tickets: the early stop and the narrowing of exclude_closed, 1.7.0)
+PARAM_LIMIT = 190  # the view parameter names the fifteen fields of the summary (185 characters); every other text is under 160
 # The size measure (json.dumps of each tool as a client lists it, summed). The advertised
 # schemas are compacted centrally (server.compact_input_schema: no null branches, no "default": null), so what the
 # module still controls is its descriptions. Measured 18314 bytes in 1.5.0 (16150 in 1.3.0; 1.5.0 added source_ids,
 # closed_since and closed_before to the two searches, source_id to update_ticket and the live priority and source
 # reads) with every statement kept; the limit is that plus 10 percent, rounded up to the next 100.
-MODULE_BYTES_LIMIT = 20200
+# Measured 21337 bytes in 1.7.0 (seven more filters and the view parameter on search_tickets, view on list_tickets, the early stop
+# and exclude_closed texts, the lookup wording of update_ticket); the limit is that plus 10 percent, rounded up to the next 100.
+MODULE_BYTES_LIMIT = 23500
 
 
 async def test_the_tool_list_keeps_to_the_concision_limits(server):
